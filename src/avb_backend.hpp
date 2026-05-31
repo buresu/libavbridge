@@ -1,6 +1,6 @@
 #pragma once
 
-#include "avbridge/avb.h"
+#include "avbridge.h"
 
 class AvbBackend {
 public:

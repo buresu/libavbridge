@@ -106,7 +106,7 @@ endif()
 set_target_properties(avbridge PROPERTIES
     VERSION ${PROJECT_VERSION}
     SOVERSION ${PROJECT_VERSION_MAJOR}
-    PUBLIC_HEADER include/avbridge/avb.h
+    PUBLIC_HEADER include/avbridge.h
 )
 
 if(UNIX AND NOT APPLE)

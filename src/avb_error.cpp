@@ -1,4 +1,4 @@
-#include "avbridge/avb.h"
+#include "avbridge.h"
 
 const char *avb_result_to_string(avb_result result) {
     switch (result) {

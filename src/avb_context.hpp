@@ -1,6 +1,6 @@
 #pragma once
 
-#include "avbridge/avb.h"
+#include "avbridge.h"
 #include "avb_backend.hpp"
 #include <memory>
 #include <string>
