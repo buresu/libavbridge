@@ -1,4 +1,4 @@
-#include "avb_backend_avfoundation.hpp"
+#include "avb_backend_avfoundation.hh"
 
 #ifdef __APPLE__
 

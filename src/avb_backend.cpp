@@ -9,7 +9,7 @@
 #endif
 
 #if defined(AVB_ENABLE_AVFOUNDATION)
-#include "backends/avfoundation/avb_backend_avfoundation.hpp"
+#include "backends/avfoundation/avb_backend_avfoundation.hh"
 #endif
 
 AvbBackend *avb_create_backend(avb_backend backend) {
