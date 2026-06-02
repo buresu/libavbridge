@@ -10,6 +10,24 @@
 #include <cstring>
 #include <vector>
 
+// Synchronously load the tracks of a given media type. AVFoundation deprecated
+// the synchronous -tracksWithMediaType: accessor in macOS 15 in favour of the
+// async loadTracksWithMediaType:completionHandler:; since this backend exposes a
+// synchronous C API we bridge back to a blocking call with a semaphore. The
+// completion handler is delivered on an internal AVFoundation queue (never the
+// calling thread), so waiting here does not deadlock.
+static NSArray<AVAssetTrack *> *avb_load_tracks(AVAsset *asset, AVMediaType type) {
+    __block NSArray<AVAssetTrack *> *result = nil;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    [asset loadTracksWithMediaType:type
+                 completionHandler:^(NSArray<AVAssetTrack *> *tracks, NSError *error) {
+        if (!error) result = tracks;
+        dispatch_semaphore_signal(sem);
+    }];
+    dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+    return result;
+}
+
 struct AvbBackendAVFoundation::Impl {
     AVAsset *asset = nil;
     AVAssetReader *reader = nil;
@@ -73,7 +91,7 @@ avb_result AvbBackendAVFoundation::open_file(const char *path, const avb_open_op
         // Audio track
         if (options.enable_audio) {
             NSArray<AVAssetTrack *> *audio_tracks =
-                [m_impl->asset tracksWithMediaType:AVMediaTypeAudio];
+                avb_load_tracks(m_impl->asset, AVMediaTypeAudio);
             if (audio_tracks.count > 0) {
                 AVAssetTrack *track = audio_tracks[0];
 
@@ -109,7 +127,7 @@ avb_result AvbBackendAVFoundation::open_file(const char *path, const avb_open_op
         // Video track
         if (options.enable_video) {
             NSArray<AVAssetTrack *> *video_tracks =
-                [m_impl->asset tracksWithMediaType:AVMediaTypeVideo];
+                avb_load_tracks(m_impl->asset, AVMediaTypeVideo);
             if (video_tracks.count > 0) {
                 AVAssetTrack *track = video_tracks[0];
 
@@ -191,13 +209,13 @@ avb_result AvbBackendAVFoundation::seek(double seconds) {
 
         CMTime start = CMTimeMakeWithSeconds(seconds, 600);
         CMTime dur   = CMTimeSubtract(m_impl->asset.duration, start);
-        if (CMTIME_IS_NEGATIVE(dur)) dur = kCMTimeZero;
+        if (CMTimeCompare(dur, kCMTimeZero) < 0) dur = kCMTimeZero;
         CMTimeRange range = CMTimeRangeMake(start, dur);
         m_impl->reader.timeRange = range;
 
         if (m_impl->audio_output) {
             AVAssetTrack *track =
-                [m_impl->asset tracksWithMediaType:AVMediaTypeAudio][0];
+                avb_load_tracks(m_impl->asset, AVMediaTypeAudio)[0];
             NSDictionary *settings = @{
                 AVFormatIDKey: @(kAudioFormatLinearPCM),
                 AVLinearPCMBitDepthKey: @32,
@@ -212,7 +230,7 @@ avb_result AvbBackendAVFoundation::seek(double seconds) {
 
         if (m_impl->video_output) {
             AVAssetTrack *track =
-                [m_impl->asset tracksWithMediaType:AVMediaTypeVideo][0];
+                avb_load_tracks(m_impl->asset, AVMediaTypeVideo)[0];
             NSDictionary *settings = @{
                 (NSString *)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
             };

@@ -42,6 +42,12 @@ if(AVB_ENABLE_AVFOUNDATION)
     list(APPEND AVB_SOURCES
         src/backends/avfoundation/avb_backend_avfoundation.mm
     )
+    # The Objective-C++ backend relies on ARC for memory management of the
+    # AVFoundation objects it retains across calls.
+    set_source_files_properties(
+        src/backends/avfoundation/avb_backend_avfoundation.mm
+        PROPERTIES COMPILE_OPTIONS "-fobjc-arc"
+    )
 endif()
 
 if(AVB_ENABLE_FFMPEG)
