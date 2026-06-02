@@ -31,6 +31,7 @@ struct AvbBackendMediaFoundation::Impl {
 
     avb_pixel_format video_avb_fmt = AVB_PIXEL_FORMAT_BGRA8;
     bool swizzle_rgba = false;    // request ARGB32 (BGRA), emit RGBA
+    bool video_is_nv12 = false;   // request NV12, emit two planes (Y + CbCr)
 
     double duration_sec = 0.0;
     double frame_rate   = 0.0;
@@ -42,6 +43,15 @@ struct AvbBackendMediaFoundation::Impl {
     int                        audio_buf_pos = 0;
     std::vector<unsigned char> video_frame_buf;
 
+    // After a seek, Media Foundation resumes at the nearest preceding keyframe
+    // and does not drop the pre-roll itself, so the first samples carry
+    // timestamps before the requested position. Track the target per stream and
+    // discard samples until each stream reaches it, matching the AVFoundation
+    // backend (which clamps via the reader's time range).
+    double seek_target_sec    = 0.0;
+    bool   video_seek_pending = false;
+    bool   audio_seek_pending = false;
+
     bool mf_initialized = false;
 
     void close_streams() {
@@ -51,12 +61,16 @@ struct AvbBackendMediaFoundation::Impl {
         video_bottom_up = false;
         video_avb_fmt = AVB_PIXEL_FORMAT_BGRA8;
         swizzle_rgba = false;
+        video_is_nv12 = false;
         duration_sec = frame_rate = 0.0;
         audio_codec_name.clear();
         video_codec_name.clear();
         audio_buf.clear();
         audio_buf_pos = 0;
         video_frame_buf.clear();
+        seek_target_sec    = 0.0;
+        video_seek_pending = false;
+        audio_seek_pending = false;
     }
 };
 
@@ -216,25 +230,28 @@ avb_result AvbBackendMediaFoundation::open_file(const char *path, const avb_open
     }
 
     if (found_video >= 0) {
-        // NV12 output is not implemented for this backend yet; the copy path
-        // below assumes a packed 32-bit format. Fail clearly rather than emit a
-        // malformed planar frame.
+        // Pick the output subtype the Video Processor MFT should convert to.
+        // NV12 is emitted as two planes (Y + interleaved CbCr); ARGB32 is a
+        // packed 32-bit BGRA buffer, optionally swizzled to RGBA after the copy.
+        GUID want_subtype;
         if (options.video_format == AVB_PIXEL_FORMAT_NV12) {
-            m_last_error = "NV12 output is not supported by the Media Foundation "
-                           "backend yet; use BGRA8 or RGBA8.";
-            m_impl->close_streams();
-            return AVB_ERROR_INVALID_ARGUMENT;
+            m_impl->video_avb_fmt = AVB_PIXEL_FORMAT_NV12;
+            m_impl->video_is_nv12 = true;
+            m_impl->swizzle_rgba  = false;
+            want_subtype          = MFVideoFormat_NV12;
+        } else {
+            m_impl->video_avb_fmt = (options.video_format == AVB_PIXEL_FORMAT_RGBA8)
+                ? AVB_PIXEL_FORMAT_RGBA8 : AVB_PIXEL_FORMAT_BGRA8;
+            m_impl->swizzle_rgba = (options.video_format == AVB_PIXEL_FORMAT_RGBA8);
+            // MFVideoFormat_ARGB32 = D3DFMT_A8R8G8B8; memory layout on LE is BGRA.
+            // RGBA8 is produced by swizzling this BGRA output after the copy.
+            want_subtype = MFVideoFormat_ARGB32;
         }
-        m_impl->video_avb_fmt = (options.video_format == AVB_PIXEL_FORMAT_RGBA8)
-            ? AVB_PIXEL_FORMAT_RGBA8 : AVB_PIXEL_FORMAT_BGRA8;
-        m_impl->swizzle_rgba = (options.video_format == AVB_PIXEL_FORMAT_RGBA8);
 
         ComPtr<IMFMediaType> want;
         MFCreateMediaType(&want);
         want->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-        // MFVideoFormat_ARGB32 = D3DFMT_A8R8G8B8; memory layout on LE is BGRA.
-        // RGBA8 is produced by swizzling this BGRA output after the copy.
-        want->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_ARGB32);
+        want->SetGUID(MF_MT_SUBTYPE, want_subtype);
 
         hr = m_impl->reader->SetCurrentMediaType((DWORD)found_video, nullptr, want.Get());
         if (SUCCEEDED(hr)) {
@@ -343,6 +360,11 @@ avb_result AvbBackendMediaFoundation::seek(double seconds) {
 
     m_impl->audio_buf.clear();
     m_impl->audio_buf_pos = 0;
+
+    // Arm pre-roll dropping for whichever streams are active.
+    m_impl->seek_target_sec    = seconds;
+    m_impl->video_seek_pending = (m_impl->video_stream_idx >= 0);
+    m_impl->audio_seek_pending = (m_impl->audio_stream_idx >= 0);
     return AVB_OK;
 }
 
@@ -379,6 +401,12 @@ int AvbBackendMediaFoundation::read_audio_f32(float *dst_interleaved, int frames
         if (FAILED(hr) || (flags & MF_SOURCE_READERF_ENDOFSTREAM)) break;
         if (!sample) continue;
 
+        // Drop pre-roll samples that precede a pending seek target.
+        if (m_impl->audio_seek_pending) {
+            if ((double)ts / 1e7 + 1e-6 < m_impl->seek_target_sec) continue;
+            m_impl->audio_seek_pending = false;
+        }
+
         ComPtr<IMFMediaBuffer> buf;
         sample->ConvertToContiguousBuffer(&buf);
         if (!buf) continue;
@@ -400,23 +428,118 @@ avb_result AvbBackendMediaFoundation::read_video_frame(avb_video_frame &out_fram
     if (!m_impl->reader || m_impl->video_stream_idx < 0)
         return AVB_ERROR_STREAM_NOT_FOUND;
 
-    DWORD flags = 0;
-    LONGLONG ts  = 0;
+    DWORD    flags = 0;
+    LONGLONG ts    = 0;
     ComPtr<IMFSample> sample;
-    HRESULT hr = m_impl->reader->ReadSample(
-        (DWORD)m_impl->video_stream_idx, 0, nullptr, &flags, &ts, &sample);
+    for (;;) {
+        flags = 0;
+        ts    = 0;
+        sample.Reset();
+        HRESULT hr = m_impl->reader->ReadSample(
+            (DWORD)m_impl->video_stream_idx, 0, nullptr, &flags, &ts, &sample);
 
-    if (FAILED(hr)) {
-        char buf[128];
-        snprintf(buf, sizeof(buf), "ReadSample (video) failed: 0x%08lx", hr);
-        m_last_error = buf;
-        return AVB_ERROR_DECODE_FAILED;
+        if (FAILED(hr)) {
+            char buf[128];
+            snprintf(buf, sizeof(buf), "ReadSample (video) failed: 0x%08lx", hr);
+            m_last_error = buf;
+            return AVB_ERROR_DECODE_FAILED;
+        }
+        if (flags & MF_SOURCE_READERF_ENDOFSTREAM) return AVB_ERROR_EOF;
+        if (!sample) {
+            // No sample this call (e.g. a stream tick). Keep reading while we are
+            // dropping seek pre-roll; otherwise preserve the decode-failed signal.
+            if (m_impl->video_seek_pending) continue;
+            return AVB_ERROR_DECODE_FAILED;
+        }
+
+        // Drop pre-roll frames that precede a pending seek target.
+        if (m_impl->video_seek_pending) {
+            if ((double)ts / 1e7 + 1e-6 < m_impl->seek_target_sec) continue;
+            m_impl->video_seek_pending = false;
+        }
+        break;
     }
-    if (flags & MF_SOURCE_READERF_ENDOFSTREAM) return AVB_ERROR_EOF;
-    if (!sample) return AVB_ERROR_DECODE_FAILED;
 
-    const int w         = m_impl->width;
-    const int h         = m_impl->height;
+    const int w = m_impl->width;
+    const int h = m_impl->height;
+
+    // NV12: two planes, Y at full resolution and interleaved CbCr at half
+    // height. Both planes are packed tightly (stride == width) into one buffer.
+    if (m_impl->video_is_nv12) {
+        const int    y_rows = h;
+        const int    c_rows = h / 2;
+        const int    dst_stride = w;            // width bytes per row for both planes
+        const size_t y_size = (size_t)dst_stride * y_rows;
+        const size_t c_size = (size_t)dst_stride * c_rows;
+        const size_t total  = y_size + c_size;
+        m_impl->video_frame_buf.resize(total);
+        unsigned char *dst = m_impl->video_frame_buf.data();
+
+        bool copied = false;
+        DWORD buf_count = 0;
+        sample->GetBufferCount(&buf_count);
+
+        if (buf_count == 1) {
+            ComPtr<IMFMediaBuffer> raw;
+            sample->GetBufferByIndex(0, &raw);
+
+            ComPtr<IMF2DBuffer> buf2d;
+            if (raw && SUCCEEDED(raw.As(&buf2d))) {
+                BYTE *scan0 = nullptr;
+                LONG  pitch = 0;
+                if (SUCCEEDED(buf2d->Lock2D(&scan0, &pitch))) {
+                    // For NV12 the CbCr plane follows the Y plane at the same
+                    // pitch, starting pitch*height bytes after the first scanline.
+                    const BYTE *c_src = scan0 + (ptrdiff_t)pitch * y_rows;
+                    for (int y = 0; y < y_rows; ++y)
+                        memcpy(dst + (size_t)y * dst_stride,
+                               scan0 + (ptrdiff_t)y * pitch, dst_stride);
+                    for (int y = 0; y < c_rows; ++y)
+                        memcpy(dst + y_size + (size_t)y * dst_stride,
+                               c_src + (ptrdiff_t)y * pitch, dst_stride);
+                    buf2d->Unlock2D();
+                    copied = true;
+                }
+            }
+        }
+
+        if (!copied) {
+            ComPtr<IMFMediaBuffer> buf;
+            sample->ConvertToContiguousBuffer(&buf);
+            if (!buf) return AVB_ERROR_DECODE_FAILED;
+
+            BYTE  *data = nullptr;
+            DWORD  len  = 0;
+            if (FAILED(buf->Lock(&data, nullptr, &len))) return AVB_ERROR_DECODE_FAILED;
+
+            // A plain contiguous buffer is laid out with the default stride.
+            const int src_stride = (m_impl->video_stride > 0) ? m_impl->video_stride : w;
+            const BYTE *c_src = data + (size_t)src_stride * y_rows;
+            for (int y = 0; y < y_rows; ++y)
+                memcpy(dst + (size_t)y * dst_stride,
+                       data + (size_t)y * src_stride, dst_stride);
+            for (int y = 0; y < c_rows; ++y)
+                memcpy(dst + y_size + (size_t)y * dst_stride,
+                       c_src + (size_t)y * src_stride, dst_stride);
+            buf->Unlock();
+        }
+
+        out_frame = {};
+        out_frame.width       = w;
+        out_frame.height      = h;
+        out_frame.format      = AVB_PIXEL_FORMAT_NV12;
+        out_frame.pts_sec     = (double)ts / 1e7;
+        out_frame.plane_count = 2;
+        out_frame.plane_data[0]   = dst;
+        out_frame.plane_stride[0] = dst_stride;
+        out_frame.plane_data[1]   = dst + y_size;
+        out_frame.plane_stride[1] = dst_stride;
+        out_frame.data      = out_frame.plane_data[0];
+        out_frame.stride    = out_frame.plane_stride[0];
+        out_frame.data_size = (int)total;
+        return AVB_OK;
+    }
+
     const int row_bytes = w * 4;
     m_impl->video_frame_buf.resize((size_t)row_bytes * h);
 
@@ -453,8 +576,7 @@ avb_result AvbBackendMediaFoundation::read_video_frame(avb_video_frame &out_fram
 
         BYTE  *data = nullptr;
         DWORD  len  = 0;
-        hr = buf->Lock(&data, nullptr, &len);
-        if (FAILED(hr)) return AVB_ERROR_DECODE_FAILED;
+        if (FAILED(buf->Lock(&data, nullptr, &len))) return AVB_ERROR_DECODE_FAILED;
 
         const int stride = (m_impl->video_stride > 0) ? m_impl->video_stride : row_bytes;
         if (m_impl->video_bottom_up) {
