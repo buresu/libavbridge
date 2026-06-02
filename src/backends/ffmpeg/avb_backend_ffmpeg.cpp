@@ -36,6 +36,48 @@ void AvbBackendFFmpeg::set_ff_error(const char *prefix, int errnum) {
     set_error("%s: %s", prefix, errbuf);
 }
 
+void AvbBackendFFmpeg::clear_packet_queues() {
+    for (AVPacket *p : m_audio_pkts) m_ff.av_packet_free(&p);
+    for (AVPacket *p : m_video_pkts) m_ff.av_packet_free(&p);
+    m_audio_pkts.clear();
+    m_video_pkts.clear();
+}
+
+AVPacket *AvbBackendFFmpeg::demux_next(int stream_idx) {
+    std::deque<AVPacket *> &want_q =
+        (stream_idx == m_audio_stream_idx) ? m_audio_pkts : m_video_pkts;
+    if (!want_q.empty()) {
+        AVPacket *p = want_q.front();
+        want_q.pop_front();
+        return p;
+    }
+
+    while (true) {
+        int ret = m_ff.av_read_frame(m_fmt_ctx, m_packet);
+        if (ret < 0) return nullptr; // EOF or read error
+
+        int sidx = m_packet->stream_index;
+        if (sidx == stream_idx) {
+            AVPacket *p = m_ff.av_packet_alloc();
+            m_ff.av_packet_move_ref(p, m_packet);
+            return p;
+        }
+
+        // Queue packets for the other enabled stream; discard everything else.
+        if (sidx == m_audio_stream_idx && m_audio_codec_ctx) {
+            AVPacket *p = m_ff.av_packet_alloc();
+            m_ff.av_packet_move_ref(p, m_packet);
+            m_audio_pkts.push_back(p);
+        } else if (sidx == m_video_stream_idx && m_video_codec_ctx) {
+            AVPacket *p = m_ff.av_packet_alloc();
+            m_ff.av_packet_move_ref(p, m_packet);
+            m_video_pkts.push_back(p);
+        } else {
+            m_ff.av_packet_unref(m_packet);
+        }
+    }
+}
+
 void AvbBackendFFmpeg::close_internal() {
     if (m_sws) {
         m_ff.sws_freeContext(m_sws);
@@ -53,6 +95,7 @@ void AvbBackendFFmpeg::close_internal() {
         m_ff.av_frame_free(&m_video_frame);
         m_video_frame = nullptr;
     }
+    clear_packet_queues();
     if (m_packet) {
         m_ff.av_packet_free(&m_packet);
         m_packet = nullptr;
@@ -76,6 +119,7 @@ void AvbBackendFFmpeg::close_internal() {
     m_sws_src_h   = 0;
     m_sws_src_fmt = AV_PIX_FMT_NONE;
     m_eof = false;
+    m_seek_target = -1.0;
     m_audio_stream_idx = -1;
     m_video_stream_idx = -1;
 }
@@ -258,9 +302,11 @@ avb_result AvbBackendFFmpeg::seek(double seconds) {
     if (m_audio_codec_ctx) m_ff.avcodec_flush_buffers(m_audio_codec_ctx);
     if (m_video_codec_ctx) m_ff.avcodec_flush_buffers(m_video_codec_ctx);
 
+    clear_packet_queues();
     m_audio_buf.clear();
     m_audio_buf_pos = 0;
     m_eof = false;
+    m_seek_target = seconds;
     return AVB_OK;
 }
 
@@ -304,22 +350,18 @@ bool AvbBackendFFmpeg::fill_audio_buffer() {
             return false;
         }
 
-        while (true) {
-            ret = m_ff.av_read_frame(m_fmt_ctx, m_packet);
-            if (ret < 0) {
-                m_ff.avcodec_send_packet(m_audio_codec_ctx, nullptr);
-                return false;
-            }
-            if (m_packet->stream_index == m_audio_stream_idx) {
-                int send_ret = m_ff.avcodec_send_packet(m_audio_codec_ctx, m_packet);
-                m_ff.av_packet_unref(m_packet);
-                if (send_ret < 0 && send_ret != AVERROR(EAGAIN)) {
-                    set_ff_error("avcodec_send_packet (audio)", send_ret);
-                    return false;
-                }
-                break;
-            }
-            m_ff.av_packet_unref(m_packet);
+        AVPacket *pkt = demux_next(m_audio_stream_idx);
+        if (!pkt) {
+            // End of demuxed input: flush the decoder so the loop can drain any
+            // remaining buffered frames (then receive_frame returns EOF above).
+            m_ff.avcodec_send_packet(m_audio_codec_ctx, nullptr);
+            continue;
+        }
+        int send_ret = m_ff.avcodec_send_packet(m_audio_codec_ctx, pkt);
+        m_ff.av_packet_free(&pkt);
+        if (send_ret < 0 && send_ret != AVERROR(EAGAIN)) {
+            set_ff_error("avcodec_send_packet (audio)", send_ret);
+            return false;
         }
     }
 }
@@ -359,6 +401,22 @@ avb_result AvbBackendFFmpeg::read_video_frame(avb_video_frame &out_frame) {
     while (true) {
         int ret = m_ff.avcodec_receive_frame(m_video_codec_ctx, m_video_frame);
         if (ret == 0) {
+            // Compute PTS first so pre-roll frames can be skipped cheaply
+            // (before any pixel conversion) after a seek.
+            AVStream *vst = m_fmt_ctx->streams[m_video_stream_idx];
+            double frame_pts = 0.0;
+            if (m_video_frame->pts != AV_NOPTS_VALUE && vst->time_base.den != 0)
+                frame_pts = (double)m_video_frame->pts * vst->time_base.num / vst->time_base.den;
+
+            // Drop frames decoded between the seek keyframe and the requested
+            // target time. A small epsilon avoids dropping the frame that sits
+            // essentially on the target due to time-base rounding.
+            if (m_seek_target >= 0.0 && frame_pts < m_seek_target - 1e-3) {
+                m_ff.av_frame_unref(m_video_frame);
+                continue;
+            }
+            m_seek_target = -1.0;
+
             int w = m_video_frame->width;
             int h = m_video_frame->height;
             AVPixelFormat src_fmt = (AVPixelFormat)m_video_frame->format;
@@ -396,19 +454,13 @@ avb_result AvbBackendFFmpeg::read_video_frame(avb_video_frame &out_frame) {
                 (const uint8_t *const *)m_video_frame->data, m_video_frame->linesize,
                 0, h, dst_data, dst_stride);
 
-            // Compute PTS
-            AVStream *st = m_fmt_ctx->streams[m_video_stream_idx];
-            double pts_sec = 0.0;
-            if (m_video_frame->pts != AV_NOPTS_VALUE && st->time_base.den != 0)
-                pts_sec = (double)m_video_frame->pts * st->time_base.num / st->time_base.den;
-
             m_ff.av_frame_unref(m_video_frame);
 
             out_frame = {};
             out_frame.width       = w;
             out_frame.height      = h;
             out_frame.format      = m_video_format;
-            out_frame.pts_sec     = pts_sec;
+            out_frame.pts_sec     = frame_pts;
             out_frame.plane_count = is_nv12 ? 2 : 1;
             out_frame.plane_data[0]   = dst_data[0];
             out_frame.plane_stride[0] = y_stride;
@@ -428,23 +480,20 @@ avb_result AvbBackendFFmpeg::read_video_frame(avb_video_frame &out_frame) {
             return AVB_ERROR_DECODE_FAILED;
         }
 
-        // Feed more packets
-        while (true) {
-            ret = m_ff.av_read_frame(m_fmt_ctx, m_packet);
-            if (ret < 0) {
-                m_ff.avcodec_send_packet(m_video_codec_ctx, nullptr);
-                return AVB_ERROR_EOF;
-            }
-            if (m_packet->stream_index == m_video_stream_idx) {
-                int send_ret = m_ff.avcodec_send_packet(m_video_codec_ctx, m_packet);
-                m_ff.av_packet_unref(m_packet);
-                if (send_ret < 0 && send_ret != AVERROR(EAGAIN)) {
-                    set_ff_error("avcodec_send_packet (video)", send_ret);
-                    return AVB_ERROR_DECODE_FAILED;
-                }
-                break;
-            }
-            m_ff.av_packet_unref(m_packet);
+        // Feed more packets. demux_next() preserves audio packets seen along the
+        // way so a later read_audio_f32() can still consume them.
+        AVPacket *pkt = demux_next(m_video_stream_idx);
+        if (!pkt) {
+            // End of demuxed input: flush, then loop to drain buffered frames
+            // (receive_frame above eventually returns AVERROR_EOF).
+            m_ff.avcodec_send_packet(m_video_codec_ctx, nullptr);
+            continue;
+        }
+        int send_ret = m_ff.avcodec_send_packet(m_video_codec_ctx, pkt);
+        m_ff.av_packet_free(&pkt);
+        if (send_ret < 0 && send_ret != AVERROR(EAGAIN)) {
+            set_ff_error("avcodec_send_packet (video)", send_ret);
+            return AVB_ERROR_DECODE_FAILED;
         }
     }
 }

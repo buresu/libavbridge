@@ -3,6 +3,7 @@
 #include "../../avb_backend.hpp"
 #include "avb_ffmpeg_loader.hpp"
 
+#include <deque>
 #include <string>
 #include <vector>
 
@@ -23,6 +24,14 @@ public:
 private:
     void close_internal();
     bool fill_audio_buffer();
+
+    // Demux until a packet for `stream_idx` is available. Packets belonging to
+    // the *other* enabled stream are queued (not discarded) so that reading one
+    // stream to EOF does not consume the other stream's packets — both share a
+    // single AVFormatContext. Returns an owned packet (free with av_packet_free)
+    // or nullptr at end of file.
+    AVPacket *demux_next(int stream_idx);
+    void clear_packet_queues();
 
     AvbFFmpegFuncs m_ff{};
     bool m_libs_loaded = false;
@@ -52,6 +61,11 @@ private:
     avb_pixel_format m_video_format   = AVB_PIXEL_FORMAT_BGRA8;
     AVPixelFormat    m_dst_av_fmt     = AV_PIX_FMT_BGRA;
 
+    // Demuxed-but-not-yet-decoded packets, separated per stream. Filled lazily
+    // by demux_next() when a packet for the other stream is encountered.
+    std::deque<AVPacket *>     m_audio_pkts;
+    std::deque<AVPacket *>     m_video_pkts;
+
     // Decoded audio samples waiting to be consumed
     std::vector<float>         m_audio_buf;
     int                        m_audio_buf_pos = 0;
@@ -60,6 +74,13 @@ private:
     std::vector<unsigned char> m_video_out_buf;
 
     bool m_eof = false;
+
+    // Target time of the last seek (seconds), or < 0 when no seek is pending.
+    // av_seek_frame lands on the keyframe at or before the request; decoded
+    // video frames with pts before this target are dropped so the first frame
+    // returned after a seek starts at ~target, matching the AVFoundation
+    // backend's timeRange-trimmed behaviour.
+    double m_seek_target = -1.0;
 
     std::string m_last_error;
     std::string m_audio_codec_name;

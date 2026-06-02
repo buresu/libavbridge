@@ -35,6 +35,7 @@ struct AvbFFmpegFuncs {
     AVPacket *(*av_packet_alloc)();
     void (*av_packet_free)(AVPacket **);
     void (*av_packet_unref)(AVPacket *);
+    void (*av_packet_move_ref)(AVPacket *, AVPacket *);
 
     // avutil
     AVFrame *(*av_frame_alloc)();

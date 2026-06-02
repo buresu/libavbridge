@@ -28,27 +28,47 @@ static void *try_open(const char **names, int count) {
     } while(0)
 
 bool avb_ffmpeg_load(AvbFFmpegFuncs &out_funcs, char *err_buf, int err_buf_size) {
+    // The major version compiled against (from the FFmpeg headers) is tried
+    // first, so the loaded shared object's struct ABI matches what this
+    // translation unit expects. Older majors follow as a best-effort fallback,
+    // and the unversioned name last. Keep the leading entry in sync with the
+    // FFmpeg headers used at build time (see *_VERSION_MAJOR).
     const char *avformat_names[] = {
-        "libavformat.so.61", "libavformat.so.60", "libavformat.so.59", "libavformat.so"
+        "libavformat.so." AV_STRINGIFY(LIBAVFORMAT_VERSION_MAJOR),
+        "libavformat.so.62", "libavformat.so.61", "libavformat.so.60",
+        "libavformat.so.59", "libavformat.so"
     };
     const char *avcodec_names[] = {
-        "libavcodec.so.61", "libavcodec.so.60", "libavcodec.so.59", "libavcodec.so"
+        "libavcodec.so." AV_STRINGIFY(LIBAVCODEC_VERSION_MAJOR),
+        "libavcodec.so.62", "libavcodec.so.61", "libavcodec.so.60",
+        "libavcodec.so.59", "libavcodec.so"
     };
     const char *avutil_names[] = {
-        "libavutil.so.59", "libavutil.so.58", "libavutil.so.57", "libavutil.so"
+        "libavutil.so." AV_STRINGIFY(LIBAVUTIL_VERSION_MAJOR),
+        "libavutil.so.60", "libavutil.so.59", "libavutil.so.58",
+        "libavutil.so.57", "libavutil.so"
     };
     const char *swresample_names[] = {
-        "libswresample.so.5", "libswresample.so.4", "libswresample.so.3", "libswresample.so"
+        "libswresample.so." AV_STRINGIFY(LIBSWRESAMPLE_VERSION_MAJOR),
+        "libswresample.so.6", "libswresample.so.5", "libswresample.so.4",
+        "libswresample.so.3", "libswresample.so"
     };
     const char *swscale_names[] = {
-        "libswscale.so.8", "libswscale.so.7", "libswscale.so.6", "libswscale.so"
+        "libswscale.so." AV_STRINGIFY(LIBSWSCALE_VERSION_MAJOR),
+        "libswscale.so.9", "libswscale.so.8", "libswscale.so.7",
+        "libswscale.so.6", "libswscale.so"
     };
 
-    g_handle_avformat   = try_open(avformat_names,   4);
-    g_handle_avcodec    = try_open(avcodec_names,    4);
-    g_handle_avutil     = try_open(avutil_names,     4);
-    g_handle_swresample = try_open(swresample_names, 4);
-    g_handle_swscale    = try_open(swscale_names,    4);
+    g_handle_avformat   = try_open(avformat_names,
+                                   (int)(sizeof(avformat_names)   / sizeof(avformat_names[0])));
+    g_handle_avcodec    = try_open(avcodec_names,
+                                   (int)(sizeof(avcodec_names)    / sizeof(avcodec_names[0])));
+    g_handle_avutil     = try_open(avutil_names,
+                                   (int)(sizeof(avutil_names)     / sizeof(avutil_names[0])));
+    g_handle_swresample = try_open(swresample_names,
+                                   (int)(sizeof(swresample_names) / sizeof(swresample_names[0])));
+    g_handle_swscale    = try_open(swscale_names,
+                                   (int)(sizeof(swscale_names)    / sizeof(swscale_names[0])));
 
     if (!g_handle_avformat || !g_handle_avcodec || !g_handle_avutil ||
         !g_handle_swresample || !g_handle_swscale) {
@@ -78,6 +98,7 @@ bool avb_ffmpeg_load(AvbFFmpegFuncs &out_funcs, char *err_buf, int err_buf_size)
     LOAD_SYM(g_handle_avcodec, out_funcs, av_packet_alloc);
     LOAD_SYM(g_handle_avcodec, out_funcs, av_packet_free);
     LOAD_SYM(g_handle_avcodec, out_funcs, av_packet_unref);
+    LOAD_SYM(g_handle_avcodec, out_funcs, av_packet_move_ref);
 
     LOAD_SYM(g_handle_avutil, out_funcs, av_frame_alloc);
     LOAD_SYM(g_handle_avutil, out_funcs, av_frame_free);
