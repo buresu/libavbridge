@@ -30,6 +30,7 @@ set(AVB_SOURCES
     src/avb_context.cpp
     src/avb_error.cpp
     src/avb_backend.cpp
+    src/avb_encoder.cpp
 )
 
 if(AVB_ENABLE_MEDIAFOUNDATION)
@@ -41,11 +42,13 @@ endif()
 if(AVB_ENABLE_AVFOUNDATION)
     list(APPEND AVB_SOURCES
         src/backends/avfoundation/avb_backend_avfoundation.mm
+        src/backends/avfoundation/avb_encoder_avfoundation.mm
     )
-    # The Objective-C++ backend relies on ARC for memory management of the
-    # AVFoundation objects it retains across calls.
+    # The Objective-C++ backends rely on ARC for memory management of the
+    # AVFoundation objects they retain across calls.
     set_source_files_properties(
         src/backends/avfoundation/avb_backend_avfoundation.mm
+        src/backends/avfoundation/avb_encoder_avfoundation.mm
         PROPERTIES COMPILE_OPTIONS "-fobjc-arc"
     )
 endif()

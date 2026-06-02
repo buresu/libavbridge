@@ -6,3 +6,6 @@ target_link_libraries(avb_decode_audio PRIVATE avbridge)
 
 add_executable(avb_decode_video decode_video.cpp)
 target_link_libraries(avb_decode_video PRIVATE avbridge)
+
+add_executable(avb_transcode transcode.cpp)
+target_link_libraries(avb_transcode PRIVATE avbridge)

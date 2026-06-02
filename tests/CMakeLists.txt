@@ -8,6 +8,12 @@ if(AVB_BUILD_SHARED)
     target_compile_definitions(avb_conformance PRIVATE AVB_USING_SHARED)
 endif()
 
+add_executable(avb_roundtrip roundtrip.cpp)
+target_link_libraries(avb_roundtrip PRIVATE avbridge)
+if(AVB_BUILD_SHARED)
+    target_compile_definitions(avb_roundtrip PRIVATE AVB_USING_SHARED)
+endif()
+
 find_program(FFMPEG_EXECUTABLE ffmpeg)
 
 if(FFMPEG_EXECUTABLE)
@@ -28,6 +34,9 @@ if(FFMPEG_EXECUTABLE)
     add_dependencies(avb_conformance avb_conformance_fixture)
 
     add_test(NAME conformance COMMAND avb_conformance "${AVB_FIXTURE}")
+    add_test(NAME roundtrip
+             COMMAND avb_roundtrip "${AVB_FIXTURE}"
+                     "${CMAKE_CURRENT_BINARY_DIR}/fixtures/roundtrip_out.mp4")
 else()
     message(WARNING
         "ffmpeg not found; the conformance test fixture cannot be generated. "

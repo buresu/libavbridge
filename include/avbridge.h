@@ -149,6 +149,80 @@ AVB_API void avb_close(
     avb_context *ctx
 );
 
+/* ------------------------------------------------------------------------- *
+ * Encoding
+ * ------------------------------------------------------------------------- */
+
+typedef struct avb_encoder avb_encoder;
+
+typedef enum avb_codec {
+    AVB_CODEC_AUTO = 0, /* container default: H.264 for video, AAC for audio */
+    AVB_CODEC_H264,
+    AVB_CODEC_AAC,
+} avb_codec;
+
+typedef struct avb_video_encode_params {
+    int enable;
+    int width;
+    int height;
+    double frame_rate;            /* used to derive PTS when pts_sec < 0 */
+    avb_codec codec;             /* AVB_CODEC_AUTO -> H.264 */
+    int bitrate;                 /* bits/sec, 0 = backend default */
+    avb_pixel_format input_format; /* format of frames passed to write_video */
+} avb_video_encode_params;
+
+typedef struct avb_audio_encode_params {
+    int enable;
+    int sample_rate;
+    int channels;
+    avb_codec codec;             /* AVB_CODEC_AUTO -> AAC */
+    int bitrate;                 /* bits/sec, 0 = backend default */
+} avb_audio_encode_params;
+
+typedef struct avb_encode_options {
+    avb_backend backend;
+    avb_video_encode_params video;
+    avb_audio_encode_params audio;
+} avb_encode_options;
+
+/* When both audio and video are enabled, write the two tracks roughly
+ * interleaved in increasing-PTS order (the standard muxer contract). Writing one
+ * track far ahead of the other will fail rather than buffer unboundedly. */
+AVB_API avb_result avb_encoder_open(
+    avb_encoder **out_enc,
+    const char *path,
+    const avb_encode_options *options
+);
+
+/* Encode one video frame. pts_sec < 0 derives the timestamp from frame_rate. */
+AVB_API avb_result avb_encoder_write_video(
+    avb_encoder *enc,
+    const avb_video_frame *frame,
+    double pts_sec
+);
+
+/* Encode interleaved float audio at the configured sample_rate/channels.
+ * Timestamps are derived from the running sample count. */
+AVB_API avb_result avb_encoder_write_audio_f32(
+    avb_encoder *enc,
+    const float *src_interleaved,
+    int frames
+);
+
+/* Flush encoders and finalize the container. Only avb_encoder_close is valid
+ * afterwards. */
+AVB_API avb_result avb_encoder_finish(
+    avb_encoder *enc
+);
+
+AVB_API const char *avb_encoder_get_last_error(
+    avb_encoder *enc
+);
+
+AVB_API void avb_encoder_close(
+    avb_encoder *enc
+);
+
 #ifdef __cplusplus
 }
 #endif
