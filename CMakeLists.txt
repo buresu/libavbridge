@@ -123,6 +123,11 @@ if(AVB_BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
 
+if(AVB_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
+
 install(TARGETS avbridge
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib

@@ -28,11 +28,66 @@ static NSArray<AVAssetTrack *> *avb_load_tracks(AVAsset *asset, AVMediaType type
     return result;
 }
 
+// Map a CoreMedia media-subtype FourCC to the same codec name FFmpeg reports, so
+// avb_media_info::codec_name means the *source* codec consistently across
+// backends. Unknown codes fall back to their printable FourCC.
+static std::string avb_fourcc_to_name(FourCharCode code) {
+    switch (code) {
+        // Video
+        case kCMVideoCodecType_H264:           return "h264";
+        case kCMVideoCodecType_HEVC:           return "hevc";
+        case kCMVideoCodecType_MPEG4Video:     return "mpeg4";
+        case kCMVideoCodecType_MPEG2Video:     return "mpeg2video";
+        case kCMVideoCodecType_MPEG1Video:     return "mpeg1video";
+        case kCMVideoCodecType_JPEG:           return "mjpeg";
+        case kCMVideoCodecType_AppleProRes4444:
+        case kCMVideoCodecType_AppleProRes422:
+        case kCMVideoCodecType_AppleProRes422HQ:
+        case kCMVideoCodecType_AppleProRes422LT:
+        case kCMVideoCodecType_AppleProRes422Proxy: return "prores";
+        case kCMVideoCodecType_VP9:            return "vp9";
+        case 'av01':                           return "av1";
+        // Audio
+        case kAudioFormatMPEG4AAC:             return "aac";
+        case kAudioFormatMPEGLayer3:           return "mp3";
+        case kAudioFormatMPEGLayer2:           return "mp2";
+        case kAudioFormatMPEGLayer1:           return "mp1";
+        case kAudioFormatLinearPCM:            return "pcm";
+        case kAudioFormatAppleLossless:        return "alac";
+        case kAudioFormatAC3:                  return "ac3";
+        case kAudioFormatEnhancedAC3:          return "eac3";
+        case kAudioFormatOpus:                 return "opus";
+        case kAudioFormatFLAC:                 return "flac";
+        case kAudioFormatAMR:                  return "amr_nb";
+        default: break;
+    }
+    // Printable FourCC fallback, e.g. 'abcd'. Non-printable bytes become '?'.
+    char c[5] = {
+        (char)((code >> 24) & 0xff), (char)((code >> 16) & 0xff),
+        (char)((code >> 8) & 0xff),  (char)(code & 0xff), 0
+    };
+    for (int i = 0; i < 4; ++i) {
+        if (c[i] < 0x20 || c[i] > 0x7e) c[i] = '?';
+    }
+    return std::string(c);
+}
+
+// Source-codec FourCC of a track's first format description, or 0 if unavailable.
+static FourCharCode avb_track_codec(AVAssetTrack *track) {
+    NSArray *formats = track.formatDescriptions;
+    if (formats.count == 0) return 0;
+    CMFormatDescriptionRef fmt = (__bridge CMFormatDescriptionRef)formats[0];
+    return CMFormatDescriptionGetMediaSubType(fmt);
+}
+
 struct AvbBackendAVFoundation::Impl {
     AVAsset *asset = nil;
     AVAssetReader *reader = nil;
     AVAssetReaderTrackOutput *audio_output = nil;
     AVAssetReaderTrackOutput *video_output = nil;
+
+    int audio_stream_idx = -1;
+    int video_stream_idx = -1;
 
     int sample_rate  = 0;
     int channels     = 0;
@@ -88,12 +143,15 @@ avb_result AvbBackendAVFoundation::open_file(const char *path, const avb_open_op
         CMTime duration = m_impl->asset.duration;
         m_impl->duration_sec = CMTimeGetSeconds(duration);
 
-        // Audio track
+        // Audio track. options.audio_stream_index selects the Nth audio track
+        // (0-based); -1 picks the first. (Stream indices are necessarily
+        // backend-specific; AVFoundation has no file-wide stream numbering.)
         if (options.enable_audio) {
             NSArray<AVAssetTrack *> *audio_tracks =
                 avb_load_tracks(m_impl->asset, AVMediaTypeAudio);
-            if (audio_tracks.count > 0) {
-                AVAssetTrack *track = audio_tracks[0];
+            int idx = options.audio_stream_index >= 0 ? options.audio_stream_index : 0;
+            if (idx < (int)audio_tracks.count) {
+                AVAssetTrack *track = audio_tracks[idx];
 
                 NSDictionary *settings = @{
                     AVFormatIDKey: @(kAudioFormatLinearPCM),
@@ -107,6 +165,7 @@ avb_result AvbBackendAVFoundation::open_file(const char *path, const avb_open_op
                     outputSettings:settings];
                 m_impl->audio_output.alwaysCopiesSampleData = NO;
                 [m_impl->reader addOutput:m_impl->audio_output];
+                m_impl->audio_stream_idx = idx;
 
                 // Get format info
                 NSArray *formats = track.formatDescriptions;
@@ -120,16 +179,17 @@ avb_result AvbBackendAVFoundation::open_file(const char *path, const avb_open_op
                         m_impl->channels    = (int)asbd->mChannelsPerFrame;
                     }
                 }
-                m_impl->audio_codec_name = "pcm_f32";
+                m_impl->audio_codec_name = avb_fourcc_to_name(avb_track_codec(track));
             }
         }
 
-        // Video track
+        // Video track (see audio note above for stream-index semantics).
         if (options.enable_video) {
             NSArray<AVAssetTrack *> *video_tracks =
                 avb_load_tracks(m_impl->asset, AVMediaTypeVideo);
-            if (video_tracks.count > 0) {
-                AVAssetTrack *track = video_tracks[0];
+            int idx = options.video_stream_index >= 0 ? options.video_stream_index : 0;
+            if (idx < (int)video_tracks.count) {
+                AVAssetTrack *track = video_tracks[idx];
 
                 NSDictionary *settings = @{
                     (NSString *)kCVPixelBufferPixelFormatTypeKey:
@@ -141,12 +201,13 @@ avb_result AvbBackendAVFoundation::open_file(const char *path, const avb_open_op
                     outputSettings:settings];
                 m_impl->video_output.alwaysCopiesSampleData = NO;
                 [m_impl->reader addOutput:m_impl->video_output];
+                m_impl->video_stream_idx = idx;
 
                 CGSize size = track.naturalSize;
                 m_impl->width  = (int)size.width;
                 m_impl->height = (int)size.height;
                 m_impl->frame_rate   = track.nominalFrameRate;
-                m_impl->video_codec_name = "bgra";
+                m_impl->video_codec_name = avb_fourcc_to_name(avb_track_codec(track));
             }
         }
 
@@ -173,7 +234,7 @@ avb_result AvbBackendAVFoundation::get_media_info(avb_media_info &out_info) {
 
     if (m_impl->audio_output) {
         out_info.audio.available    = 1;
-        out_info.audio.stream_index = 0;
+        out_info.audio.stream_index = m_impl->audio_stream_idx;
         out_info.audio.sample_rate  = m_impl->sample_rate;
         out_info.audio.channels     = m_impl->channels;
         out_info.audio.duration_sec = m_impl->duration_sec;
@@ -182,7 +243,7 @@ avb_result AvbBackendAVFoundation::get_media_info(avb_media_info &out_info) {
 
     if (m_impl->video_output) {
         out_info.video.available    = 1;
-        out_info.video.stream_index = 0;
+        out_info.video.stream_index = m_impl->video_stream_idx;
         out_info.video.width        = m_impl->width;
         out_info.video.height       = m_impl->height;
         out_info.video.frame_rate   = m_impl->frame_rate;
@@ -215,7 +276,7 @@ avb_result AvbBackendAVFoundation::seek(double seconds) {
 
         if (m_impl->audio_output) {
             AVAssetTrack *track =
-                avb_load_tracks(m_impl->asset, AVMediaTypeAudio)[0];
+                avb_load_tracks(m_impl->asset, AVMediaTypeAudio)[m_impl->audio_stream_idx];
             NSDictionary *settings = @{
                 AVFormatIDKey: @(kAudioFormatLinearPCM),
                 AVLinearPCMBitDepthKey: @32,
@@ -230,7 +291,7 @@ avb_result AvbBackendAVFoundation::seek(double seconds) {
 
         if (m_impl->video_output) {
             AVAssetTrack *track =
-                avb_load_tracks(m_impl->asset, AVMediaTypeVideo)[0];
+                avb_load_tracks(m_impl->asset, AVMediaTypeVideo)[m_impl->video_stream_idx];
             NSDictionary *settings = @{
                 (NSString *)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
             };

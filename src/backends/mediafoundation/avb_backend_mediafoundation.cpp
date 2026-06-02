@@ -97,6 +97,49 @@ static void find_stream_indices(IMFSourceReader *reader, int *audio_idx, int *vi
     }
 }
 
+// Map a Media Foundation subtype GUID to the same codec name FFmpeg reports, so
+// avb_media_info::codec_name means the *source* codec consistently across
+// backends. We compare against the well-defined subtype constants and fall back
+// to the printable FourCC encoded in the GUID's Data1 field (which is how MF
+// derives most of these subtypes), so unknown/newer codecs still report sanely.
+static std::string mf_subtype_name(const GUID &sub) {
+    static const struct { const GUID *guid; const char *name; } kMap[] = {
+        { &MFVideoFormat_H264,      "h264"       },
+        { &MFVideoFormat_HEVC,      "hevc"       },
+        { &MFVideoFormat_MPEG2,     "mpeg2video" },
+        { &MFVideoFormat_MP4V,      "mpeg4"      },
+        { &MFVideoFormat_MJPG,      "mjpeg"      },
+        { &MFVideoFormat_WMV3,      "wmv3"       },
+        { &MFAudioFormat_AAC,       "aac"        },
+        { &MFAudioFormat_MP3,       "mp3"        },
+        { &MFAudioFormat_Dolby_AC3, "ac3"        },
+        { &MFAudioFormat_PCM,       "pcm"        },
+        { &MFAudioFormat_Float,     "pcm_f32"    },
+    };
+    for (const auto &e : kMap) {
+        if (IsEqualGUID(sub, *e.guid)) return e.name;
+    }
+    // Printable FourCC fallback from the GUID's Data1 (little-endian FourCC).
+    DWORD fcc = sub.Data1;
+    char c[5] = {
+        (char)(fcc & 0xff),         (char)((fcc >> 8) & 0xff),
+        (char)((fcc >> 16) & 0xff), (char)((fcc >> 24) & 0xff), 0
+    };
+    for (int i = 0; i < 4; ++i) {
+        if (c[i] < 0x20 || c[i] > 0x7e) c[i] = '?';
+    }
+    return std::string(c);
+}
+
+// Source-codec name of a native stream, read before the output type is overridden.
+static std::string mf_native_codec_name(IMFSourceReader *reader, DWORD stream) {
+    ComPtr<IMFMediaType> native;
+    if (FAILED(reader->GetNativeMediaType(stream, 0, &native)) || !native) return "";
+    GUID sub = GUID_NULL;
+    if (FAILED(native->GetGUID(MF_MT_SUBTYPE, &sub))) return "";
+    return mf_subtype_name(sub);
+}
+
 avb_result AvbBackendMediaFoundation::open_file(const char *path, const avb_open_options &options) {
     if (!m_impl->mf_initialized) return AVB_ERROR_BACKEND_NOT_AVAILABLE;
 
@@ -155,7 +198,8 @@ avb_result AvbBackendMediaFoundation::open_file(const char *path, const avb_open
                 m_impl->sample_rate = (int)sr;
                 m_impl->channels    = (int)ch;
             }
-            m_impl->audio_codec_name = "pcm_f32";
+            m_impl->audio_codec_name =
+                mf_native_codec_name(m_impl->reader.Get(), (DWORD)found_audio);
         }
     }
 
@@ -198,7 +242,8 @@ avb_result AvbBackendMediaFoundation::open_file(const char *path, const avb_open
                     m_impl->video_stride = (int)w * 4;
                 }
             }
-            m_impl->video_codec_name = "argb32";
+            m_impl->video_codec_name =
+                mf_native_codec_name(m_impl->reader.Get(), (DWORD)found_video);
         }
     }
 
