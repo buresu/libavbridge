@@ -168,6 +168,18 @@ avb_result AvbBackendFFmpeg::open_file(const char *path, const avb_open_options 
 
         ret = m_ff.avcodec_open2(m_video_codec_ctx, codec, nullptr);
         if (ret < 0) { set_ff_error("avcodec_open2 (video)", ret); return AVB_ERROR_OPEN_FAILED; }
+
+        // Resolve the requested output pixel format (UNKNOWN -> BGRA8 default).
+        switch (options.video_format) {
+            case AVB_PIXEL_FORMAT_RGBA8:
+                m_video_format = AVB_PIXEL_FORMAT_RGBA8; m_dst_av_fmt = AV_PIX_FMT_RGBA; break;
+            case AVB_PIXEL_FORMAT_NV12:
+                m_video_format = AVB_PIXEL_FORMAT_NV12;  m_dst_av_fmt = AV_PIX_FMT_NV12; break;
+            case AVB_PIXEL_FORMAT_BGRA8:
+            case AVB_PIXEL_FORMAT_UNKNOWN:
+            default:
+                m_video_format = AVB_PIXEL_FORMAT_BGRA8; m_dst_av_fmt = AV_PIX_FMT_BGRA; break;
+        }
     }
 
     m_packet      = m_ff.av_packet_alloc();
@@ -339,7 +351,7 @@ avb_result AvbBackendFFmpeg::read_video_frame(avb_video_frame &out_frame) {
                 if (m_sws) m_ff.sws_freeContext(m_sws);
                 m_sws = m_ff.sws_getContext(
                     w, h, src_fmt,
-                    w, h, AV_PIX_FMT_BGRA,
+                    w, h, m_dst_av_fmt,
                     SWS_BILINEAR, nullptr, nullptr, nullptr);
                 if (!m_sws) {
                     m_ff.av_frame_unref(m_video_frame);
@@ -351,11 +363,18 @@ avb_result AvbBackendFFmpeg::read_video_frame(avb_video_frame &out_frame) {
                 m_sws_src_fmt = src_fmt;
             }
 
-            // Convert to BGRA into m_video_out_buf
-            int stride = w * 4;
-            m_video_out_buf.resize(stride * h);
-            uint8_t *dst_data[1]   = { m_video_out_buf.data() };
-            int      dst_stride[1] = { stride };
+            // Lay out the destination buffer. Packed RGBA/BGRA is a single plane;
+            // NV12 is two planes (Y at full height, interleaved CbCr at half).
+            bool is_nv12 = (m_video_format == AVB_PIXEL_FORMAT_NV12);
+            int  y_stride = is_nv12 ? w : w * 4;
+            int  y_size   = y_stride * h;
+            int  uv_stride = w;            // NV12: interleaved CbCr, same width
+            int  uv_size   = is_nv12 ? uv_stride * (h / 2) : 0;
+            m_video_out_buf.resize((size_t)y_size + uv_size);
+
+            uint8_t *dst_data[2]   = { m_video_out_buf.data(),
+                                       m_video_out_buf.data() + y_size };
+            int      dst_stride[2] = { y_stride, uv_stride };
             m_ff.sws_scale(m_sws,
                 (const uint8_t *const *)m_video_frame->data, m_video_frame->linesize,
                 0, h, dst_data, dst_stride);
@@ -368,12 +387,20 @@ avb_result AvbBackendFFmpeg::read_video_frame(avb_video_frame &out_frame) {
 
             m_ff.av_frame_unref(m_video_frame);
 
-            out_frame.width     = w;
-            out_frame.height    = h;
-            out_frame.format    = AVB_PIXEL_FORMAT_BGRA8;
-            out_frame.stride    = stride;
-            out_frame.pts_sec   = pts_sec;
-            out_frame.data      = m_video_out_buf.data();
+            out_frame = {};
+            out_frame.width       = w;
+            out_frame.height      = h;
+            out_frame.format      = m_video_format;
+            out_frame.pts_sec     = pts_sec;
+            out_frame.plane_count = is_nv12 ? 2 : 1;
+            out_frame.plane_data[0]   = dst_data[0];
+            out_frame.plane_stride[0] = y_stride;
+            if (is_nv12) {
+                out_frame.plane_data[1]   = dst_data[1];
+                out_frame.plane_stride[1] = uv_stride;
+            }
+            out_frame.data      = out_frame.plane_data[0];
+            out_frame.stride    = out_frame.plane_stride[0];
             out_frame.data_size = (int)m_video_out_buf.size();
             return AVB_OK;
         }

@@ -150,6 +150,65 @@ int main(int argc, char *argv[]) {
 
     avb_close(ctx);
 
+    // --- Pixel format selection ---
+    // Re-open video-only in each requested format and validate the frame layout.
+    printf("pixel formats:\n");
+    // BGRA8 and RGBA8 are mandatory for every backend; NV12 is optional (some
+    // backends may not implement planar output) and only validated where the
+    // open succeeds.
+    struct FmtCase { avb_pixel_format fmt; const char *name; int planes; bool mandatory; };
+    const FmtCase cases[] = {
+        { AVB_PIXEL_FORMAT_BGRA8, "BGRA8", 1, true  },
+        { AVB_PIXEL_FORMAT_RGBA8, "RGBA8", 1, true  },
+        { AVB_PIXEL_FORMAT_NV12,  "NV12",  2, false },
+    };
+    for (const auto &fc : cases) {
+        avb_open_options fopts{};
+        fopts.backend            = AVB_BACKEND_AUTO;
+        fopts.audio_stream_index = -1;
+        fopts.video_stream_index = -1;
+        fopts.enable_audio       = 0;
+        fopts.enable_video       = 1;
+        fopts.video_format       = fc.fmt;
+
+        avb_context *fctx = nullptr;
+        char msg[128];
+        if (avb_open_file(&fctx, path, &fopts) != AVB_OK) {
+            if (fc.mandatory) {
+                snprintf(msg, sizeof(msg), "open with %s succeeds", fc.name);
+                check(false, msg);
+            } else {
+                printf("  [SKIP] %s not supported by this backend\n", fc.name);
+            }
+            avb_close(fctx);
+            continue;
+        }
+        avb_video_frame f{};
+        avb_result vr = avb_read_video_frame(fctx, &f);
+        snprintf(msg, sizeof(msg), "%s: decode first frame", fc.name);
+        check(vr == AVB_OK, msg);
+        if (vr == AVB_OK) {
+            snprintf(msg, sizeof(msg), "%s: format reported back", fc.name);
+            check(f.format == fc.fmt, msg);
+            snprintf(msg, sizeof(msg), "%s: plane_count == %d", fc.name, fc.planes);
+            check(f.plane_count == fc.planes, msg);
+            snprintf(msg, sizeof(msg), "%s: data aliases plane 0", fc.name);
+            check(f.data == f.plane_data[0] && f.stride == f.plane_stride[0], msg);
+            for (int p = 0; p < f.plane_count; ++p) {
+                snprintf(msg, sizeof(msg), "%s: plane %d has data and stride", fc.name, p);
+                check(f.plane_data[p] != nullptr && f.plane_stride[p] > 0, msg);
+            }
+            if (fc.fmt == AVB_PIXEL_FORMAT_NV12) {
+                // Y plane is full height, CbCr plane is half height.
+                long expect = (long)f.plane_stride[0] * f.height
+                            + (long)f.plane_stride[1] * (f.height / 2);
+                check(f.data_size == expect, "NV12: data_size == Y + CbCr planes");
+            }
+            avb_release_video_frame(fctx, &f);
+        }
+        avb_close(fctx);
+    }
+
     printf("\n%s (%d failure%s)\n",
            g_failures == 0 ? "ALL CHECKS PASSED" : "CHECKS FAILED",
            g_failures, g_failures == 1 ? "" : "s");

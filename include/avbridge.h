@@ -50,6 +50,9 @@ typedef struct avb_open_options {
     int video_stream_index; /* -1 = auto/default */
     int enable_audio;
     int enable_video;
+    /* Desired decoded video pixel format. AVB_PIXEL_FORMAT_UNKNOWN (0) selects
+     * the backend default (BGRA8). */
+    avb_pixel_format video_format;
 } avb_open_options;
 
 typedef struct avb_audio_info {
@@ -78,13 +81,26 @@ typedef struct avb_media_info {
     avb_video_info video;
 } avb_media_info;
 
+#define AVB_MAX_PLANES 3
+
 typedef struct avb_video_frame {
     int width;
     int height;
     avb_pixel_format format;
-    int stride;
     double pts_sec;
+
+    /* Number of valid planes: 1 for packed formats (RGBA8/BGRA8), 2 for NV12
+     * (plane 0 = Y, plane 1 = interleaved CbCr). */
+    int plane_count;
+    unsigned char *plane_data[AVB_MAX_PLANES];
+    int plane_stride[AVB_MAX_PLANES];
+
+    /* Convenience aliases for plane 0, for packed-format consumers:
+     *   data   == plane_data[0]
+     *   stride == plane_stride[0]
+     * data_size is the total size in bytes of the backing buffer (all planes). */
     unsigned char *data;
+    int stride;
     int data_size;
 } avb_video_frame;
 

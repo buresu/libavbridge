@@ -72,6 +72,21 @@ static std::string avb_fourcc_to_name(FourCharCode code) {
     return std::string(c);
 }
 
+// Resolve a requested avb_pixel_format to a CoreVideo pixel format type.
+// AVAssetReader does not reliably emit 32RGBA, so RGBA8 is requested as BGRA8
+// here and byte-swizzled to RGBA after the copy (see open_file/read_video_frame).
+static OSType avb_cvpixfmt(avb_pixel_format want) {
+    switch (want) {
+        case AVB_PIXEL_FORMAT_NV12:
+            return kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
+        case AVB_PIXEL_FORMAT_BGRA8:
+        case AVB_PIXEL_FORMAT_RGBA8:
+        case AVB_PIXEL_FORMAT_UNKNOWN:
+        default:
+            return kCVPixelFormatType_32BGRA;
+    }
+}
+
 // Source-codec FourCC of a track's first format description, or 0 if unavailable.
 static FourCharCode avb_track_codec(AVAssetTrack *track) {
     NSArray *formats = track.formatDescriptions;
@@ -95,6 +110,10 @@ struct AvbBackendAVFoundation::Impl {
     int height       = 0;
     double duration_sec  = 0.0;
     double frame_rate    = 0.0;
+
+    OSType cv_pixel_format          = kCVPixelFormatType_32BGRA;
+    avb_pixel_format video_avb_fmt  = AVB_PIXEL_FORMAT_BGRA8;
+    bool swizzle_rgba               = false; // request BGRA, emit RGBA
 
     std::string audio_codec_name;
     std::string video_codec_name;
@@ -191,9 +210,15 @@ avb_result AvbBackendAVFoundation::open_file(const char *path, const avb_open_op
             if (idx < (int)video_tracks.count) {
                 AVAssetTrack *track = video_tracks[idx];
 
+                m_impl->cv_pixel_format = avb_cvpixfmt(options.video_format);
+                m_impl->video_avb_fmt =
+                    options.video_format == AVB_PIXEL_FORMAT_UNKNOWN
+                        ? AVB_PIXEL_FORMAT_BGRA8 : options.video_format;
+                m_impl->swizzle_rgba =
+                    (options.video_format == AVB_PIXEL_FORMAT_RGBA8);
                 NSDictionary *settings = @{
                     (NSString *)kCVPixelBufferPixelFormatTypeKey:
-                        @(kCVPixelFormatType_32BGRA),
+                        @(m_impl->cv_pixel_format),
                 };
 
                 m_impl->video_output = [AVAssetReaderTrackOutput
@@ -293,7 +318,7 @@ avb_result AvbBackendAVFoundation::seek(double seconds) {
             AVAssetTrack *track =
                 avb_load_tracks(m_impl->asset, AVMediaTypeVideo)[m_impl->video_stream_idx];
             NSDictionary *settings = @{
-                (NSString *)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
+                (NSString *)kCVPixelBufferPixelFormatTypeKey: @(m_impl->cv_pixel_format),
             };
             m_impl->video_output = [AVAssetReaderTrackOutput
                 assetReaderTrackOutputWithTrack:track outputSettings:settings];
@@ -373,25 +398,78 @@ avb_result AvbBackendAVFoundation::read_video_frame(avb_video_frame &out_frame) 
         }
 
         CVPixelBufferLockBaseAddress(image, kCVPixelBufferLock_ReadOnly);
-        void *base = CVPixelBufferGetBaseAddress(image);
+
         size_t width  = CVPixelBufferGetWidth(image);
         size_t height = CVPixelBufferGetHeight(image);
-        size_t stride = CVPixelBufferGetBytesPerRow(image);
-        size_t len    = stride * height;
 
-        m_impl->video_frame_buf.resize(len);
-        memcpy(m_impl->video_frame_buf.data(), base, len);
+        // CVPixelBuffer may be packed (plane count 0) or planar (e.g. NV12 has
+        // two planes). Gather each plane's source pointer/stride/rows, then copy
+        // them contiguously into one buffer so the caller gets stable pointers.
+        const void *src_base[AVB_MAX_PLANES] = {0};
+        size_t      src_stride[AVB_MAX_PLANES] = {0};
+        size_t      src_rows[AVB_MAX_PLANES]   = {0};
+
+        size_t plane_count = CVPixelBufferGetPlaneCount(image);
+        if (plane_count == 0) {
+            // Packed format: treat the whole image as a single plane.
+            plane_count   = 1;
+            src_base[0]   = CVPixelBufferGetBaseAddress(image);
+            src_stride[0] = CVPixelBufferGetBytesPerRow(image);
+            src_rows[0]   = height;
+        } else {
+            if (plane_count > AVB_MAX_PLANES) plane_count = AVB_MAX_PLANES;
+            for (size_t p = 0; p < plane_count; ++p) {
+                src_base[p]   = CVPixelBufferGetBaseAddressOfPlane(image, p);
+                src_stride[p] = CVPixelBufferGetBytesPerRowOfPlane(image, p);
+                src_rows[p]   = CVPixelBufferGetHeightOfPlane(image, p);
+            }
+        }
+
+        size_t plane_size[AVB_MAX_PLANES] = {0};
+        size_t total = 0;
+        for (size_t p = 0; p < plane_count; ++p) {
+            plane_size[p] = src_stride[p] * src_rows[p];
+            total += plane_size[p];
+        }
+
+        m_impl->video_frame_buf.resize(total);
+        unsigned char *dst = m_impl->video_frame_buf.data();
+
+        out_frame = {};
+        out_frame.width       = (int)width;
+        out_frame.height      = (int)height;
+        out_frame.format      = m_impl->video_avb_fmt;
+        out_frame.pts_sec     = CMTimeGetSeconds(pts);
+        out_frame.plane_count = (int)plane_count;
+        out_frame.data_size   = (int)total;
+
+        size_t offset = 0;
+        for (size_t p = 0; p < plane_count; ++p) {
+            memcpy(dst + offset, src_base[p], plane_size[p]);
+            out_frame.plane_data[p]   = dst + offset;
+            out_frame.plane_stride[p] = (int)src_stride[p];
+            offset += plane_size[p];
+        }
+
+        // AVAssetReader gave us BGRA; convert to RGBA in place if requested.
+        if (m_impl->swizzle_rgba) {
+            for (int y = 0; y < out_frame.height; ++y) {
+                unsigned char *row = dst + (size_t)y * out_frame.plane_stride[0];
+                for (int x = 0; x < out_frame.width; ++x) {
+                    unsigned char *px = row + x * 4;
+                    unsigned char b = px[0];
+                    px[0] = px[2]; // R
+                    px[2] = b;     // B
+                }
+            }
+        }
+
+        // Plane-0 aliases for packed-format consumers.
+        out_frame.data   = out_frame.plane_data[0];
+        out_frame.stride = out_frame.plane_stride[0];
 
         CVPixelBufferUnlockBaseAddress(image, kCVPixelBufferLock_ReadOnly);
         CFRelease(sample_buf);
-
-        out_frame.width     = (int)width;
-        out_frame.height    = (int)height;
-        out_frame.format    = AVB_PIXEL_FORMAT_BGRA8;
-        out_frame.stride    = (int)stride;
-        out_frame.pts_sec   = CMTimeGetSeconds(pts);
-        out_frame.data      = m_impl->video_frame_buf.data();
-        out_frame.data_size = (int)len;
     }
 
     return AVB_OK;

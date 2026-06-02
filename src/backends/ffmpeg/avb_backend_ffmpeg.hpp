@@ -44,6 +44,10 @@ private:
     int              m_sws_src_h      = 0;
     AVPixelFormat    m_sws_src_fmt    = AV_PIX_FMT_NONE;
 
+    // Requested output pixel format and its libav equivalent.
+    avb_pixel_format m_video_format   = AVB_PIXEL_FORMAT_BGRA8;
+    AVPixelFormat    m_dst_av_fmt     = AV_PIX_FMT_BGRA;
+
     // Decoded audio samples waiting to be consumed
     std::vector<float>         m_audio_buf;
     int                        m_audio_buf_pos = 0;

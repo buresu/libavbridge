@@ -29,6 +29,9 @@ struct AvbBackendMediaFoundation::Impl {
     int video_stride = 0;        // bytes per row; may exceed width*4 due to alignment
     bool video_bottom_up = false; // true when MF_MT_DEFAULT_STRIDE is negative
 
+    avb_pixel_format video_avb_fmt = AVB_PIXEL_FORMAT_BGRA8;
+    bool swizzle_rgba = false;    // request ARGB32 (BGRA), emit RGBA
+
     double duration_sec = 0.0;
     double frame_rate   = 0.0;
 
@@ -46,6 +49,8 @@ struct AvbBackendMediaFoundation::Impl {
         audio_stream_idx = video_stream_idx = -1;
         sample_rate = channels = width = height = video_stride = 0;
         video_bottom_up = false;
+        video_avb_fmt = AVB_PIXEL_FORMAT_BGRA8;
+        swizzle_rgba = false;
         duration_sec = frame_rate = 0.0;
         audio_codec_name.clear();
         video_codec_name.clear();
@@ -204,10 +209,24 @@ avb_result AvbBackendMediaFoundation::open_file(const char *path, const avb_open
     }
 
     if (found_video >= 0) {
+        // NV12 output is not implemented for this backend yet; the copy path
+        // below assumes a packed 32-bit format. Fail clearly rather than emit a
+        // malformed planar frame.
+        if (options.video_format == AVB_PIXEL_FORMAT_NV12) {
+            m_last_error = "NV12 output is not supported by the Media Foundation "
+                           "backend yet; use BGRA8 or RGBA8.";
+            m_impl->close_streams();
+            return AVB_ERROR_INVALID_ARGUMENT;
+        }
+        m_impl->video_avb_fmt = (options.video_format == AVB_PIXEL_FORMAT_RGBA8)
+            ? AVB_PIXEL_FORMAT_RGBA8 : AVB_PIXEL_FORMAT_BGRA8;
+        m_impl->swizzle_rgba = (options.video_format == AVB_PIXEL_FORMAT_RGBA8);
+
         ComPtr<IMFMediaType> want;
         MFCreateMediaType(&want);
         want->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
         // MFVideoFormat_ARGB32 = D3DFMT_A8R8G8B8; memory layout on LE is BGRA.
+        // RGBA8 is produced by swizzling this BGRA output after the copy.
         want->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_ARGB32);
 
         hr = m_impl->reader->SetCurrentMediaType((DWORD)found_video, nullptr, want.Get());
@@ -447,12 +466,26 @@ avb_result AvbBackendMediaFoundation::read_video_frame(avb_video_frame &out_fram
         buf->Unlock();
     }
 
-    out_frame.width     = w;
-    out_frame.height    = h;
-    out_frame.format    = AVB_PIXEL_FORMAT_BGRA8;
-    out_frame.stride    = row_bytes;
-    out_frame.pts_sec   = (double)ts / 1e7;
-    out_frame.data      = m_impl->video_frame_buf.data();
+    // Convert BGRA to RGBA in place if requested.
+    if (m_impl->swizzle_rgba) {
+        unsigned char *p = m_impl->video_frame_buf.data();
+        for (int i = 0; i < w * h; ++i) {
+            unsigned char b = p[i * 4 + 0];
+            p[i * 4 + 0] = p[i * 4 + 2]; // R
+            p[i * 4 + 2] = b;            // B
+        }
+    }
+
+    out_frame = {};
+    out_frame.width       = w;
+    out_frame.height      = h;
+    out_frame.format      = m_impl->video_avb_fmt;
+    out_frame.pts_sec     = (double)ts / 1e7;
+    out_frame.plane_count = 1;
+    out_frame.plane_data[0]   = m_impl->video_frame_buf.data();
+    out_frame.plane_stride[0] = row_bytes;
+    out_frame.data      = out_frame.plane_data[0];
+    out_frame.stride    = out_frame.plane_stride[0];
     out_frame.data_size = row_bytes * h;
 
     return AVB_OK;
