@@ -87,6 +87,21 @@ static OSType avb_cvpixfmt(avb_pixel_format want) {
     }
 }
 
+// Build the AVAssetReaderTrackOutput settings for interleaved float32 PCM.
+// req_rate/req_channels of 0 leave the source value untouched; otherwise
+// AVFoundation resamples / remixes to the requested values.
+static NSDictionary *avb_audio_settings(int req_rate, int req_channels) {
+    NSMutableDictionary *s = [@{
+        AVFormatIDKey:               @(kAudioFormatLinearPCM),
+        AVLinearPCMBitDepthKey:      @32,
+        AVLinearPCMIsFloatKey:       @YES,
+        AVLinearPCMIsNonInterleaved: @NO,
+    } mutableCopy];
+    if (req_rate > 0)     s[AVSampleRateKey]       = @(req_rate);
+    if (req_channels > 0) s[AVNumberOfChannelsKey] = @(req_channels);
+    return s;
+}
+
 // Source-codec FourCC of a track's first format description, or 0 if unavailable.
 static FourCharCode avb_track_codec(AVAssetTrack *track) {
     NSArray *formats = track.formatDescriptions;
@@ -104,8 +119,10 @@ struct AvbBackendAVFoundation::Impl {
     int audio_stream_idx = -1;
     int video_stream_idx = -1;
 
-    int sample_rate  = 0;
-    int channels     = 0;
+    int sample_rate  = 0;   // effective output rate
+    int channels     = 0;   // effective output channel count
+    int req_sample_rate = 0; // requested override (0 = source)
+    int req_channels    = 0; // requested override (0 = source)
     int width        = 0;
     int height       = 0;
     double duration_sec  = 0.0;
@@ -172,21 +189,19 @@ avb_result AvbBackendAVFoundation::open_file(const char *path, const avb_open_op
             if (idx < (int)audio_tracks.count) {
                 AVAssetTrack *track = audio_tracks[idx];
 
-                NSDictionary *settings = @{
-                    AVFormatIDKey: @(kAudioFormatLinearPCM),
-                    AVLinearPCMBitDepthKey: @32,
-                    AVLinearPCMIsFloatKey: @YES,
-                    AVLinearPCMIsNonInterleaved: @NO,
-                };
+                m_impl->req_sample_rate = options.audio_sample_rate;
+                m_impl->req_channels    = options.audio_channels;
 
                 m_impl->audio_output = [AVAssetReaderTrackOutput
                     assetReaderTrackOutputWithTrack:track
-                    outputSettings:settings];
+                    outputSettings:avb_audio_settings(m_impl->req_sample_rate,
+                                                      m_impl->req_channels)];
                 m_impl->audio_output.alwaysCopiesSampleData = NO;
                 [m_impl->reader addOutput:m_impl->audio_output];
                 m_impl->audio_stream_idx = idx;
 
-                // Get format info
+                // Effective output format: requested override, else source value.
+                int src_rate = 0, src_ch = 0;
                 NSArray *formats = track.formatDescriptions;
                 if (formats.count > 0) {
                     CMAudioFormatDescriptionRef fmt =
@@ -194,10 +209,12 @@ avb_result AvbBackendAVFoundation::open_file(const char *path, const avb_open_op
                     const AudioStreamBasicDescription *asbd =
                         CMAudioFormatDescriptionGetStreamBasicDescription(fmt);
                     if (asbd) {
-                        m_impl->sample_rate = (int)asbd->mSampleRate;
-                        m_impl->channels    = (int)asbd->mChannelsPerFrame;
+                        src_rate = (int)asbd->mSampleRate;
+                        src_ch   = (int)asbd->mChannelsPerFrame;
                     }
                 }
+                m_impl->sample_rate = m_impl->req_sample_rate > 0 ? m_impl->req_sample_rate : src_rate;
+                m_impl->channels    = m_impl->req_channels    > 0 ? m_impl->req_channels    : src_ch;
                 m_impl->audio_codec_name = avb_fourcc_to_name(avb_track_codec(track));
             }
         }
@@ -302,14 +319,10 @@ avb_result AvbBackendAVFoundation::seek(double seconds) {
         if (m_impl->audio_output) {
             AVAssetTrack *track =
                 avb_load_tracks(m_impl->asset, AVMediaTypeAudio)[m_impl->audio_stream_idx];
-            NSDictionary *settings = @{
-                AVFormatIDKey: @(kAudioFormatLinearPCM),
-                AVLinearPCMBitDepthKey: @32,
-                AVLinearPCMIsFloatKey: @YES,
-                AVLinearPCMIsNonInterleaved: @NO,
-            };
             m_impl->audio_output = [AVAssetReaderTrackOutput
-                assetReaderTrackOutputWithTrack:track outputSettings:settings];
+                assetReaderTrackOutputWithTrack:track
+                outputSettings:avb_audio_settings(m_impl->req_sample_rate,
+                                                  m_impl->req_channels)];
             m_impl->audio_output.alwaysCopiesSampleData = NO;
             [m_impl->reader addOutput:m_impl->audio_output];
         }

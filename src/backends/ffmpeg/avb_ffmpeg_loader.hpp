@@ -49,6 +49,7 @@ struct AvbFFmpegFuncs {
     int (*av_get_channel_layout_nb_channels)(uint64_t);
     void (*av_channel_layout_uninit)(AVChannelLayout *);
     int (*av_channel_layout_copy)(AVChannelLayout *, const AVChannelLayout *);
+    void (*av_channel_layout_default)(AVChannelLayout *, int);
 
     // swresample
     SwrContext *(*swr_alloc)();

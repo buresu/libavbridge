@@ -39,6 +39,10 @@ private:
     int m_audio_stream_idx = -1;
     int m_video_stream_idx = -1;
 
+    // Effective audio output format (after optional resample/remix).
+    int m_out_sample_rate = 0;
+    int m_out_channels    = 0;
+
     // Cached swscale input dimensions/format to detect changes
     int              m_sws_src_w      = 0;
     int              m_sws_src_h      = 0;

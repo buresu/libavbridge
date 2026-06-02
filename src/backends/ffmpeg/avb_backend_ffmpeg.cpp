@@ -136,11 +136,21 @@ avb_result AvbBackendFFmpeg::open_file(const char *path, const avb_open_options 
         m_swr = m_ff.swr_alloc();
         if (!m_swr) { set_error("swr_alloc failed."); return AVB_ERROR_OPEN_FAILED; }
 
+        // Effective output format: requested override (options), else source.
+        m_out_sample_rate = options.audio_sample_rate > 0
+            ? options.audio_sample_rate : m_audio_codec_ctx->sample_rate;
+
         AVChannelLayout out_layout;
-        m_ff.av_channel_layout_copy(&out_layout, &m_audio_codec_ctx->ch_layout);
+        if (options.audio_channels > 0) {
+            m_ff.av_channel_layout_default(&out_layout, options.audio_channels);
+        } else {
+            m_ff.av_channel_layout_copy(&out_layout, &m_audio_codec_ctx->ch_layout);
+        }
+        m_out_channels = out_layout.nb_channels;
+
         ret = m_ff.swr_alloc_set_opts2(
             &m_swr,
-            &out_layout, AV_SAMPLE_FMT_FLT, m_audio_codec_ctx->sample_rate,
+            &out_layout, AV_SAMPLE_FMT_FLT, m_out_sample_rate,
             &m_audio_codec_ctx->ch_layout, m_audio_codec_ctx->sample_fmt, m_audio_codec_ctx->sample_rate,
             0, nullptr);
         m_ff.av_channel_layout_uninit(&out_layout);
@@ -200,8 +210,8 @@ avb_result AvbBackendFFmpeg::open_file(const char *path, const avb_open_options 
         AVStream *st = m_fmt_ctx->streams[m_audio_stream_idx];
         m_media_info.audio.available    = 1;
         m_media_info.audio.stream_index = m_audio_stream_idx;
-        m_media_info.audio.sample_rate  = m_audio_codec_ctx->sample_rate;
-        m_media_info.audio.channels     = m_audio_codec_ctx->ch_layout.nb_channels;
+        m_media_info.audio.sample_rate  = m_out_sample_rate;
+        m_media_info.audio.channels     = m_out_channels;
         m_media_info.audio.codec_name   = m_audio_codec_name.c_str();
         m_media_info.audio.duration_sec =
             (st->duration != AV_NOPTS_VALUE && st->time_base.den != 0)
@@ -260,23 +270,30 @@ bool AvbBackendFFmpeg::fill_audio_buffer() {
     while (true) {
         int ret = m_ff.avcodec_receive_frame(m_audio_codec_ctx, m_audio_frame);
         if (ret == 0) {
-            int nb_channels = m_audio_codec_ctx->ch_layout.nb_channels;
-            int nb_samples  = m_audio_frame->nb_samples;
+            int nb_channels = m_out_channels;
+            int in_samples  = m_audio_frame->nb_samples;
+
+            // Output sample count after resampling can differ from the input;
+            // size for buffered delay + this frame, rounded up.
+            int in_rate = m_audio_codec_ctx->sample_rate;
+            int64_t delay = m_ff.swr_get_delay(m_swr, in_rate);
+            int out_capacity =
+                (int)(((int64_t)in_samples + delay) * m_out_sample_rate / in_rate) + 1;
 
             int buf_start = (int)m_audio_buf.size();
-            m_audio_buf.resize(buf_start + nb_samples * nb_channels);
+            m_audio_buf.resize(buf_start + out_capacity * nb_channels);
             float *dst = m_audio_buf.data() + buf_start;
 
             uint8_t *dst_ptr = (uint8_t *)dst;
-            int converted = m_ff.swr_convert(m_swr, &dst_ptr, nb_samples,
-                (const uint8_t **)m_audio_frame->data, nb_samples);
+            int converted = m_ff.swr_convert(m_swr, &dst_ptr, out_capacity,
+                (const uint8_t **)m_audio_frame->data, in_samples);
             if (converted < 0) {
                 m_audio_buf.resize(buf_start);
                 set_error("swr_convert failed.");
                 return false;
             }
-            if (converted < nb_samples)
-                m_audio_buf.resize(buf_start + converted * nb_channels);
+            // Shrink to the actual number of converted samples.
+            m_audio_buf.resize(buf_start + converted * nb_channels);
 
             m_ff.av_frame_unref(m_audio_frame);
             return true;
@@ -310,7 +327,7 @@ bool AvbBackendFFmpeg::fill_audio_buffer() {
 int AvbBackendFFmpeg::read_audio_f32(float *dst_interleaved, int frames) {
     if (!m_audio_codec_ctx || m_eof) return 0;
 
-    int nb_channels    = m_audio_codec_ctx->ch_layout.nb_channels;
+    int nb_channels    = m_out_channels;
     int samples_needed = frames * nb_channels;
     int samples_written = 0;
 

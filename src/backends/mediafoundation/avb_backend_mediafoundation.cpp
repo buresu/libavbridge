@@ -188,6 +188,13 @@ avb_result AvbBackendMediaFoundation::open_file(const char *path, const avb_open
         MFCreateMediaType(&want);
         want->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
         want->SetGUID(MF_MT_SUBTYPE,    MFAudioFormat_Float);
+        // Request a target rate/channel count; the Source Reader inserts the
+        // audio resampler as needed. 0 leaves the source value. The effective
+        // values are read back from the negotiated type below.
+        if (options.audio_sample_rate > 0)
+            want->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, (UINT32)options.audio_sample_rate);
+        if (options.audio_channels > 0)
+            want->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, (UINT32)options.audio_channels);
 
         hr = m_impl->reader->SetCurrentMediaType((DWORD)found_audio, nullptr, want.Get());
         if (SUCCEEDED(hr)) {

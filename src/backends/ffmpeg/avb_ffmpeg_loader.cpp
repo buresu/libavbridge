@@ -90,6 +90,7 @@ bool avb_ffmpeg_load(AvbFFmpegFuncs &out_funcs, char *err_buf, int err_buf_size)
     LOAD_SYM(g_handle_avutil, out_funcs, av_strerror);
     LOAD_SYM(g_handle_avutil, out_funcs, av_channel_layout_uninit);
     LOAD_SYM(g_handle_avutil, out_funcs, av_channel_layout_copy);
+    LOAD_SYM(g_handle_avutil, out_funcs, av_channel_layout_default);
 
     LOAD_SYM(g_handle_swresample, out_funcs, swr_alloc);
     LOAD_SYM(g_handle_swresample, out_funcs, swr_alloc_set_opts2);

@@ -209,6 +209,42 @@ int main(int argc, char *argv[]) {
         avb_close(fctx);
     }
 
+    // --- Audio output format control ---
+    // Request a non-source rate and channel count; the backend must report the
+    // effective values and produce interleaved float at that layout.
+    printf("audio format control:\n");
+    {
+        avb_open_options aopts{};
+        aopts.backend            = AVB_BACKEND_AUTO;
+        aopts.audio_stream_index = -1;
+        aopts.video_stream_index = -1;
+        aopts.enable_audio       = 1;
+        aopts.enable_video       = 0;
+        aopts.audio_sample_rate  = 22050;
+        aopts.audio_channels     = 2;
+
+        avb_context *actx = nullptr;
+        if (avb_open_file(&actx, path, &aopts) != AVB_OK) {
+            check(false, "open with audio override succeeds");
+        } else {
+            avb_media_info ai{};
+            avb_get_media_info(actx, &ai);
+            check(ai.audio.sample_rate == 22050, "audio resampled to 22050 Hz");
+            check(ai.audio.channels == 2, "audio remixed to 2 channels");
+
+            std::vector<float> buf(4096 * 2);
+            long frames = 0;
+            for (;;) {
+                int got = avb_read_audio_f32(actx, buf.data(), 4096);
+                if (got <= 0) break;
+                frames += got;
+            }
+            double seconds = (double)frames / 22050;
+            check_near(seconds, 3.0, 0.2, "resampled audio duration ~3.0s");
+        }
+        avb_close(actx);
+    }
+
     printf("\n%s (%d failure%s)\n",
            g_failures == 0 ? "ALL CHECKS PASSED" : "CHECKS FAILED",
            g_failures, g_failures == 1 ? "" : "s");

@@ -53,6 +53,11 @@ typedef struct avb_open_options {
     /* Desired decoded video pixel format. AVB_PIXEL_FORMAT_UNKNOWN (0) selects
      * the backend default (BGRA8). */
     avb_pixel_format video_format;
+    /* Desired decoded audio output format. 0 = keep the source value.
+     * avb_read_audio_f32 produces interleaved float at this rate/channel count,
+     * and avb_audio_info reports the effective (output) values. */
+    int audio_sample_rate;
+    int audio_channels;
 } avb_open_options;
 
 typedef struct avb_audio_info {
