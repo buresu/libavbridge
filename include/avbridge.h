@@ -35,6 +35,9 @@ typedef enum avb_backend {
     AVB_BACKEND_MEDIAFOUNDATION,
     AVB_BACKEND_AVFOUNDATION,
     AVB_BACKEND_FFMPEG,
+    /* Optional Linux backend, dynamically loaded like ffmpeg. Never selected by
+     * AVB_BACKEND_AUTO (which stays ffmpeg on Linux) — request it explicitly. */
+    AVB_BACKEND_GSTREAMER,
 } avb_backend;
 
 typedef enum avb_pixel_format {

@@ -1,8 +1,22 @@
 #include "avb_ffmpeg_loader.hpp"
 
-#include <dlfcn.h>
 #include <cstdio>
 #include <cstring>
+
+// Cross-platform dynamic loading: LoadLibrary/GetProcAddress on Windows,
+// dlopen/dlsym elsewhere. FFmpeg is loaded at runtime on every platform and
+// never linked at build time.
+#ifdef _WIN32
+#  include <windows.h>
+static void *lib_open(const char *name) { return (void *)LoadLibraryA(name); }
+static void *lib_sym(void *h, const char *s) { return (void *)GetProcAddress((HMODULE)h, s); }
+static void  lib_close(void *h) { FreeLibrary((HMODULE)h); }
+#else
+#  include <dlfcn.h>
+static void *lib_open(const char *name) { return dlopen(name, RTLD_LAZY | RTLD_GLOBAL); }
+static void *lib_sym(void *h, const char *s) { return dlsym(h, s); }
+static void  lib_close(void *h) { dlclose(h); }
+#endif
 
 static void *g_handle_avformat   = nullptr;
 static void *g_handle_avcodec    = nullptr;
@@ -12,7 +26,7 @@ static void *g_handle_swscale    = nullptr;
 
 static void *try_open(const char **names, int count) {
     for (int i = 0; i < count; i++) {
-        void *h = dlopen(names[i], RTLD_LAZY | RTLD_GLOBAL);
+        void *h = lib_open(names[i]);
         if (h) return h;
     }
     return nullptr;
@@ -20,7 +34,7 @@ static void *try_open(const char **names, int count) {
 
 #define LOAD_SYM(handle, funcs, name) \
     do { \
-        (funcs).name = (decltype((funcs).name))dlsym(handle, #name); \
+        (funcs).name = (decltype((funcs).name))lib_sym(handle, #name); \
         if (!(funcs).name) { \
             snprintf(err_buf, err_buf_size, "Failed to load symbol: %s", #name); \
             return false; \
@@ -29,10 +43,59 @@ static void *try_open(const char **names, int count) {
 
 bool avb_ffmpeg_load(AvbFFmpegFuncs &out_funcs, char *err_buf, int err_buf_size) {
     // The major version compiled against (from the FFmpeg headers) is tried
-    // first, so the loaded shared object's struct ABI matches what this
-    // translation unit expects. Older majors follow as a best-effort fallback,
-    // and the unversioned name last. Keep the leading entry in sync with the
+    // first, so the loaded library's struct ABI matches what this translation
+    // unit expects. Older majors follow as a best-effort fallback. Naming is
+    // platform-specific: "libavformat.so.<major>" / "avformat-<major>.dll" /
+    // "libavformat.<major>.dylib". Keep the leading entry in sync with the
     // FFmpeg headers used at build time (see *_VERSION_MAJOR).
+#if defined(_WIN32)
+    const char *avformat_names[] = {
+        "avformat-" AV_STRINGIFY(LIBAVFORMAT_VERSION_MAJOR) ".dll",
+        "avformat-62.dll", "avformat-61.dll", "avformat-60.dll", "avformat-59.dll"
+    };
+    const char *avcodec_names[] = {
+        "avcodec-" AV_STRINGIFY(LIBAVCODEC_VERSION_MAJOR) ".dll",
+        "avcodec-62.dll", "avcodec-61.dll", "avcodec-60.dll", "avcodec-59.dll"
+    };
+    const char *avutil_names[] = {
+        "avutil-" AV_STRINGIFY(LIBAVUTIL_VERSION_MAJOR) ".dll",
+        "avutil-60.dll", "avutil-59.dll", "avutil-58.dll", "avutil-57.dll"
+    };
+    const char *swresample_names[] = {
+        "swresample-" AV_STRINGIFY(LIBSWRESAMPLE_VERSION_MAJOR) ".dll",
+        "swresample-6.dll", "swresample-5.dll", "swresample-4.dll", "swresample-3.dll"
+    };
+    const char *swscale_names[] = {
+        "swscale-" AV_STRINGIFY(LIBSWSCALE_VERSION_MAJOR) ".dll",
+        "swscale-9.dll", "swscale-8.dll", "swscale-7.dll", "swscale-6.dll"
+    };
+#elif defined(__APPLE__)
+    const char *avformat_names[] = {
+        "libavformat." AV_STRINGIFY(LIBAVFORMAT_VERSION_MAJOR) ".dylib",
+        "libavformat.62.dylib", "libavformat.61.dylib", "libavformat.60.dylib",
+        "libavformat.59.dylib", "libavformat.dylib"
+    };
+    const char *avcodec_names[] = {
+        "libavcodec." AV_STRINGIFY(LIBAVCODEC_VERSION_MAJOR) ".dylib",
+        "libavcodec.62.dylib", "libavcodec.61.dylib", "libavcodec.60.dylib",
+        "libavcodec.59.dylib", "libavcodec.dylib"
+    };
+    const char *avutil_names[] = {
+        "libavutil." AV_STRINGIFY(LIBAVUTIL_VERSION_MAJOR) ".dylib",
+        "libavutil.60.dylib", "libavutil.59.dylib", "libavutil.58.dylib",
+        "libavutil.57.dylib", "libavutil.dylib"
+    };
+    const char *swresample_names[] = {
+        "libswresample." AV_STRINGIFY(LIBSWRESAMPLE_VERSION_MAJOR) ".dylib",
+        "libswresample.6.dylib", "libswresample.5.dylib", "libswresample.4.dylib",
+        "libswresample.3.dylib", "libswresample.dylib"
+    };
+    const char *swscale_names[] = {
+        "libswscale." AV_STRINGIFY(LIBSWSCALE_VERSION_MAJOR) ".dylib",
+        "libswscale.9.dylib", "libswscale.8.dylib", "libswscale.7.dylib",
+        "libswscale.6.dylib", "libswscale.dylib"
+    };
+#else
     const char *avformat_names[] = {
         "libavformat.so." AV_STRINGIFY(LIBAVFORMAT_VERSION_MAJOR),
         "libavformat.so.62", "libavformat.so.61", "libavformat.so.60",
@@ -58,6 +121,7 @@ bool avb_ffmpeg_load(AvbFFmpegFuncs &out_funcs, char *err_buf, int err_buf_size)
         "libswscale.so.9", "libswscale.so.8", "libswscale.so.7",
         "libswscale.so.6", "libswscale.so"
     };
+#endif
 
     g_handle_avformat   = try_open(avformat_names,
                                    (int)(sizeof(avformat_names)   / sizeof(avformat_names[0])));
@@ -128,9 +192,9 @@ bool avb_ffmpeg_load(AvbFFmpegFuncs &out_funcs, char *err_buf, int err_buf_size)
 }
 
 void avb_ffmpeg_unload() {
-    if (g_handle_swscale)    { dlclose(g_handle_swscale);    g_handle_swscale    = nullptr; }
-    if (g_handle_swresample) { dlclose(g_handle_swresample); g_handle_swresample = nullptr; }
-    if (g_handle_avcodec)    { dlclose(g_handle_avcodec);    g_handle_avcodec    = nullptr; }
-    if (g_handle_avformat)   { dlclose(g_handle_avformat);   g_handle_avformat   = nullptr; }
-    if (g_handle_avutil)     { dlclose(g_handle_avutil);     g_handle_avutil     = nullptr; }
+    if (g_handle_swscale)    { lib_close(g_handle_swscale);    g_handle_swscale    = nullptr; }
+    if (g_handle_swresample) { lib_close(g_handle_swresample); g_handle_swresample = nullptr; }
+    if (g_handle_avcodec)    { lib_close(g_handle_avcodec);    g_handle_avcodec    = nullptr; }
+    if (g_handle_avformat)   { lib_close(g_handle_avformat);   g_handle_avformat   = nullptr; }
+    if (g_handle_avutil)     { lib_close(g_handle_avutil);     g_handle_avutil     = nullptr; }
 }

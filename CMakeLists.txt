@@ -10,17 +10,26 @@ option(AVB_BUILD_SHARED "Build shared library" ON)
 option(AVB_BUILD_EXAMPLES "Build examples" ON)
 option(AVB_BUILD_TESTS "Build tests" OFF)
 
+# Native platform backends (each only builds on its own OS).
 option(AVB_ENABLE_MEDIAFOUNDATION "Enable Windows Media Foundation backend" ON)
 option(AVB_ENABLE_AVFOUNDATION "Enable Apple AVFoundation backend" ON)
-option(AVB_ENABLE_FFMPEG "Enable Linux FFmpeg runtime backend" ON)
 
-# Platform defaults
+# GStreamer is the default backend on Linux; available (opt-in) elsewhere.
+if(UNIX AND NOT APPLE)
+    option(AVB_ENABLE_GSTREAMER "Enable GStreamer runtime backend" ON)
+else()
+    option(AVB_ENABLE_GSTREAMER "Enable GStreamer runtime backend" OFF)
+endif()
+
+# FFmpeg is an optional, cross-platform runtime backend (dynamically loaded).
+# Off by default everywhere; enable it explicitly on Windows/macOS/Linux.
+option(AVB_ENABLE_FFMPEG "Enable FFmpeg runtime backend" OFF)
+
+# The native backends are OS-bound: force them off where they cannot build.
 if(WIN32)
     set(AVB_ENABLE_AVFOUNDATION OFF CACHE BOOL "" FORCE)
-    set(AVB_ENABLE_FFMPEG OFF CACHE BOOL "" FORCE)
 elseif(APPLE)
     set(AVB_ENABLE_MEDIAFOUNDATION OFF CACHE BOOL "" FORCE)
-    set(AVB_ENABLE_FFMPEG OFF CACHE BOOL "" FORCE)
 elseif(UNIX AND NOT APPLE)
     set(AVB_ENABLE_MEDIAFOUNDATION OFF CACHE BOOL "" FORCE)
     set(AVB_ENABLE_AVFOUNDATION OFF CACHE BOOL "" FORCE)
@@ -60,6 +69,13 @@ if(AVB_ENABLE_FFMPEG)
     )
 endif()
 
+if(AVB_ENABLE_GSTREAMER)
+    list(APPEND AVB_SOURCES
+        src/backends/gstreamer/avb_backend_gstreamer.cpp
+        src/backends/gstreamer/avb_gstreamer_loader.cpp
+    )
+endif()
+
 if(AVB_BUILD_SHARED)
     add_library(avbridge SHARED ${AVB_SOURCES})
     target_compile_definitions(avbridge PRIVATE AVB_BUILDING_SHARED)
@@ -93,9 +109,12 @@ endif()
 if(AVB_ENABLE_FFMPEG)
     target_compile_definitions(avbridge PRIVATE AVB_ENABLE_FFMPEG)
 
-    # Find FFmpeg headers for compilation only (no link-time dependency on FFmpeg)
+    # Find FFmpeg headers for compilation only (no link-time dependency on
+    # FFmpeg). Cross-platform hints; set FFMPEG_INCLUDE_DIR manually if needed.
     find_path(FFMPEG_INCLUDE_DIR libavformat/avformat.h
         HINTS /usr/include /usr/local/include
+              /opt/homebrew/include            # macOS (Apple Silicon Homebrew)
+              "$ENV{FFMPEG_ROOT}/include"      # Windows/manual installs
     )
     if(FFMPEG_INCLUDE_DIR)
         target_include_directories(avbridge PRIVATE ${FFMPEG_INCLUDE_DIR})
@@ -108,8 +127,25 @@ if(AVB_ENABLE_FFMPEG)
         message(WARNING "FFmpeg headers not found. FFmpeg backend may not compile correctly.")
     endif()
 
-    # Link only dl for runtime loading — no FFmpeg libraries at build time
-    target_link_libraries(avbridge PRIVATE dl)
+    # Link only dl for runtime loading — no FFmpeg libraries at build time.
+    # Windows resolves symbols via LoadLibrary/GetProcAddress (no libdl).
+    if(NOT WIN32)
+        target_link_libraries(avbridge PRIVATE ${CMAKE_DL_LIBS})
+    endif()
+endif()
+
+if(AVB_ENABLE_GSTREAMER)
+    target_compile_definitions(avbridge PRIVATE AVB_ENABLE_GSTREAMER)
+
+    # GStreamer/GLib headers for compilation only. The shared objects are loaded
+    # at runtime via dlopen (see avb_gstreamer_loader.cpp); we never link them.
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(GST REQUIRED gstreamer-1.0 gstreamer-app-1.0
+                                   gstreamer-pbutils-1.0 gobject-2.0 glib-2.0)
+    target_include_directories(avbridge PRIVATE ${GST_INCLUDE_DIRS})
+
+    # Link only dl for runtime loading — no GStreamer libraries at build time.
+    target_link_libraries(avbridge PRIVATE ${CMAKE_DL_LIBS})
 endif()
 
 set_target_properties(avbridge PROPERTIES
