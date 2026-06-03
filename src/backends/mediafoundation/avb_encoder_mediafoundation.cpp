@@ -40,6 +40,7 @@ struct AvbEncoderMediaFoundation::Impl {
     UINT32           fps_num = 30, fps_den = 1;
     avb_pixel_format input_format = AVB_PIXEL_FORMAT_BGRA8;
     bool             video_is_nv12 = false;
+    bool             video_is_i420 = false;
     bool             swizzle_rgba   = false; // RGBA8 input -> swizzle to BGRA for RGB32
 
     int     sample_rate = 0;
@@ -139,14 +140,40 @@ avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_op
                                          &m_impl->fps_num, &m_impl->fps_den);
         if (m_impl->fps_den == 0) { m_impl->fps_num = 30; m_impl->fps_den = 1; }
 
+        // Choose the encoder output (compressed) subtype from the requested
+        // codec. Media Foundation ships H.264 and (on Win10+, via the HEVC Video
+        // Extensions) HEVC encoder MFTs; it has no built-in VP9 encoder.
+        GUID     out_subtype;
+        UINT32   profile = 0;       // MF_MT_MPEG2_PROFILE value, 0 = leave unset
+        const char *vname;
+        switch (options.video.codec) {
+            case AVB_CODEC_AUTO:
+            case AVB_CODEC_H264:
+                out_subtype = MFVideoFormat_H264; profile = eAVEncH264VProfile_Main; vname = "H264"; break;
+            case AVB_CODEC_HEVC:
+                out_subtype = MFVideoFormat_HEVC; profile = eAVEncH265VProfile_Main_420_8; vname = "HEVC"; break;
+            case AVB_CODEC_VP9:
+                m_last_error = "VP9 encoding is not supported by the Media Foundation "
+                               "backend (use the FFmpeg or GStreamer backend).";
+                return AVB_ERROR_INVALID_ARGUMENT;
+            default:
+                m_last_error = "Invalid video codec (use AUTO/H264/HEVC).";
+                return AVB_ERROR_INVALID_ARGUMENT;
+        }
+
         // Choose the encoder input subtype from the caller's frame format. NV12
-        // is fed directly; BGRA/RGBA are fed as RGB32 (the Sink Writer inserts
-        // the color converter to NV12). RGBA is swizzled to BGRA on copy.
+        // and I420 are planar and fed directly; BGRA/RGBA are fed as RGB32. The
+        // Sink Writer inserts the color converter to whatever the encoder wants.
+        // RGBA is swizzled to BGRA on copy.
         GUID input_subtype;
         if (options.video.input_format == AVB_PIXEL_FORMAT_NV12) {
             m_impl->input_format  = AVB_PIXEL_FORMAT_NV12;
             m_impl->video_is_nv12 = true;
             input_subtype         = MFVideoFormat_NV12;
+        } else if (options.video.input_format == AVB_PIXEL_FORMAT_I420) {
+            m_impl->input_format  = AVB_PIXEL_FORMAT_I420;
+            m_impl->video_is_i420 = true;
+            input_subtype         = MFVideoFormat_I420;
         } else if (options.video.input_format == AVB_PIXEL_FORMAT_RGBA8) {
             m_impl->input_format = AVB_PIXEL_FORMAT_RGBA8;
             m_impl->swizzle_rgba = true;
@@ -162,18 +189,20 @@ avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_op
         ComPtr<IMFMediaType> out_type;
         MFCreateMediaType(&out_type);
         out_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-        out_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
+        out_type->SetGUID(MF_MT_SUBTYPE, out_subtype);
         out_type->SetUINT32(MF_MT_AVG_BITRATE, (UINT32)bitrate);
         out_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-        out_type->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Main);
+        if (profile) out_type->SetUINT32(MF_MT_MPEG2_PROFILE, profile);
         MFSetAttributeSize(out_type.Get(), MF_MT_FRAME_SIZE, m_impl->width, m_impl->height);
         MFSetAttributeRatio(out_type.Get(), MF_MT_FRAME_RATE, m_impl->fps_num, m_impl->fps_den);
         MFSetAttributeRatio(out_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
 
         hr = m_impl->writer->AddStream(out_type.Get(), &m_impl->video_stream);
         if (FAILED(hr)) {
-            char buf[128];
-            snprintf(buf, sizeof(buf), "AddStream (video/H264) failed: 0x%08lx", hr);
+            char buf[160];
+            snprintf(buf, sizeof(buf),
+                     "AddStream (video/%s) failed: 0x%08lx "
+                     "(the %s encoder MFT may not be installed)", vname, hr, vname);
             m_last_error = buf;
             return AVB_ERROR_OPEN_FAILED;
         }
@@ -190,7 +219,8 @@ avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_op
         // Positive stride marks top-down rows (our buffers); RGB32 would default
         // to bottom-up otherwise.
         in_type->SetUINT32(MF_MT_DEFAULT_STRIDE,
-                           (UINT32)(m_impl->video_is_nv12 ? m_impl->width : m_impl->width * 4));
+                           (UINT32)((m_impl->video_is_nv12 || m_impl->video_is_i420)
+                                        ? m_impl->width : m_impl->width * 4));
 
         hr = m_impl->writer->SetInputMediaType(m_impl->video_stream, in_type.Get(), nullptr);
         if (FAILED(hr)) {
@@ -210,6 +240,20 @@ avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_op
         }
         m_impl->sample_rate = options.audio.sample_rate;
         m_impl->channels    = options.audio.channels;
+
+        // Media Foundation ships an AAC encoder but no Opus encoder.
+        switch (options.audio.codec) {
+            case AVB_CODEC_AUTO:
+            case AVB_CODEC_AAC:
+                break;
+            case AVB_CODEC_OPUS:
+                m_last_error = "Opus encoding is not supported by the Media Foundation "
+                               "backend (use the FFmpeg or GStreamer backend).";
+                return AVB_ERROR_INVALID_ARGUMENT;
+            default:
+                m_last_error = "Invalid audio codec (use AUTO/AAC).";
+                return AVB_ERROR_INVALID_ARGUMENT;
+        }
 
         // Encoded (output) AAC type.
         ComPtr<IMFMediaType> out_type;
@@ -317,6 +361,23 @@ avb_result AvbEncoderMediaFoundation::write_video(const avb_video_frame &frame, 
         for (int y = 0; y < c_rows; ++y)
             memcpy(dst + y_size + (size_t)y * dst_stride,
                    frame.plane_data[1] + (size_t)y * frame.plane_stride[1], dst_stride);
+    } else if (m_impl->video_is_i420) {
+        // Three tightly-packed planes: Y (w x h), then Cb and Cr (w/2 x h/2).
+        const int    cw = w / 2, ch = h / 2;
+        const size_t y_size = (size_t)w * h;
+        const size_t c_size = (size_t)cw * ch;
+        total = (DWORD)(y_size + 2 * c_size);
+        m_impl->video_stage.resize(total);
+        unsigned char *dst = m_impl->video_stage.data();
+        for (int y = 0; y < h; ++y)
+            memcpy(dst + (size_t)y * w,
+                   frame.plane_data[0] + (size_t)y * frame.plane_stride[0], w);
+        for (int y = 0; y < ch; ++y)
+            memcpy(dst + y_size + (size_t)y * cw,
+                   frame.plane_data[1] + (size_t)y * frame.plane_stride[1], cw);
+        for (int y = 0; y < ch; ++y)
+            memcpy(dst + y_size + c_size + (size_t)y * cw,
+                   frame.plane_data[2] + (size_t)y * frame.plane_stride[2], cw);
     } else {
         const int dst_stride = w * 4;
         total = (DWORD)((size_t)dst_stride * h);

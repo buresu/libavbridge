@@ -32,6 +32,7 @@ struct AvbBackendMediaFoundation::Impl {
     avb_pixel_format video_avb_fmt = AVB_PIXEL_FORMAT_BGRA8;
     bool swizzle_rgba = false;    // request ARGB32 (BGRA), emit RGBA
     bool video_is_nv12 = false;   // request NV12, emit two planes (Y + CbCr)
+    bool video_is_i420 = false;   // request I420, emit three planes (Y + Cb + Cr)
 
     double duration_sec = 0.0;
     double frame_rate   = 0.0;
@@ -62,6 +63,7 @@ struct AvbBackendMediaFoundation::Impl {
         video_avb_fmt = AVB_PIXEL_FORMAT_BGRA8;
         swizzle_rgba = false;
         video_is_nv12 = false;
+        video_is_i420 = false;
         duration_sec = frame_rate = 0.0;
         audio_codec_name.clear();
         video_codec_name.clear();
@@ -239,6 +241,12 @@ avb_result AvbBackendMediaFoundation::open_file(const char *path, const avb_deco
             m_impl->video_is_nv12 = true;
             m_impl->swizzle_rgba  = false;
             want_subtype          = MFVideoFormat_NV12;
+        } else if (options.video_format == AVB_PIXEL_FORMAT_I420) {
+            // I420 is emitted as three planes (Y + Cb + Cr at half size).
+            m_impl->video_avb_fmt = AVB_PIXEL_FORMAT_I420;
+            m_impl->video_is_i420 = true;
+            m_impl->swizzle_rgba  = false;
+            want_subtype          = MFVideoFormat_I420;
         } else {
             m_impl->video_avb_fmt = (options.video_format == AVB_PIXEL_FORMAT_RGBA8)
                 ? AVB_PIXEL_FORMAT_RGBA8 : AVB_PIXEL_FORMAT_BGRA8;
@@ -534,6 +542,83 @@ avb_result AvbBackendMediaFoundation::read_video_frame(avb_video_frame &out_fram
         out_frame.plane_stride[0] = dst_stride;
         out_frame.plane_data[1]   = dst + y_size;
         out_frame.plane_stride[1] = dst_stride;
+        out_frame.data      = out_frame.plane_data[0];
+        out_frame.stride    = out_frame.plane_stride[0];
+        out_frame.data_size = (int)total;
+        return AVB_OK;
+    }
+
+    // I420: three planes, Y at full resolution, Cb and Cr at half resolution.
+    // All packed tightly (stride == width / width-half) into one buffer.
+    if (m_impl->video_is_i420) {
+        const int    cw = w / 2, ch = h / 2;
+        const size_t y_size = (size_t)w * h;
+        const size_t c_size = (size_t)cw * ch;
+        const size_t total  = y_size + 2 * c_size;
+        m_impl->video_frame_buf.resize(total);
+        unsigned char *dst = m_impl->video_frame_buf.data();
+        unsigned char *dst_u = dst + y_size;
+        unsigned char *dst_v = dst + y_size + c_size;
+
+        // Copy three planes given the source Y pitch (chroma pitch is half).
+        auto copy_planes = [&](const BYTE *y_src, int y_pitch) {
+            const int   c_pitch = y_pitch / 2;
+            const BYTE *u_src   = y_src + (size_t)y_pitch * h;
+            const BYTE *v_src   = u_src + (size_t)c_pitch * ch;
+            for (int y = 0; y < h; ++y)
+                memcpy(dst + (size_t)y * w, y_src + (ptrdiff_t)y * y_pitch, w);
+            for (int y = 0; y < ch; ++y)
+                memcpy(dst_u + (size_t)y * cw, u_src + (ptrdiff_t)y * c_pitch, cw);
+            for (int y = 0; y < ch; ++y)
+                memcpy(dst_v + (size_t)y * cw, v_src + (ptrdiff_t)y * c_pitch, cw);
+        };
+
+        bool copied = false;
+        DWORD buf_count = 0;
+        sample->GetBufferCount(&buf_count);
+
+        if (buf_count == 1) {
+            ComPtr<IMFMediaBuffer> raw;
+            sample->GetBufferByIndex(0, &raw);
+
+            ComPtr<IMF2DBuffer> buf2d;
+            if (raw && SUCCEEDED(raw.As(&buf2d))) {
+                BYTE *scan0 = nullptr;
+                LONG  pitch = 0;
+                if (SUCCEEDED(buf2d->Lock2D(&scan0, &pitch))) {
+                    copy_planes(scan0, (int)pitch);
+                    buf2d->Unlock2D();
+                    copied = true;
+                }
+            }
+        }
+
+        if (!copied) {
+            ComPtr<IMFMediaBuffer> buf;
+            sample->ConvertToContiguousBuffer(&buf);
+            if (!buf) return AVB_ERROR_DECODE_FAILED;
+
+            BYTE  *data = nullptr;
+            DWORD  len  = 0;
+            if (FAILED(buf->Lock(&data, nullptr, &len))) return AVB_ERROR_DECODE_FAILED;
+
+            const int src_stride = (m_impl->video_stride > 0) ? m_impl->video_stride : w;
+            copy_planes(data, src_stride);
+            buf->Unlock();
+        }
+
+        out_frame = {};
+        out_frame.width       = w;
+        out_frame.height      = h;
+        out_frame.format      = AVB_PIXEL_FORMAT_I420;
+        out_frame.pts_sec     = (double)ts / 1e7;
+        out_frame.plane_count = 3;
+        out_frame.plane_data[0]   = dst;
+        out_frame.plane_stride[0] = w;
+        out_frame.plane_data[1]   = dst_u;
+        out_frame.plane_stride[1] = cw;
+        out_frame.plane_data[2]   = dst_v;
+        out_frame.plane_stride[2] = cw;
         out_frame.data      = out_frame.plane_data[0];
         out_frame.stride    = out_frame.plane_stride[0];
         out_frame.data_size = (int)total;
