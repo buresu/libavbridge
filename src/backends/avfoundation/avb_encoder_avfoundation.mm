@@ -72,6 +72,8 @@ static OSType avb_enc_cvpixfmt(avb_pixel_format fmt, bool *ok) {
     switch (fmt) {
         case AVB_PIXEL_FORMAT_NV12:
             return kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
+        case AVB_PIXEL_FORMAT_I420:
+            return kCVPixelFormatType_420YpCbCr8Planar;
         case AVB_PIXEL_FORMAT_BGRA8:
         case AVB_PIXEL_FORMAT_UNKNOWN:
             return kCVPixelFormatType_32BGRA;
@@ -115,7 +117,7 @@ avb_result AvbEncoderAVFoundation::open(const char *path, const avb_encode_optio
             bool fmt_ok = true;
             m_impl->cv_pixel_format = avb_enc_cvpixfmt(options.video.input_format, &fmt_ok);
             if (!fmt_ok) {
-                m_last_error = "Unsupported video input_format (use BGRA8 or NV12).";
+                m_last_error = "Unsupported video input_format (use BGRA8, NV12 or I420).";
                 return AVB_ERROR_INVALID_ARGUMENT;
             }
             m_impl->input_format = options.video.input_format == AVB_PIXEL_FORMAT_UNKNOWN
@@ -124,8 +126,22 @@ avb_result AvbEncoderAVFoundation::open(const char *path, const avb_encode_optio
             m_impl->height     = options.video.height;
             m_impl->frame_rate = options.video.frame_rate > 0 ? options.video.frame_rate : 30.0;
 
+            // AVAssetWriter encodes H.264 and HEVC; it cannot produce VP9.
+            AVVideoCodecType vcodec;
+            switch (options.video.codec) {
+                case AVB_CODEC_AUTO:
+                case AVB_CODEC_H264: vcodec = AVVideoCodecTypeH264; break;
+                case AVB_CODEC_HEVC: vcodec = AVVideoCodecTypeHEVC; break;
+                case AVB_CODEC_VP9:
+                    m_last_error = "AVFoundation cannot encode VP9 (use H264 or HEVC).";
+                    return AVB_ERROR_INVALID_ARGUMENT;
+                default:
+                    m_last_error = "Invalid video codec (use AUTO/H264/HEVC).";
+                    return AVB_ERROR_INVALID_ARGUMENT;
+            }
+
             NSMutableDictionary *vsettings = [@{
-                AVVideoCodecKey:  AVVideoCodecTypeH264,
+                AVVideoCodecKey:  vcodec,
                 AVVideoWidthKey:  @(m_impl->width),
                 AVVideoHeightKey: @(m_impl->height),
             } mutableCopy];
@@ -164,6 +180,18 @@ avb_result AvbEncoderAVFoundation::open(const char *path, const avb_encode_optio
             }
             m_impl->sample_rate = options.audio.sample_rate;
             m_impl->channels    = options.audio.channels;
+
+            // AVAssetWriter into .mp4/.mov/.m4a produces AAC; it cannot mux Opus.
+            switch (options.audio.codec) {
+                case AVB_CODEC_AUTO:
+                case AVB_CODEC_AAC: break;
+                case AVB_CODEC_OPUS:
+                    m_last_error = "AVFoundation cannot encode Opus (use AAC).";
+                    return AVB_ERROR_INVALID_ARGUMENT;
+                default:
+                    m_last_error = "Invalid audio codec (use AUTO/AAC).";
+                    return AVB_ERROR_INVALID_ARGUMENT;
+            }
 
             NSDictionary *asettings = @{
                 AVFormatIDKey:         @(kAudioFormatMPEG4AAC),

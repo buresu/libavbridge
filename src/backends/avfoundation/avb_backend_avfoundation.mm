@@ -79,6 +79,8 @@ static OSType avb_cvpixfmt(avb_pixel_format want) {
     switch (want) {
         case AVB_PIXEL_FORMAT_NV12:
             return kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
+        case AVB_PIXEL_FORMAT_I420:
+            return kCVPixelFormatType_420YpCbCr8Planar;
         case AVB_PIXEL_FORMAT_BGRA8:
         case AVB_PIXEL_FORMAT_RGBA8:
         case AVB_PIXEL_FORMAT_UNKNOWN:
