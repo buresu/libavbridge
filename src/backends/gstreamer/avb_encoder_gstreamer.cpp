@@ -61,20 +61,51 @@ avb_result AvbEncoderGStreamer::open(const char *path, const avb_encode_options 
         return AVB_ERROR_INVALID_ARGUMENT;
     }
 
-    // Pick the muxer from the file extension (.mov -> qtmux, else mp4mux).
+    // Pick the muxer from the file extension. The codec must be compatible with
+    // the chosen container (e.g. VP9/Opus in .webm/.mkv); incompatible pairs are
+    // surfaced as a pipeline error.
     std::string p(path);
-    std::string ext = p.size() >= 4 ? p.substr(p.size() - 4) : "";
-    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-    const char *mux = (ext == ".mov") ? "qtmux" : "mp4mux";
+    auto ends_with = [&](const char *s) {
+        size_t n = strlen(s);
+        return p.size() >= n &&
+               std::equal(p.end() - n, p.end(), s,
+                          [](char a, char b){ return ::tolower(a) == b; });
+    };
+    const char *mux = ends_with(".webm") ? "webmmux"
+                    : ends_with(".mkv")  ? "matroskamux"
+                    : ends_with(".mov")  ? "qtmux"
+                                         : "mp4mux";
 
+    // Video codec -> encoder element (with its bitrate property/units).
+    char venc[128] = "x264enc speed-preset=veryfast";
     const char *vfmt = "BGRA";
     if (options.video.enable) {
         switch (options.video.input_format) {
             case AVB_PIXEL_FORMAT_RGBA8: m_input_format = AVB_PIXEL_FORMAT_RGBA8; vfmt = "RGBA"; break;
             case AVB_PIXEL_FORMAT_NV12:  m_input_format = AVB_PIXEL_FORMAT_NV12;  vfmt = "NV12"; break;
+            case AVB_PIXEL_FORMAT_I420:  m_input_format = AVB_PIXEL_FORMAT_I420;  vfmt = "I420"; break;
             case AVB_PIXEL_FORMAT_BGRA8:
             case AVB_PIXEL_FORMAT_UNKNOWN:
             default:                     m_input_format = AVB_PIXEL_FORMAT_BGRA8; vfmt = "BGRA"; break;
+        }
+        int kbps = options.video.bitrate / 1000;
+        switch (options.video.codec) {
+            case AVB_CODEC_AUTO:
+            case AVB_CODEC_H264:
+                if (kbps > 0) snprintf(venc, sizeof(venc), "x264enc speed-preset=veryfast bitrate=%d", kbps);
+                else          snprintf(venc, sizeof(venc), "x264enc speed-preset=veryfast");
+                break;
+            case AVB_CODEC_HEVC:
+                if (kbps > 0) snprintf(venc, sizeof(venc), "x265enc speed-preset=veryfast bitrate=%d", kbps);
+                else          snprintf(venc, sizeof(venc), "x265enc speed-preset=veryfast");
+                break;
+            case AVB_CODEC_VP9:
+                if (options.video.bitrate > 0) snprintf(venc, sizeof(venc), "vp9enc deadline=1 target-bitrate=%d", options.video.bitrate);
+                else          snprintf(venc, sizeof(venc), "vp9enc deadline=1");
+                break;
+            default:
+                m_last_error = "Invalid video codec (use AUTO/H264/HEVC/VP9).";
+                return AVB_ERROR_INVALID_ARGUMENT;
         }
         if (options.video.width <= 0 || options.video.height <= 0) {
             m_last_error = "Video width/height must be positive.";
@@ -85,7 +116,24 @@ avb_result AvbEncoderGStreamer::open(const char *path, const avb_encode_options 
         m_frame_rate = options.video.frame_rate > 0 ? options.video.frame_rate : 30.0;
         m_fps_n      = std::max(1L, std::lround(m_frame_rate));
     }
+
+    // Audio codec -> encoder element.
+    char aenc[128] = "avenc_aac";
     if (options.audio.enable) {
+        switch (options.audio.codec) {
+            case AVB_CODEC_AUTO:
+            case AVB_CODEC_AAC:
+                if (options.audio.bitrate > 0) snprintf(aenc, sizeof(aenc), "avenc_aac bitrate=%d", options.audio.bitrate);
+                else          snprintf(aenc, sizeof(aenc), "avenc_aac");
+                break;
+            case AVB_CODEC_OPUS:
+                if (options.audio.bitrate > 0) snprintf(aenc, sizeof(aenc), "opusenc bitrate=%d", options.audio.bitrate);
+                else          snprintf(aenc, sizeof(aenc), "opusenc");
+                break;
+            default:
+                m_last_error = "Invalid audio codec (use AUTO/AAC/OPUS).";
+                return AVB_ERROR_INVALID_ARGUMENT;
+        }
         if (options.audio.sample_rate <= 0 || options.audio.channels <= 0) {
             m_last_error = "Audio sample_rate/channels must be positive.";
             return AVB_ERROR_INVALID_ARGUMENT;
@@ -103,18 +151,12 @@ avb_result AvbEncoderGStreamer::open(const char *path, const avb_encode_options 
     if (options.video.enable) {
         n += snprintf(desc + n, sizeof(desc) - n,
             "appsrc name=vsrc is-live=false format=time max-bytes=0 ! videoconvert ! "
-            "x264enc speed-preset=veryfast");
-        if (options.video.bitrate > 0)
-            n += snprintf(desc + n, sizeof(desc) - n, " bitrate=%d", options.video.bitrate / 1000);
-        n += snprintf(desc + n, sizeof(desc) - n, " ! queue ! mux. ");
+            "%s ! queue ! mux. ", venc);
     }
     if (options.audio.enable) {
         n += snprintf(desc + n, sizeof(desc) - n,
             "appsrc name=asrc is-live=false format=time max-bytes=0 ! audioconvert ! "
-            "audioresample ! avenc_aac");
-        if (options.audio.bitrate > 0)
-            n += snprintf(desc + n, sizeof(desc) - n, " bitrate=%d", options.audio.bitrate);
-        n += snprintf(desc + n, sizeof(desc) - n, " ! queue ! mux. ");
+            "audioresample ! %s ! queue ! mux. ", aenc);
     }
 
     GError *err = nullptr;
@@ -179,24 +221,42 @@ avb_result AvbEncoderGStreamer::write_video(const avb_video_frame &frame, double
                : (double)m_video_index / m_frame_rate;
 
     // Repack into the tightly-packed (GST_ROUND_UP_4 stride) layout appsrc wants.
-    bool nv12 = (m_input_format == AVB_PIXEL_FORMAT_NV12);
-    int  ds0  = nv12 ? round_up_4(m_width) : round_up_4(m_width * 4);
-    size_t y_size = (size_t)ds0 * m_height;
-    size_t total  = y_size;
-    int    ds1 = 0; size_t uv_size = 0;
-    if (nv12) { ds1 = round_up_4(m_width); uv_size = (size_t)ds1 * (m_height / 2); total += uv_size; }
+    //   BGRA/RGBA: 1 plane; NV12: 2 (Y, CbCr); I420: 3 (Y, Cb, Cr).
+    int    dst_stride[AVB_MAX_PLANES] = {0, 0, 0};
+    int    plane_rows[AVB_MAX_PLANES] = {0, 0, 0};
+    int    plane_count = 1;
+    switch (m_input_format) {
+        case AVB_PIXEL_FORMAT_NV12:
+            plane_count = 2;
+            dst_stride[0] = round_up_4(m_width);     plane_rows[0] = m_height;
+            dst_stride[1] = round_up_4(m_width);     plane_rows[1] = m_height / 2;
+            break;
+        case AVB_PIXEL_FORMAT_I420:
+            plane_count = 3;
+            dst_stride[0] = round_up_4(m_width);     plane_rows[0] = m_height;
+            dst_stride[1] = round_up_4(m_width / 2); plane_rows[1] = m_height / 2;
+            dst_stride[2] = round_up_4(m_width / 2); plane_rows[2] = m_height / 2;
+            break;
+        default:
+            plane_count = 1;
+            dst_stride[0] = round_up_4(m_width * 4); plane_rows[0] = m_height;
+            break;
+    }
+
+    size_t plane_off[AVB_MAX_PLANES] = {0, 0, 0};
+    size_t total = 0;
+    for (int pl = 0; pl < plane_count; ++pl) {
+        plane_off[pl] = total;
+        total += (size_t)dst_stride[pl] * plane_rows[pl];
+    }
 
     m_stage.resize(total);
-    for (int y = 0; y < m_height; ++y) {
-        memcpy(m_stage.data() + (size_t)y * ds0,
-               frame.plane_data[0] + (size_t)y * frame.plane_stride[0],
-               std::min(frame.plane_stride[0], ds0));
-    }
-    if (nv12 && frame.plane_count >= 2) {
-        for (int y = 0; y < m_height / 2; ++y) {
-            memcpy(m_stage.data() + y_size + (size_t)y * ds1,
-                   frame.plane_data[1] + (size_t)y * frame.plane_stride[1],
-                   std::min(frame.plane_stride[1], ds1));
+    for (int pl = 0; pl < plane_count && pl < frame.plane_count; ++pl) {
+        int copy = std::min(frame.plane_stride[pl], dst_stride[pl]);
+        for (int y = 0; y < plane_rows[pl]; ++y) {
+            memcpy(m_stage.data() + plane_off[pl] + (size_t)y * dst_stride[pl],
+                   frame.plane_data[pl] + (size_t)y * frame.plane_stride[pl],
+                   copy);
         }
     }
 

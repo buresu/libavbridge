@@ -124,7 +124,7 @@ void AvbBackendFFmpeg::close_internal() {
     m_video_stream_idx = -1;
 }
 
-avb_result AvbBackendFFmpeg::open_file(const char *path, const avb_open_options &options) {
+avb_result AvbBackendFFmpeg::open_file(const char *path, const avb_decode_options &options) {
     if (!m_libs_loaded) return AVB_ERROR_BACKEND_NOT_AVAILABLE;
 
     close_internal();
@@ -229,6 +229,8 @@ avb_result AvbBackendFFmpeg::open_file(const char *path, const avb_open_options 
                 m_video_format = AVB_PIXEL_FORMAT_RGBA8; m_dst_av_fmt = AV_PIX_FMT_RGBA; break;
             case AVB_PIXEL_FORMAT_NV12:
                 m_video_format = AVB_PIXEL_FORMAT_NV12;  m_dst_av_fmt = AV_PIX_FMT_NV12; break;
+            case AVB_PIXEL_FORMAT_I420:
+                m_video_format = AVB_PIXEL_FORMAT_I420;  m_dst_av_fmt = AV_PIX_FMT_YUV420P; break;
             case AVB_PIXEL_FORMAT_BGRA8:
             case AVB_PIXEL_FORMAT_UNKNOWN:
             default:
@@ -438,18 +440,42 @@ avb_result AvbBackendFFmpeg::read_video_frame(avb_video_frame &out_frame) {
                 m_sws_src_fmt = src_fmt;
             }
 
-            // Lay out the destination buffer. Packed RGBA/BGRA is a single plane;
-            // NV12 is two planes (Y at full height, interleaved CbCr at half).
-            bool is_nv12 = (m_video_format == AVB_PIXEL_FORMAT_NV12);
-            int  y_stride = is_nv12 ? w : w * 4;
-            int  y_size   = y_stride * h;
-            int  uv_stride = w;            // NV12: interleaved CbCr, same width
-            int  uv_size   = is_nv12 ? uv_stride * (h / 2) : 0;
-            m_video_out_buf.resize((size_t)y_size + uv_size);
+            // Lay out the destination buffer per output format:
+            //   RGBA/BGRA: 1 packed plane (stride w*4)
+            //   NV12:      2 planes — Y (w), interleaved CbCr (w) at half height
+            //   I420:      3 planes — Y (w), Cb (w/2), Cr (w/2) at half height
+            int      plane_count = 1;
+            int      dst_stride[AVB_MAX_PLANES] = {0, 0, 0};
+            int      plane_rows[AVB_MAX_PLANES] = {0, 0, 0};
+            switch (m_video_format) {
+                case AVB_PIXEL_FORMAT_NV12:
+                    plane_count = 2;
+                    dst_stride[0] = w;     plane_rows[0] = h;
+                    dst_stride[1] = w;     plane_rows[1] = h / 2;
+                    break;
+                case AVB_PIXEL_FORMAT_I420:
+                    plane_count = 3;
+                    dst_stride[0] = w;     plane_rows[0] = h;
+                    dst_stride[1] = w / 2; plane_rows[1] = h / 2;
+                    dst_stride[2] = w / 2; plane_rows[2] = h / 2;
+                    break;
+                default: // RGBA8 / BGRA8
+                    plane_count = 1;
+                    dst_stride[0] = w * 4; plane_rows[0] = h;
+                    break;
+            }
 
-            uint8_t *dst_data[2]   = { m_video_out_buf.data(),
-                                       m_video_out_buf.data() + y_size };
-            int      dst_stride[2] = { y_stride, uv_stride };
+            size_t plane_off[AVB_MAX_PLANES] = {0, 0, 0};
+            size_t total = 0;
+            for (int p = 0; p < plane_count; ++p) {
+                plane_off[p] = total;
+                total += (size_t)dst_stride[p] * plane_rows[p];
+            }
+            m_video_out_buf.resize(total);
+
+            uint8_t *dst_data[AVB_MAX_PLANES] = {nullptr, nullptr, nullptr};
+            for (int p = 0; p < plane_count; ++p)
+                dst_data[p] = m_video_out_buf.data() + plane_off[p];
             m_ff.sws_scale(m_sws,
                 (const uint8_t *const *)m_video_frame->data, m_video_frame->linesize,
                 0, h, dst_data, dst_stride);
@@ -461,12 +487,10 @@ avb_result AvbBackendFFmpeg::read_video_frame(avb_video_frame &out_frame) {
             out_frame.height      = h;
             out_frame.format      = m_video_format;
             out_frame.pts_sec     = frame_pts;
-            out_frame.plane_count = is_nv12 ? 2 : 1;
-            out_frame.plane_data[0]   = dst_data[0];
-            out_frame.plane_stride[0] = y_stride;
-            if (is_nv12) {
-                out_frame.plane_data[1]   = dst_data[1];
-                out_frame.plane_stride[1] = uv_stride;
+            out_frame.plane_count = plane_count;
+            for (int p = 0; p < plane_count; ++p) {
+                out_frame.plane_data[p]   = dst_data[p];
+                out_frame.plane_stride[p] = dst_stride[p];
             }
             out_frame.data      = out_frame.plane_data[0];
             out_frame.stride    = out_frame.plane_stride[0];

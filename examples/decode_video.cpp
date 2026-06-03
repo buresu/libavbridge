@@ -49,28 +49,28 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    avb_open_options opts{};
+    avb_decode_options opts{};
     opts.backend            = AVB_BACKEND_AUTO;
     opts.audio_stream_index = -1;
     opts.video_stream_index = -1;
     opts.enable_audio       = 0;
     opts.enable_video       = 1;
 
-    avb_context *ctx = nullptr;
-    avb_result res = avb_open_file(&ctx, argv[1], &opts);
+    avb_decoder *ctx = nullptr;
+    avb_result res = avb_decoder_open(&ctx, argv[1], &opts);
     if (res != AVB_OK) {
-        fprintf(stderr, "avb_open_file failed (%d): %s\n", res,
-                avb_get_last_error(ctx) ? avb_get_last_error(ctx) : "unknown");
-        avb_close(ctx);
+        fprintf(stderr, "avb_decoder_open failed (%d): %s\n", res,
+                avb_decoder_get_last_error(ctx) ? avb_decoder_get_last_error(ctx) : "unknown");
+        avb_decoder_close(ctx);
         return 1;
     }
 
     avb_media_info info{};
-    avb_get_media_info(ctx, &info);
+    avb_decoder_get_media_info(ctx, &info);
 
     if (!info.video.available) {
         fprintf(stderr, "No video stream found in: %s\n", argv[1]);
-        avb_close(ctx);
+        avb_decoder_close(ctx);
         return 1;
     }
 
@@ -85,11 +85,11 @@ int main(int argc, char *argv[]) {
 
     while (true) {
         avb_video_frame frame{};
-        avb_result fres = avb_read_video_frame(ctx, &frame);
+        avb_result fres = avb_decoder_read_video_frame(ctx, &frame);
         if (fres == AVB_ERROR_EOF) break;
         if (fres != AVB_OK) {
             fprintf(stderr, "read_video_frame failed (%d): %s\n", fres,
-                    avb_get_last_error(ctx) ? avb_get_last_error(ctx) : "unknown");
+                    avb_decoder_get_last_error(ctx) ? avb_decoder_get_last_error(ctx) : "unknown");
             break;
         }
 
@@ -100,11 +100,11 @@ int main(int argc, char *argv[]) {
             printf("  Frame %4d  pts=%.3f sec  -> %s\n", frame_idx, frame.pts_sec, out_path);
         }
 
-        avb_release_video_frame(ctx, &frame);
+        avb_decoder_release_video_frame(ctx, &frame);
         frame_idx++;
     }
 
     printf("Done. Decoded %d frames.\n", frame_idx);
-    avb_close(ctx);
+    avb_decoder_close(ctx);
     return 0;
 }

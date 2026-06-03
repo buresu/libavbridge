@@ -157,7 +157,7 @@ const char *AvbBackendAVFoundation::get_last_error() const {
     return m_last_error.empty() ? nullptr : m_last_error.c_str();
 }
 
-avb_result AvbBackendAVFoundation::open_file(const char *path, const avb_open_options &options) {
+avb_result AvbBackendAVFoundation::open_file(const char *path, const avb_decode_options &options) {
     @autoreleasepool {
         NSString *ns_path = [NSString stringWithUTF8String:path];
         NSURL *url = [NSURL fileURLWithPath:ns_path];
@@ -503,7 +503,7 @@ const char *AvbBackendAVFoundation::get_backend_name() const { return "avfoundat
 const char *AvbBackendAVFoundation::get_last_error() const {
     return m_last_error.empty() ? nullptr : m_last_error.c_str();
 }
-avb_result AvbBackendAVFoundation::open_file(const char *, const avb_open_options &) {
+avb_result AvbBackendAVFoundation::open_file(const char *, const avb_decode_options &) {
     return AVB_ERROR_BACKEND_NOT_AVAILABLE;
 }
 avb_result AvbBackendAVFoundation::get_media_info(avb_media_info &) {

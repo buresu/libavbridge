@@ -159,7 +159,7 @@ static std::string mf_native_codec_name(IMFSourceReader *reader, DWORD stream) {
     return mf_subtype_name(sub);
 }
 
-avb_result AvbBackendMediaFoundation::open_file(const char *path, const avb_open_options &options) {
+avb_result AvbBackendMediaFoundation::open_file(const char *path, const avb_decode_options &options) {
     if (!m_impl->mf_initialized) return AVB_ERROR_BACKEND_NOT_AVAILABLE;
 
     m_impl->close_streams();
@@ -635,7 +635,7 @@ const char *AvbBackendMediaFoundation::get_backend_name() const { return "mediaf
 const char *AvbBackendMediaFoundation::get_last_error() const {
     return m_last_error.empty() ? nullptr : m_last_error.c_str();
 }
-avb_result AvbBackendMediaFoundation::open_file(const char *, const avb_open_options &) {
+avb_result AvbBackendMediaFoundation::open_file(const char *, const avb_decode_options &) {
     return AVB_ERROR_BACKEND_NOT_AVAILABLE;
 }
 avb_result AvbBackendMediaFoundation::get_media_info(avb_media_info &) {

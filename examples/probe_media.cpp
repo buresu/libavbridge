@@ -8,24 +8,24 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    avb_open_options opts{};
+    avb_decode_options opts{};
     opts.backend            = AVB_BACKEND_AUTO;
     opts.audio_stream_index = -1;
     opts.video_stream_index = -1;
     opts.enable_audio       = 1;
     opts.enable_video       = 1;
 
-    avb_context *ctx = nullptr;
-    avb_result res = avb_open_file(&ctx, argv[1], &opts);
+    avb_decoder *ctx = nullptr;
+    avb_result res = avb_decoder_open(&ctx, argv[1], &opts);
     if (res != AVB_OK) {
-        fprintf(stderr, "avb_open_file failed (%d): %s\n", res,
-                avb_get_last_error(ctx) ? avb_get_last_error(ctx) : "unknown error");
-        avb_close(ctx);
+        fprintf(stderr, "avb_decoder_open failed (%d): %s\n", res,
+                avb_decoder_get_last_error(ctx) ? avb_decoder_get_last_error(ctx) : "unknown error");
+        avb_decoder_close(ctx);
         return 1;
     }
 
     avb_media_info info{};
-    avb_get_media_info(ctx, &info);
+    avb_decoder_get_media_info(ctx, &info);
 
     printf("Backend  : %s\n", info.backend_name ? info.backend_name : "unknown");
     printf("Duration : %.3f sec\n", info.duration_sec);
@@ -52,6 +52,6 @@ int main(int argc, char *argv[]) {
         printf("\nVideo: not available\n");
     }
 
-    avb_close(ctx);
+    avb_decoder_close(ctx);
     return 0;
 }

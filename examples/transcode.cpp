@@ -15,7 +15,7 @@ int main(int argc, char *argv[]) {
     }
 
     // --- Open the source for decode (BGRA video + audio) ---
-    avb_open_options dopts{};
+    avb_decode_options dopts{};
     dopts.backend            = AVB_BACKEND_AUTO;
     dopts.audio_stream_index = -1;
     dopts.video_stream_index = -1;
@@ -23,15 +23,15 @@ int main(int argc, char *argv[]) {
     dopts.enable_video       = 1;
     dopts.video_format       = AVB_PIXEL_FORMAT_BGRA8;
 
-    avb_context *dec = nullptr;
-    if (avb_open_file(&dec, argv[1], &dopts) != AVB_OK) {
+    avb_decoder *dec = nullptr;
+    if (avb_decoder_open(&dec, argv[1], &dopts) != AVB_OK) {
         fprintf(stderr, "open input failed: %s\n",
-                avb_get_last_error(dec) ? avb_get_last_error(dec) : "unknown");
-        avb_close(dec);
+                avb_decoder_get_last_error(dec) ? avb_decoder_get_last_error(dec) : "unknown");
+        avb_decoder_close(dec);
         return 1;
     }
     avb_media_info info{};
-    avb_get_media_info(dec, &info);
+    avb_decoder_get_media_info(dec, &info);
 
     // --- Configure the encoder to match the source ---
     avb_encode_options eopts{};
@@ -57,7 +57,7 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "open encoder failed: %s\n",
                 avb_encoder_get_last_error(enc) ? avb_encoder_get_last_error(enc) : "unknown");
         avb_encoder_close(enc);
-        avb_close(dec);
+        avb_decoder_close(dec);
         return 1;
     }
 
@@ -68,27 +68,27 @@ int main(int argc, char *argv[]) {
 
     bool have_video = info.video.available;
     avb_video_frame f{};
-    if (have_video) have_video = (avb_read_video_frame(dec, &f) == AVB_OK);
+    if (have_video) have_video = (avb_decoder_read_video_frame(dec, &f) == AVB_OK);
 
     while (have_video) {
         if (avb_encoder_write_video(enc, &f, f.pts_sec) != AVB_OK) {
             fprintf(stderr, "write video failed: %s\n", avb_encoder_get_last_error(enc));
-            avb_release_video_frame(dec, &f);
-            avb_encoder_close(enc); avb_close(dec); return 1;
+            avb_decoder_release_video_frame(dec, &f);
+            avb_encoder_close(enc); avb_decoder_close(dec); return 1;
         }
-        avb_release_video_frame(dec, &f);
+        avb_decoder_release_video_frame(dec, &f);
         video_count++;
 
-        have_video = (avb_read_video_frame(dec, &f) == AVB_OK);
+        have_video = (avb_decoder_read_video_frame(dec, &f) == AVB_OK);
         double target = have_video ? f.pts_sec : 1e9;
 
         // Feed audio up to the next video frame's timestamp.
         while (info.audio.available && audio_pts <= target) {
-            int got = avb_read_audio_f32(dec, pcm.data(), 1024);
+            int got = avb_decoder_read_audio_f32(dec, pcm.data(), 1024);
             if (got <= 0) break;
             if (avb_encoder_write_audio_f32(enc, pcm.data(), got) != AVB_OK) {
                 fprintf(stderr, "write audio failed: %s\n", avb_encoder_get_last_error(enc));
-                avb_encoder_close(enc); avb_close(dec); return 1;
+                avb_encoder_close(enc); avb_decoder_close(dec); return 1;
             }
             audio_count += got;
             audio_pts += (double)got / info.audio.sample_rate;
@@ -97,24 +97,24 @@ int main(int argc, char *argv[]) {
 
     // Drain any remaining audio (e.g. audio-only input, or tail past last frame).
     while (info.audio.available) {
-        int got = avb_read_audio_f32(dec, pcm.data(), 1024);
+        int got = avb_decoder_read_audio_f32(dec, pcm.data(), 1024);
         if (got <= 0) break;
         if (avb_encoder_write_audio_f32(enc, pcm.data(), got) != AVB_OK) {
             fprintf(stderr, "write audio failed: %s\n", avb_encoder_get_last_error(enc));
-            avb_encoder_close(enc); avb_close(dec); return 1;
+            avb_encoder_close(enc); avb_decoder_close(dec); return 1;
         }
         audio_count += got;
     }
 
     if (avb_encoder_finish(enc) != AVB_OK) {
         fprintf(stderr, "finish failed: %s\n", avb_encoder_get_last_error(enc));
-        avb_encoder_close(enc); avb_close(dec); return 1;
+        avb_encoder_close(enc); avb_decoder_close(dec); return 1;
     }
 
     printf("Transcoded %d video frames and %d audio frames -> %s\n",
            video_count, audio_count, argv[2]);
 
     avb_encoder_close(enc);
-    avb_close(dec);
+    avb_decoder_close(dec);
     return 0;
 }

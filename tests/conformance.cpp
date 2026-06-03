@@ -50,24 +50,24 @@ int main(int argc, char *argv[]) {
     }
     const char *path = argv[1];
 
-    avb_open_options opts{};
+    avb_decode_options opts{};
     opts.backend            = AVB_BACKEND_AUTO;
     opts.audio_stream_index = -1;
     opts.video_stream_index = -1;
     opts.enable_audio       = 1;
     opts.enable_video       = 1;
 
-    avb_context *ctx = nullptr;
-    avb_result res = avb_open_file(&ctx, path, &opts);
+    avb_decoder *ctx = nullptr;
+    avb_result res = avb_decoder_open(&ctx, path, &opts);
     if (res != AVB_OK) {
-        fprintf(stderr, "avb_open_file failed (%d): %s\n", res,
-                avb_get_last_error(ctx) ? avb_get_last_error(ctx) : "unknown");
-        avb_close(ctx);
+        fprintf(stderr, "avb_decoder_open failed (%d): %s\n", res,
+                avb_decoder_get_last_error(ctx) ? avb_decoder_get_last_error(ctx) : "unknown");
+        avb_decoder_close(ctx);
         return 1;
     }
 
     avb_media_info info{};
-    res = avb_get_media_info(ctx, &info);
+    res = avb_decoder_get_media_info(ctx, &info);
     check(res == AVB_OK, "get_media_info succeeds");
 
     printf("Backend: %s\n", info.backend_name ? info.backend_name : "(null)");
@@ -97,7 +97,7 @@ int main(int argc, char *argv[]) {
         double sumsq = 0.0;
         long count = 0;
         for (;;) {
-            int got = avb_read_audio_f32(ctx, buf.data(), BLOCK);
+            int got = avb_decoder_read_audio_f32(ctx, buf.data(), BLOCK);
             if (got <= 0) break;
             for (int i = 0; i < got * info.audio.channels; ++i) {
                 sumsq += (double)buf[i] * buf[i];
@@ -117,7 +117,7 @@ int main(int argc, char *argv[]) {
     {
         for (;;) {
             avb_video_frame f{};
-            avb_result vr = avb_read_video_frame(ctx, &f);
+            avb_result vr = avb_decoder_read_video_frame(ctx, &f);
             if (vr == AVB_ERROR_EOF) break;
             if (vr != AVB_OK) { check(false, "read_video_frame returns OK or EOF"); break; }
 
@@ -127,7 +127,7 @@ int main(int argc, char *argv[]) {
                 check(f.data != nullptr && f.data_size > 0, "video frame has data");
                 check(f.data_size >= f.stride * f.height, "data_size covers stride*height");
             }
-            avb_release_video_frame(ctx, &f);
+            avb_decoder_release_video_frame(ctx, &f);
             ++total_video_frames;
         }
         // 3s * 25fps = 75 frames; allow a small tolerance for fps rounding.
@@ -137,18 +137,18 @@ int main(int argc, char *argv[]) {
     // --- Seek ---
     printf("seek:\n");
     {
-        avb_result sr = avb_seek(ctx, 1.5);
+        avb_result sr = avb_decoder_seek(ctx, 1.5);
         check(sr == AVB_OK, "seek(1.5) succeeds");
         avb_video_frame f{};
-        avb_result vr = avb_read_video_frame(ctx, &f);
+        avb_result vr = avb_decoder_read_video_frame(ctx, &f);
         check(vr == AVB_OK, "read_video_frame after seek succeeds");
         if (vr == AVB_OK) {
             check_near(f.pts_sec, 1.5, 0.2, "first frame pts after seek ~1.5s");
-            avb_release_video_frame(ctx, &f);
+            avb_decoder_release_video_frame(ctx, &f);
         }
     }
 
-    avb_close(ctx);
+    avb_decoder_close(ctx);
 
     // --- Pixel format selection ---
     // Re-open video-only in each requested format and validate the frame layout.
@@ -163,7 +163,7 @@ int main(int argc, char *argv[]) {
         { AVB_PIXEL_FORMAT_NV12,  "NV12",  2, false },
     };
     for (const auto &fc : cases) {
-        avb_open_options fopts{};
+        avb_decode_options fopts{};
         fopts.backend            = AVB_BACKEND_AUTO;
         fopts.audio_stream_index = -1;
         fopts.video_stream_index = -1;
@@ -171,20 +171,20 @@ int main(int argc, char *argv[]) {
         fopts.enable_video       = 1;
         fopts.video_format       = fc.fmt;
 
-        avb_context *fctx = nullptr;
+        avb_decoder *fctx = nullptr;
         char msg[128];
-        if (avb_open_file(&fctx, path, &fopts) != AVB_OK) {
+        if (avb_decoder_open(&fctx, path, &fopts) != AVB_OK) {
             if (fc.mandatory) {
                 snprintf(msg, sizeof(msg), "open with %s succeeds", fc.name);
                 check(false, msg);
             } else {
                 printf("  [SKIP] %s not supported by this backend\n", fc.name);
             }
-            avb_close(fctx);
+            avb_decoder_close(fctx);
             continue;
         }
         avb_video_frame f{};
-        avb_result vr = avb_read_video_frame(fctx, &f);
+        avb_result vr = avb_decoder_read_video_frame(fctx, &f);
         snprintf(msg, sizeof(msg), "%s: decode first frame", fc.name);
         check(vr == AVB_OK, msg);
         if (vr == AVB_OK) {
@@ -204,9 +204,9 @@ int main(int argc, char *argv[]) {
                             + (long)f.plane_stride[1] * (f.height / 2);
                 check(f.data_size == expect, "NV12: data_size == Y + CbCr planes");
             }
-            avb_release_video_frame(fctx, &f);
+            avb_decoder_release_video_frame(fctx, &f);
         }
-        avb_close(fctx);
+        avb_decoder_close(fctx);
     }
 
     // --- Audio output format control ---
@@ -214,7 +214,7 @@ int main(int argc, char *argv[]) {
     // effective values and produce interleaved float at that layout.
     printf("audio format control:\n");
     {
-        avb_open_options aopts{};
+        avb_decode_options aopts{};
         aopts.backend            = AVB_BACKEND_AUTO;
         aopts.audio_stream_index = -1;
         aopts.video_stream_index = -1;
@@ -223,26 +223,26 @@ int main(int argc, char *argv[]) {
         aopts.audio_sample_rate  = 22050;
         aopts.audio_channels     = 2;
 
-        avb_context *actx = nullptr;
-        if (avb_open_file(&actx, path, &aopts) != AVB_OK) {
+        avb_decoder *actx = nullptr;
+        if (avb_decoder_open(&actx, path, &aopts) != AVB_OK) {
             check(false, "open with audio override succeeds");
         } else {
             avb_media_info ai{};
-            avb_get_media_info(actx, &ai);
+            avb_decoder_get_media_info(actx, &ai);
             check(ai.audio.sample_rate == 22050, "audio resampled to 22050 Hz");
             check(ai.audio.channels == 2, "audio remixed to 2 channels");
 
             std::vector<float> buf(4096 * 2);
             long frames = 0;
             for (;;) {
-                int got = avb_read_audio_f32(actx, buf.data(), 4096);
+                int got = avb_decoder_read_audio_f32(actx, buf.data(), 4096);
                 if (got <= 0) break;
                 frames += got;
             }
             double seconds = (double)frames / 22050;
             check_near(seconds, 3.0, 0.2, "resampled audio duration ~3.0s");
         }
-        avb_close(actx);
+        avb_decoder_close(actx);
     }
 
     printf("\n%s (%d failure%s)\n",

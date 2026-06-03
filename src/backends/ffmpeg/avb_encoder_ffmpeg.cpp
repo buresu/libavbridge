@@ -79,6 +79,7 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
         switch (options.video.input_format) {
             case AVB_PIXEL_FORMAT_RGBA8: m_input_format = AVB_PIXEL_FORMAT_RGBA8; m_src_av_fmt = AV_PIX_FMT_RGBA; break;
             case AVB_PIXEL_FORMAT_NV12:  m_input_format = AVB_PIXEL_FORMAT_NV12;  m_src_av_fmt = AV_PIX_FMT_NV12; break;
+            case AVB_PIXEL_FORMAT_I420:  m_input_format = AVB_PIXEL_FORMAT_I420;  m_src_av_fmt = AV_PIX_FMT_YUV420P; break;
             case AVB_PIXEL_FORMAT_BGRA8:
             case AVB_PIXEL_FORMAT_UNKNOWN:
             default:                     m_input_format = AVB_PIXEL_FORMAT_BGRA8; m_src_av_fmt = AV_PIX_FMT_BGRA; break;
@@ -88,8 +89,19 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
         m_frame_rate = options.video.frame_rate > 0 ? options.video.frame_rate : 30.0;
         m_fps_den    = std::max(1L, std::lround(m_frame_rate));
 
-        const AVCodec *vcodec = m_ff.avcodec_find_encoder(AV_CODEC_ID_H264);
-        if (!vcodec) { set_error("No H.264 encoder available in this FFmpeg build."); return AVB_ERROR_OPEN_FAILED; }
+        AVCodecID vid;
+        const char *vname;
+        switch (options.video.codec) {
+            case AVB_CODEC_AUTO:
+            case AVB_CODEC_H264: vid = AV_CODEC_ID_H264; vname = "H.264"; break;
+            case AVB_CODEC_HEVC: vid = AV_CODEC_ID_HEVC; vname = "HEVC";  break;
+            case AVB_CODEC_VP9:  vid = AV_CODEC_ID_VP9;  vname = "VP9";   break;
+            default:
+                set_error("Invalid video codec (use AUTO/H264/HEVC/VP9).");
+                return AVB_ERROR_INVALID_ARGUMENT;
+        }
+        const AVCodec *vcodec = m_ff.avcodec_find_encoder(vid);
+        if (!vcodec) { set_error("No %s encoder available in this FFmpeg build.", vname); return AVB_ERROR_OPEN_FAILED; }
 
         m_vstream = m_ff.avformat_new_stream(m_fmt_ctx, nullptr);
         if (!m_vstream) { set_error("avformat_new_stream (video) failed."); return AVB_ERROR_OPEN_FAILED; }
@@ -104,8 +116,13 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
         if (options.video.bitrate > 0) m_venc->bit_rate = options.video.bitrate;
         if (global_header) m_venc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 
+        // Speed knobs for the common encoders. avcodec_open2 silently ignores
+        // options a given encoder doesn't recognise, so it is safe to set the
+        // x264/x265 "preset" and the libvpx "deadline"/"cpu-used" together.
         AVDictionary *vopts = nullptr;
-        m_ff.av_dict_set(&vopts, "preset", "veryfast", 0);
+        m_ff.av_dict_set(&vopts, "preset",   "veryfast", 0);
+        m_ff.av_dict_set(&vopts, "deadline", "realtime", 0);
+        m_ff.av_dict_set(&vopts, "cpu-used", "8",        0);
         ret = m_ff.avcodec_open2(m_venc, vcodec, &vopts);
         m_ff.av_dict_free(&vopts);
         if (ret < 0) { set_ff_error("avcodec_open2 (video)", ret); return AVB_ERROR_OPEN_FAILED; }
@@ -134,8 +151,29 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
         m_sample_rate = options.audio.sample_rate;
         m_channels    = options.audio.channels;
 
-        const AVCodec *acodec = m_ff.avcodec_find_encoder(AV_CODEC_ID_AAC);
-        if (!acodec) { set_error("No AAC encoder available in this FFmpeg build."); return AVB_ERROR_OPEN_FAILED; }
+        AVCodecID aid;
+        AVSampleFormat asfmt;
+        const char *aname;
+        switch (options.audio.codec) {
+            case AVB_CODEC_AUTO:
+            case AVB_CODEC_AAC:
+                aid = AV_CODEC_ID_AAC; asfmt = AV_SAMPLE_FMT_FLTP; aname = "AAC"; break;
+            case AVB_CODEC_OPUS:
+                aid = AV_CODEC_ID_OPUS; asfmt = AV_SAMPLE_FMT_FLT; aname = "Opus";
+                // libopus only accepts a fixed set of input rates.
+                switch (m_sample_rate) {
+                    case 8000: case 12000: case 16000: case 24000: case 48000: break;
+                    default:
+                        set_error("Opus requires sample_rate of 8000/12000/16000/24000/48000.");
+                        return AVB_ERROR_INVALID_ARGUMENT;
+                }
+                break;
+            default:
+                set_error("Invalid audio codec (use AUTO/AAC/OPUS).");
+                return AVB_ERROR_INVALID_ARGUMENT;
+        }
+        const AVCodec *acodec = m_ff.avcodec_find_encoder(aid);
+        if (!acodec) { set_error("No %s encoder available in this FFmpeg build.", aname); return AVB_ERROR_OPEN_FAILED; }
 
         m_astream = m_ff.avformat_new_stream(m_fmt_ctx, nullptr);
         if (!m_astream) { set_error("avformat_new_stream (audio) failed."); return AVB_ERROR_OPEN_FAILED; }
@@ -144,7 +182,8 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
         if (!m_aenc) { set_error("avcodec_alloc_context3 (audio) failed."); return AVB_ERROR_OPEN_FAILED; }
         m_aenc->sample_rate = m_sample_rate;
         m_ff.av_channel_layout_default(&m_aenc->ch_layout, m_channels);
-        m_aenc->sample_fmt  = AV_SAMPLE_FMT_FLTP;
+        m_aenc->sample_fmt  = asfmt;
+        m_asfmt             = asfmt;
         m_aenc->bit_rate    = options.audio.bitrate > 0 ? options.audio.bitrate : 128000;
         m_aenc->time_base   = AVRational{1, m_sample_rate};
         if (global_header) m_aenc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
@@ -162,7 +201,7 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
         m_ff.av_channel_layout_default(&in_layout, m_channels);
         m_swr = m_ff.swr_alloc();
         ret = m_ff.swr_alloc_set_opts2(&m_swr,
-            &m_aenc->ch_layout, AV_SAMPLE_FMT_FLTP, m_sample_rate,
+            &m_aenc->ch_layout, m_asfmt,           m_sample_rate,
             &in_layout,         AV_SAMPLE_FMT_FLT,  m_sample_rate,
             0, nullptr);
         m_ff.av_channel_layout_uninit(&in_layout);
@@ -172,7 +211,7 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
 
         m_aframe = m_ff.av_frame_alloc();
         if (!m_aframe) { set_error("av_frame_alloc (audio) failed."); return AVB_ERROR_OPEN_FAILED; }
-        m_aframe->format      = AV_SAMPLE_FMT_FLTP;
+        m_aframe->format      = m_asfmt;
         m_aframe->sample_rate = m_sample_rate;
         m_aframe->nb_samples  = m_frame_size;
         m_ff.av_channel_layout_copy(&m_aframe->ch_layout, &m_aenc->ch_layout);

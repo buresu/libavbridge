@@ -6,7 +6,7 @@ class AvbBackend {
 public:
     virtual ~AvbBackend() = default;
 
-    virtual avb_result open_file(const char *path, const avb_open_options &options) = 0;
+    virtual avb_result open_file(const char *path, const avb_decode_options &options) = 0;
     virtual avb_result get_media_info(avb_media_info &out_info) = 0;
     virtual avb_result seek(double seconds) = 0;
     virtual int read_audio_f32(float *dst_interleaved, int frames) = 0;

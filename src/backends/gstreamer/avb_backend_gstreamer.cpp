@@ -156,7 +156,7 @@ void AvbBackendGStreamer::discover_codec_names(const char *uri) {
     m_gst.g_object_unref(disc);
 }
 
-avb_result AvbBackendGStreamer::open_file(const char *path, const avb_open_options &options) {
+avb_result AvbBackendGStreamer::open_file(const char *path, const avb_decode_options &options) {
     if (!m_libs_loaded) return AVB_ERROR_BACKEND_NOT_AVAILABLE;
 
     close_internal();
@@ -187,6 +187,7 @@ avb_result AvbBackendGStreamer::open_file(const char *path, const avb_open_optio
     switch (options.video_format) {
         case AVB_PIXEL_FORMAT_RGBA8: m_video_format = AVB_PIXEL_FORMAT_RGBA8; vfmt = "RGBA"; break;
         case AVB_PIXEL_FORMAT_NV12:  m_video_format = AVB_PIXEL_FORMAT_NV12;  vfmt = "NV12"; break;
+        case AVB_PIXEL_FORMAT_I420:  m_video_format = AVB_PIXEL_FORMAT_I420;  vfmt = "I420"; break;
         case AVB_PIXEL_FORMAT_BGRA8:
         case AVB_PIXEL_FORMAT_UNKNOWN:
         default:                     m_video_format = AVB_PIXEL_FORMAT_BGRA8; vfmt = "BGRA"; break;
@@ -458,15 +459,34 @@ avb_result AvbBackendGStreamer::read_video_frame(avb_video_frame &out_frame) {
             return AVB_ERROR_DECODE_FAILED;
         }
 
-        bool is_nv12 = (m_video_format == AVB_PIXEL_FORMAT_NV12);
-        // GStreamer raw video uses GST_ROUND_UP_4 strides when no GstVideoMeta
-        // is attached. (Frames with non-default strides via GstVideoMeta are a
-        // known limitation of this v0.1 slice.)
-        int y_stride  = is_nv12 ? round_up_4(w) : round_up_4(w * 4);
-        int y_size    = y_stride * h;
-        int uv_stride = round_up_4(w);
-        int uv_size   = is_nv12 ? uv_stride * (h / 2) : 0;
-        size_t total  = (size_t)y_size + uv_size;
+        // GStreamer raw video uses GST_ROUND_UP_4 plane strides when no
+        // GstVideoMeta is attached. (Non-default strides via GstVideoMeta are a
+        // known limitation.) Lay out planes per output format:
+        //   RGBA/BGRA: 1 plane; NV12: 2 (Y, CbCr); I420: 3 (Y, Cb, Cr).
+        int    plane_count = 1;
+        int    stride[AVB_MAX_PLANES] = {0, 0, 0};
+        int    rows[AVB_MAX_PLANES]   = {0, 0, 0};
+        switch (m_video_format) {
+            case AVB_PIXEL_FORMAT_NV12:
+                plane_count = 2;
+                stride[0] = round_up_4(w);     rows[0] = h;
+                stride[1] = round_up_4(w);     rows[1] = h / 2;
+                break;
+            case AVB_PIXEL_FORMAT_I420:
+                plane_count = 3;
+                stride[0] = round_up_4(w);     rows[0] = h;
+                stride[1] = round_up_4(w / 2); rows[1] = h / 2;
+                stride[2] = round_up_4(w / 2); rows[2] = h / 2;
+                break;
+            default:
+                plane_count = 1;
+                stride[0] = round_up_4(w * 4); rows[0] = h;
+                break;
+        }
+
+        size_t off[AVB_MAX_PLANES] = {0, 0, 0};
+        size_t total = 0;
+        for (int p = 0; p < plane_count; ++p) { off[p] = total; total += (size_t)stride[p] * rows[p]; }
         if (total > map.size) total = map.size; // never read past the buffer
 
         m_video_out_buf.resize(total);
@@ -477,12 +497,10 @@ avb_result AvbBackendGStreamer::read_video_frame(avb_video_frame &out_frame) {
         out_frame.height      = h;
         out_frame.format      = m_video_format;
         out_frame.pts_sec     = pts_sec;
-        out_frame.plane_count = is_nv12 ? 2 : 1;
-        out_frame.plane_data[0]   = m_video_out_buf.data();
-        out_frame.plane_stride[0] = y_stride;
-        if (is_nv12) {
-            out_frame.plane_data[1]   = m_video_out_buf.data() + y_size;
-            out_frame.plane_stride[1] = uv_stride;
+        out_frame.plane_count = plane_count;
+        for (int p = 0; p < plane_count; ++p) {
+            out_frame.plane_data[p]   = m_video_out_buf.data() + off[p];
+            out_frame.plane_stride[p] = stride[p];
         }
         out_frame.data      = out_frame.plane_data[0];
         out_frame.stride    = out_frame.plane_stride[0];

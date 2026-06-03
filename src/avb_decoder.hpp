@@ -5,7 +5,7 @@
 #include <memory>
 #include <string>
 
-struct avb_context {
+struct avb_decoder {
     std::unique_ptr<AvbBackend> backend;
     std::string last_error;
 

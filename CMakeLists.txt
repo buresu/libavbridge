@@ -36,7 +36,7 @@ elseif(UNIX AND NOT APPLE)
 endif()
 
 set(AVB_SOURCES
-    src/avb_context.cpp
+    src/avb_decoder.cpp
     src/avb_error.cpp
     src/avb_backend.cpp
     src/avb_encoder.cpp

@@ -8,7 +8,7 @@ public:
     AvbBackendMediaFoundation();
     ~AvbBackendMediaFoundation() override;
 
-    avb_result open_file(const char *path, const avb_open_options &options) override;
+    avb_result open_file(const char *path, const avb_decode_options &options) override;
     avb_result get_media_info(avb_media_info &out_info) override;
     avb_result seek(double seconds) override;
     int read_audio_f32(float *dst_interleaved, int frames) override;

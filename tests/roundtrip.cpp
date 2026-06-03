@@ -32,7 +32,7 @@ int main(int argc, char *argv[]) {
     const char *out_path = argv[2];
 
     // --- Decode source ---
-    avb_open_options dopts{};
+    avb_decode_options dopts{};
     dopts.backend      = AVB_BACKEND_AUTO;
     dopts.audio_stream_index = -1;
     dopts.video_stream_index = -1;
@@ -40,15 +40,15 @@ int main(int argc, char *argv[]) {
     dopts.enable_video = 1;
     dopts.video_format = AVB_PIXEL_FORMAT_BGRA8;
 
-    avb_context *dec = nullptr;
-    if (avb_open_file(&dec, in_path, &dopts) != AVB_OK) {
+    avb_decoder *dec = nullptr;
+    if (avb_decoder_open(&dec, in_path, &dopts) != AVB_OK) {
         fprintf(stderr, "open fixture failed: %s\n",
-                avb_get_last_error(dec) ? avb_get_last_error(dec) : "unknown");
-        avb_close(dec);
+                avb_decoder_get_last_error(dec) ? avb_decoder_get_last_error(dec) : "unknown");
+        avb_decoder_close(dec);
         return 1;
     }
     avb_media_info src{};
-    avb_get_media_info(dec, &src);
+    avb_decoder_get_media_info(dec, &src);
 
     // --- Open encoder (skip test if this backend has no encoder) ---
     avb_encode_options eopts{};
@@ -68,14 +68,14 @@ int main(int argc, char *argv[]) {
     if (eres == AVB_ERROR_BACKEND_NOT_AVAILABLE) {
         printf("SKIP: encoder backend not available on this platform\n");
         avb_encoder_close(enc);
-        avb_close(dec);
+        avb_decoder_close(dec);
         return 0;
     }
     if (eres != AVB_OK) {
         fprintf(stderr, "encoder open failed: %s\n",
                 avb_encoder_get_last_error(enc) ? avb_encoder_get_last_error(enc) : "unknown");
         avb_encoder_close(enc);
-        avb_close(dec);
+        avb_decoder_close(dec);
         return 1;
     }
 
@@ -86,19 +86,19 @@ int main(int argc, char *argv[]) {
     std::vector<float> pcm(1024 * src.audio.channels);
 
     avb_video_frame f{};
-    bool have = (avb_read_video_frame(dec, &f) == AVB_OK);
+    bool have = (avb_decoder_read_video_frame(dec, &f) == AVB_OK);
     while (have) {
         if (avb_encoder_write_video(enc, &f, f.pts_sec) != AVB_OK) {
             check(false, "write_video succeeds");
-            avb_release_video_frame(dec, &f);
+            avb_decoder_release_video_frame(dec, &f);
             break;
         }
-        avb_release_video_frame(dec, &f);
+        avb_decoder_release_video_frame(dec, &f);
         vframes++;
-        have = (avb_read_video_frame(dec, &f) == AVB_OK);
+        have = (avb_decoder_read_video_frame(dec, &f) == AVB_OK);
         double target = have ? f.pts_sec : 1e9;
         while (audio_pts <= target) {
-            int got = avb_read_audio_f32(dec, pcm.data(), 1024);
+            int got = avb_decoder_read_audio_f32(dec, pcm.data(), 1024);
             if (got <= 0) break;
             if (avb_encoder_write_audio_f32(enc, pcm.data(), got) != AVB_OK) {
                 check(false, "write_audio succeeds");
@@ -111,20 +111,20 @@ int main(int argc, char *argv[]) {
 
     check(avb_encoder_finish(enc) == AVB_OK, "encoder finish succeeds");
     avb_encoder_close(enc);
-    avb_close(dec);
+    avb_decoder_close(dec);
 
     printf("encoded %d video / %ld audio frames\n", vframes, aframes);
 
     // --- Re-decode the encoded output and verify it survived the round-trip ---
-    avb_context *re = nullptr;
-    if (avb_open_file(&re, out_path, &dopts) != AVB_OK) {
+    avb_decoder *re = nullptr;
+    if (avb_decoder_open(&re, out_path, &dopts) != AVB_OK) {
         fprintf(stderr, "re-open encoded output failed: %s\n",
-                avb_get_last_error(re) ? avb_get_last_error(re) : "unknown");
-        avb_close(re);
+                avb_decoder_get_last_error(re) ? avb_decoder_get_last_error(re) : "unknown");
+        avb_decoder_close(re);
         return 1;
     }
     avb_media_info out{};
-    avb_get_media_info(re, &out);
+    avb_decoder_get_media_info(re, &out);
 
     printf("round-trip media_info:\n");
     check(out.video.available, "output has video");
@@ -137,9 +137,9 @@ int main(int argc, char *argv[]) {
 
     // The output must be decodable: pull at least one video frame back out.
     avb_video_frame rf{};
-    check(avb_read_video_frame(re, &rf) == AVB_OK, "output video frame decodes");
-    avb_release_video_frame(re, &rf);
-    avb_close(re);
+    check(avb_decoder_read_video_frame(re, &rf) == AVB_OK, "output video frame decodes");
+    avb_decoder_release_video_frame(re, &rf);
+    avb_decoder_close(re);
 
     printf("\n%s (%d failure%s)\n",
            g_failures == 0 ? "ROUND-TRIP PASSED" : "ROUND-TRIP FAILED",

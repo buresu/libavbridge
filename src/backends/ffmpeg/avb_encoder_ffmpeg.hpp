@@ -54,6 +54,7 @@ private:
     AVFrame        *m_aframe        = nullptr; // encoder sample_fmt, reused
     int             m_sample_rate   = 0;
     int             m_channels      = 0;
+    AVSampleFormat  m_asfmt         = AV_SAMPLE_FMT_FLTP; // encoder input sample fmt
     int             m_frame_size    = 1024;
     int64_t         m_audio_pts     = 0; // in samples
     bool            m_has_audio     = false;

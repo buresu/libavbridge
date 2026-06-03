@@ -74,6 +74,14 @@ AvbEncoderBackend *avb_create_encoder_backend(avb_backend backend) {
 
 extern "C" {
 
+avb_encode_options avb_encode_options_default(void) {
+    avb_encode_options o{};
+    o.backend     = AVB_BACKEND_AUTO;
+    o.video.codec = AVB_CODEC_AUTO;
+    o.audio.codec = AVB_CODEC_AUTO;
+    return o;
+}
+
 avb_result avb_encoder_open(avb_encoder **out_enc, const char *path,
                             const avb_encode_options *options) {
     if (!out_enc || !path || !options) return AVB_ERROR_INVALID_ARGUMENT;
