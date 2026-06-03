@@ -43,15 +43,56 @@ static void check_str(const char *got, const char *want, const char *what) {
     if (!ok) ++g_failures;
 }
 
+// Returned to CTest (via SKIP_RETURN_CODE) when the requested backend is not
+// compiled into this build, so the run is reported as skipped, not failed.
+static const int AVB_TEST_SKIP = 77;
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <fixture.mp4>\n", argv[0]);
+        fprintf(stderr, "Usage: %s <fixture.mp4> [backend]\n", argv[0]);
         return 2;
     }
     const char *path = argv[1];
 
+    // Optional backend name (default "auto"); skip if it isn't in this build.
+    avb_backend backend = AVB_BACKEND_AUTO;
+    if (argc >= 3) {
+        if (avb_backend_from_name(argv[2], &backend) != AVB_OK) {
+            fprintf(stderr, "unknown backend '%s'\n", argv[2]);
+            return 2;
+        }
+        if (!avb_backend_is_available(backend)) {
+            printf("SKIP: backend '%s' not built into this library\n", argv[2]);
+            return AVB_TEST_SKIP;
+        }
+    }
+    printf("Requested backend: %s\n", avb_backend_name(backend));
+
+    // --- Library introspection (backend-independent) ---
+    printf("introspection:\n");
+    check(avb_version_string() && avb_version_string()[0], "version string non-empty");
+    {
+        avb_backend rb;
+        check(avb_backend_from_name("ffmpeg", &rb) == AVB_OK && rb == AVB_BACKEND_FFMPEG,
+              "backend_from_name(ffmpeg) round-trips");
+        check(avb_backend_from_name("bogus", &rb) == AVB_ERROR_INVALID_ARGUMENT,
+              "backend_from_name(bogus) -> invalid argument");
+    }
+    {
+        const char *n = avb_backend_name(AVB_BACKEND_GSTREAMER);
+        check(n && std::strcmp(n, "gstreamer") == 0, "backend_name(gstreamer)");
+    }
+    check(std::strcmp(avb_result_string(AVB_ERROR_EOF), "AVB_ERROR_EOF") == 0,
+          "result_string(EOF)");
+    // A default-constructed decode options must enable both tracks (no footgun).
+    {
+        avb_decode_options d = avb_decode_options_default();
+        check(d.enable_audio == 1 && d.enable_video == 1,
+              "decode_options_default enables audio+video");
+    }
+
     avb_decode_options opts{};
-    opts.backend            = AVB_BACKEND_AUTO;
+    opts.backend            = backend;
     opts.audio_stream_index = -1;
     opts.video_stream_index = -1;
     opts.enable_audio       = 1;
@@ -161,10 +202,11 @@ int main(int argc, char *argv[]) {
         { AVB_PIXEL_FORMAT_BGRA8, "BGRA8", 1, true  },
         { AVB_PIXEL_FORMAT_RGBA8, "RGBA8", 1, true  },
         { AVB_PIXEL_FORMAT_NV12,  "NV12",  2, false },
+        { AVB_PIXEL_FORMAT_I420,  "I420",  3, false },
     };
     for (const auto &fc : cases) {
         avb_decode_options fopts{};
-        fopts.backend            = AVB_BACKEND_AUTO;
+        fopts.backend            = backend;
         fopts.audio_stream_index = -1;
         fopts.video_stream_index = -1;
         fopts.enable_audio       = 0;
@@ -204,6 +246,13 @@ int main(int argc, char *argv[]) {
                             + (long)f.plane_stride[1] * (f.height / 2);
                 check(f.data_size == expect, "NV12: data_size == Y + CbCr planes");
             }
+            if (fc.fmt == AVB_PIXEL_FORMAT_I420) {
+                // Y full height; Cb and Cr each half width and half height.
+                long expect = (long)f.plane_stride[0] * f.height
+                            + (long)f.plane_stride[1] * (f.height / 2)
+                            + (long)f.plane_stride[2] * (f.height / 2);
+                check(f.data_size == expect, "I420: data_size == Y + Cb + Cr planes");
+            }
             avb_decoder_release_video_frame(fctx, &f);
         }
         avb_decoder_close(fctx);
@@ -215,7 +264,7 @@ int main(int argc, char *argv[]) {
     printf("audio format control:\n");
     {
         avb_decode_options aopts{};
-        aopts.backend            = AVB_BACKEND_AUTO;
+        aopts.backend            = backend;
         aopts.audio_stream_index = -1;
         aopts.video_stream_index = -1;
         aopts.enable_audio       = 1;

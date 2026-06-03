@@ -23,17 +23,31 @@ static void check_near(double got, double want, double tol, const char *what) {
     if (!ok) ++g_failures;
 }
 
+static const int AVB_TEST_SKIP = 77;
+
 int main(int argc, char *argv[]) {
     if (argc < 3) {
-        fprintf(stderr, "Usage: %s <fixture.mp4> <output.mp4>\n", argv[0]);
+        fprintf(stderr, "Usage: %s <fixture.mp4> <output.mp4> [backend]\n", argv[0]);
         return 2;
     }
     const char *in_path = argv[1];
     const char *out_path = argv[2];
 
+    avb_backend backend = AVB_BACKEND_AUTO;
+    if (argc >= 4) {
+        if (avb_backend_from_name(argv[3], &backend) != AVB_OK) {
+            fprintf(stderr, "unknown backend '%s'\n", argv[3]);
+            return 2;
+        }
+        if (!avb_backend_is_available(backend)) {
+            printf("SKIP: backend '%s' not built into this library\n", argv[3]);
+            return AVB_TEST_SKIP;
+        }
+    }
+
     // --- Decode source ---
     avb_decode_options dopts{};
-    dopts.backend      = AVB_BACKEND_AUTO;
+    dopts.backend      = backend;
     dopts.audio_stream_index = -1;
     dopts.video_stream_index = -1;
     dopts.enable_audio = 1;
@@ -52,7 +66,7 @@ int main(int argc, char *argv[]) {
 
     // --- Open encoder (skip test if this backend has no encoder) ---
     avb_encode_options eopts{};
-    eopts.backend            = AVB_BACKEND_AUTO;
+    eopts.backend            = backend;
     eopts.video.enable       = 1;
     eopts.video.width        = src.video.width;
     eopts.video.height       = src.video.height;
