@@ -4,6 +4,10 @@
 #include <memory>
 #include <string>
 
+#if defined(AVB_ENABLE_MEDIAFOUNDATION)
+#include "backends/mediafoundation/avb_encoder_mediafoundation.hpp"
+#endif
+
 #if defined(AVB_ENABLE_AVFOUNDATION)
 #include "backends/avfoundation/avb_encoder_avfoundation.hh"
 #endif
@@ -47,6 +51,10 @@ AvbEncoderBackend *avb_create_encoder_backend(avb_backend backend) {
     }
 
     switch (resolved) {
+#if defined(AVB_ENABLE_MEDIAFOUNDATION)
+        case AVB_BACKEND_MEDIAFOUNDATION:
+            return new AvbEncoderMediaFoundation();
+#endif
 #if defined(AVB_ENABLE_AVFOUNDATION)
         case AVB_BACKEND_AVFOUNDATION:
             return new AvbEncoderAVFoundation();
