@@ -112,7 +112,7 @@ int main(int argc, char *argv[]) {
         have = (avb_decoder_read_video_frame(dec, &f) == AVB_OK);
         double target = have ? f.pts_sec : 1e9;
         while (audio_pts <= target) {
-            int got = avb_decoder_read_audio_f32(dec, pcm.data(), 1024);
+            int got = avb_decoder_read_audio_f32(dec, pcm.data(), 1024, nullptr);
             if (got <= 0) break;
             if (avb_encoder_write_audio_f32(enc, pcm.data(), got) != AVB_OK) {
                 check(false, "write_audio succeeds");

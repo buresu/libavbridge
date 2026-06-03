@@ -16,6 +16,12 @@ extern "C" {
 struct AvbFFmpegFuncs {
     // avformat
     int (*avformat_open_input)(AVFormatContext **, const char *, const AVInputFormat *, AVDictionary **);
+    AVFormatContext *(*avformat_alloc_context)(void);
+    AVIOContext *(*avio_alloc_context)(unsigned char *, int, int, void *,
+                                       int (*)(void *, uint8_t *, int),
+                                       int (*)(void *, uint8_t *, int),
+                                       int64_t (*)(void *, int64_t, int));
+    void (*avio_context_free)(AVIOContext **);
     int (*avformat_find_stream_info)(AVFormatContext *, AVDictionary **);
     int (*av_find_best_stream)(AVFormatContext *, enum AVMediaType, int, int, const AVCodec **, int);
     int (*av_read_frame)(AVFormatContext *, AVPacket *);

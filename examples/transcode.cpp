@@ -84,7 +84,7 @@ int main(int argc, char *argv[]) {
 
         // Feed audio up to the next video frame's timestamp.
         while (info.audio.available && audio_pts <= target) {
-            int got = avb_decoder_read_audio_f32(dec, pcm.data(), 1024);
+            int got = avb_decoder_read_audio_f32(dec, pcm.data(), 1024, nullptr);
             if (got <= 0) break;
             if (avb_encoder_write_audio_f32(enc, pcm.data(), got) != AVB_OK) {
                 fprintf(stderr, "write audio failed: %s\n", avb_encoder_get_last_error(enc));
@@ -97,7 +97,7 @@ int main(int argc, char *argv[]) {
 
     // Drain any remaining audio (e.g. audio-only input, or tail past last frame).
     while (info.audio.available) {
-        int got = avb_decoder_read_audio_f32(dec, pcm.data(), 1024);
+        int got = avb_decoder_read_audio_f32(dec, pcm.data(), 1024, nullptr);
         if (got <= 0) break;
         if (avb_encoder_write_audio_f32(enc, pcm.data(), got) != AVB_OK) {
             fprintf(stderr, "write audio failed: %s\n", avb_encoder_get_last_error(enc));

@@ -20,6 +20,7 @@ public:
     avb_result get_media_info(avb_media_info &out_info) override;
     avb_result seek(double seconds) override;
     int read_audio_f32(float *dst_interleaved, int frames) override;
+    double audio_next_pts() override;
     avb_result read_video_frame(avb_video_frame &out_frame) override;
     void release_video_frame(avb_video_frame &frame) override;
     const char *get_last_error() const override;
@@ -53,6 +54,8 @@ private:
     // Decoded audio waiting to be consumed (interleaved float).
     std::vector<float> m_audio_buf;
     int                m_audio_buf_pos = 0;
+    // Presentation time (seconds) of the sample at m_audio_buf_pos, or -1.
+    double             m_audio_buf_pts = -1.0;
 
     // Backend-owned video frame buffer, reused per read_video_frame call.
     std::vector<unsigned char> m_video_out_buf;

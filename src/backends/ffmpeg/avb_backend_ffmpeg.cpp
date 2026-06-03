@@ -112,16 +112,43 @@ void AvbBackendFFmpeg::close_internal() {
         m_ff.avformat_close_input(&m_fmt_ctx);
         m_fmt_ctx = nullptr;
     }
+    if (m_avio) {
+        // Free the (possibly reallocated) internal buffer, then the context.
+        if (m_avio->buffer) m_ff.av_free(m_avio->buffer);
+        m_ff.avio_context_free(&m_avio);
+        m_avio = nullptr;
+    }
+    m_io_cb   = avb_io_callbacks{};
+    m_io_user = nullptr;
     m_audio_buf.clear();
     m_audio_buf_pos = 0;
+    m_audio_buf_pts = -1.0;
     m_video_out_buf.clear();
     m_sws_src_w   = 0;
     m_sws_src_h   = 0;
     m_sws_src_fmt = AV_PIX_FMT_NONE;
     m_eof = false;
     m_seek_target = -1.0;
+    m_audio_seek_target = -1.0;
     m_audio_stream_idx = -1;
     m_video_stream_idx = -1;
+}
+
+int AvbBackendFFmpeg::ffio_read(void *opaque, uint8_t *buf, int size) {
+    auto *self = static_cast<AvbBackendFFmpeg *>(opaque);
+    int n = self->m_io_cb.read(self->m_io_user, buf, size);
+    if (n > 0)  return n;
+    if (n == 0) return AVERROR_EOF;
+    return AVERROR(EIO);
+}
+
+int64_t AvbBackendFFmpeg::ffio_seek(void *opaque, int64_t offset, int whence) {
+    auto *self = static_cast<AvbBackendFFmpeg *>(opaque);
+    if (whence == AVSEEK_SIZE)
+        return self->m_io_cb.size ? self->m_io_cb.size(self->m_io_user) : -1;
+    whence &= ~AVSEEK_FORCE;
+    if (!self->m_io_cb.seek) return -1;
+    return self->m_io_cb.seek(self->m_io_user, offset, whence);
 }
 
 avb_result AvbBackendFFmpeg::open_file(const char *path, const avb_decode_options &options) {
@@ -134,8 +161,45 @@ avb_result AvbBackendFFmpeg::open_file(const char *path, const avb_decode_option
         set_ff_error("avformat_open_input failed", ret);
         return AVB_ERROR_OPEN_FAILED;
     }
+    return setup_after_open(options);
+}
 
-    ret = m_ff.avformat_find_stream_info(m_fmt_ctx, nullptr);
+avb_result AvbBackendFFmpeg::open_io(const avb_io_callbacks &cb, void *user,
+                                     const avb_decode_options &options) {
+    if (!m_libs_loaded) return AVB_ERROR_BACKEND_NOT_AVAILABLE;
+    if (!cb.read) return AVB_ERROR_INVALID_ARGUMENT;
+
+    close_internal();
+    m_io_cb   = cb;
+    m_io_user = user;
+
+    const int buf_size = 64 * 1024;
+    unsigned char *buffer = (unsigned char *)m_ff.av_malloc(buf_size);
+    if (!buffer) { set_error("av_malloc failed for AVIO buffer."); return AVB_ERROR_OPEN_FAILED; }
+
+    m_avio = m_ff.avio_alloc_context(buffer, buf_size, 0, this,
+                                     &ffio_read, nullptr,
+                                     cb.seek ? &ffio_seek : nullptr);
+    if (!m_avio) {
+        m_ff.av_free(buffer);
+        set_error("avio_alloc_context failed.");
+        return AVB_ERROR_OPEN_FAILED;
+    }
+
+    m_fmt_ctx = m_ff.avformat_alloc_context();
+    if (!m_fmt_ctx) { set_error("avformat_alloc_context failed."); return AVB_ERROR_OPEN_FAILED; }
+    m_fmt_ctx->pb = m_avio;
+
+    int ret = m_ff.avformat_open_input(&m_fmt_ctx, nullptr, nullptr, nullptr);
+    if (ret < 0) {
+        set_ff_error("avformat_open_input (custom I/O) failed", ret);
+        return AVB_ERROR_OPEN_FAILED;
+    }
+    return setup_after_open(options);
+}
+
+avb_result AvbBackendFFmpeg::setup_after_open(const avb_decode_options &options) {
+    int ret = m_ff.avformat_find_stream_info(m_fmt_ctx, nullptr);
     if (ret < 0) {
         set_ff_error("avformat_find_stream_info failed", ret);
         return AVB_ERROR_OPEN_FAILED;
@@ -307,8 +371,10 @@ avb_result AvbBackendFFmpeg::seek(double seconds) {
     clear_packet_queues();
     m_audio_buf.clear();
     m_audio_buf_pos = 0;
+    m_audio_buf_pts = -1.0;
     m_eof = false;
     m_seek_target = seconds;
+    m_audio_seek_target = seconds;
     return AVB_OK;
 }
 
@@ -320,15 +386,37 @@ bool AvbBackendFFmpeg::fill_audio_buffer() {
         if (ret == 0) {
             int nb_channels = m_out_channels;
             int in_samples  = m_audio_frame->nb_samples;
+            int in_rate     = m_audio_codec_ctx->sample_rate;
+
+            // Frame presentation time (seconds), or -1 if unknown.
+            AVStream *ast = m_fmt_ctx->streams[m_audio_stream_idx];
+            double frame_pts = -1.0;
+            if (m_audio_frame->pts != AV_NOPTS_VALUE && ast->time_base.den != 0)
+                frame_pts = (double)m_audio_frame->pts * ast->time_base.num / ast->time_base.den;
+
+            // After a seek, drop whole frames that end before the target so audio
+            // resumes at ~target (matching the trimmed video path).
+            if (m_audio_seek_target >= 0.0 && frame_pts >= 0.0 && in_rate > 0) {
+                double frame_end = frame_pts + (double)in_samples / in_rate;
+                if (frame_end <= m_audio_seek_target) {
+                    m_ff.av_frame_unref(m_audio_frame);
+                    continue;
+                }
+            }
+            m_audio_seek_target = -1.0;
 
             // Output sample count after resampling can differ from the input;
             // size for buffered delay + this frame, rounded up.
-            int in_rate = m_audio_codec_ctx->sample_rate;
             int64_t delay = m_ff.swr_get_delay(m_swr, in_rate);
             int out_capacity =
                 (int)(((int64_t)in_samples + delay) * m_out_sample_rate / in_rate) + 1;
 
             int buf_start = (int)m_audio_buf.size();
+
+            // When this frame becomes the head of an empty buffer, record its
+            // presentation time so audio_next_pts() can report it.
+            if (buf_start == 0) m_audio_buf_pts = frame_pts;
+
             m_audio_buf.resize(buf_start + out_capacity * nb_channels);
             float *dst = m_audio_buf.data() + buf_start;
 
@@ -385,6 +473,9 @@ int AvbBackendFFmpeg::read_audio_f32(float *dst_interleaved, int frames) {
                    to_copy * sizeof(float));
             m_audio_buf_pos += to_copy;
             samples_written += to_copy;
+            // Advance the head timestamp by the number of frames consumed.
+            if (m_audio_buf_pts >= 0.0)
+                m_audio_buf_pts += (double)(to_copy / nb_channels) / m_out_sample_rate;
             if (m_audio_buf_pos >= (int)m_audio_buf.size()) {
                 m_audio_buf.clear();
                 m_audio_buf_pos = 0;
@@ -395,6 +486,15 @@ int AvbBackendFFmpeg::read_audio_f32(float *dst_interleaved, int frames) {
     }
 
     return samples_written / nb_channels;
+}
+
+double AvbBackendFFmpeg::audio_next_pts() {
+    if (!m_audio_codec_ctx) return -1.0;
+    // Ensure the buffer holds the next sample, then report its timestamp.
+    if (m_audio_buf_pos >= (int)m_audio_buf.size()) {
+        if (!fill_audio_buffer()) return -1.0;
+    }
+    return m_audio_buf_pts;
 }
 
 avb_result AvbBackendFFmpeg::read_video_frame(avb_video_frame &out_frame) {

@@ -1,5 +1,15 @@
 #include "avb_backend.hpp"
 
+#include <cstdio>
+#include <vector>
+
+#if defined(_WIN32)
+#  include <windows.h>
+#else
+#  include <cstdlib>
+#  include <unistd.h>
+#endif
+
 #if defined(AVB_ENABLE_FFMPEG)
 #include "backends/ffmpeg/avb_backend_ffmpeg.hpp"
 #endif
@@ -15,6 +25,55 @@
 #if defined(AVB_ENABLE_GSTREAMER)
 #include "backends/gstreamer/avb_backend_gstreamer.hpp"
 #endif
+
+AvbBackend::~AvbBackend() {
+    if (!m_spill_path.empty()) {
+        std::remove(m_spill_path.c_str());
+    }
+}
+
+// Default custom-I/O open: spill the entire stream to a temp file (sequential
+// reads only, so a NULL seek callback is fine) and open that file. Backends
+// that read callbacks natively override this.
+avb_result AvbBackend::open_io(const avb_io_callbacks &cb, void *user,
+                               const avb_decode_options &options) {
+    if (!cb.read) return AVB_ERROR_INVALID_ARGUMENT;
+
+    // Create a unique temp file path.
+    std::string path;
+#if defined(_WIN32)
+    char dir[MAX_PATH];
+    char file[MAX_PATH];
+    if (!GetTempPathA(sizeof(dir), dir)) return AVB_ERROR_OPEN_FAILED;
+    if (!GetTempFileNameA(dir, "avb", 0, file)) return AVB_ERROR_OPEN_FAILED;
+    path = file;
+    FILE *f = std::fopen(path.c_str(), "wb");
+#else
+    const char *tmpdir = std::getenv("TMPDIR");
+    std::string tmpl = std::string(tmpdir && *tmpdir ? tmpdir : "/tmp") + "/avbridgeXXXXXX";
+    std::vector<char> buf(tmpl.begin(), tmpl.end());
+    buf.push_back('\0');
+    int fd = mkstemp(buf.data());
+    if (fd < 0) return AVB_ERROR_OPEN_FAILED;
+    path = buf.data();
+    FILE *f = fdopen(fd, "wb");
+#endif
+    if (!f) { std::remove(path.c_str()); return AVB_ERROR_OPEN_FAILED; }
+
+    unsigned char chunk[64 * 1024];
+    for (;;) {
+        int n = cb.read(user, chunk, (int)sizeof(chunk));
+        if (n < 0) { std::fclose(f); std::remove(path.c_str()); return AVB_ERROR_OPEN_FAILED; }
+        if (n == 0) break;
+        if (std::fwrite(chunk, 1, (size_t)n, f) != (size_t)n) {
+            std::fclose(f); std::remove(path.c_str()); return AVB_ERROR_OPEN_FAILED;
+        }
+    }
+    std::fclose(f);
+
+    m_spill_path = path; // removed by ~AvbBackend
+    return open_file(path.c_str(), options);
+}
 
 AvbBackend *avb_create_backend(avb_backend backend) {
     avb_backend resolved = backend;

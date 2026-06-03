@@ -72,7 +72,7 @@ static bool transcode_audio(const char *in, const char *out, avb_codec ac, int r
     }
     std::vector<float> buf(4096 * mi.audio.channels);
     for (;;) {
-        int g = avb_decoder_read_audio_f32(d, buf.data(), 4096);
+        int g = avb_decoder_read_audio_f32(d, buf.data(), 4096, nullptr);
         if (g <= 0) break;
         if (avb_encoder_write_audio_f32(e, buf.data(), g) != AVB_OK) break;
     }

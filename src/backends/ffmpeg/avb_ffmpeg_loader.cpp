@@ -158,6 +158,9 @@ bool avb_ffmpeg_load(AvbFFmpegFuncs &out_funcs, char *err_buf, int err_buf_size)
     }
 
     LOAD_SYM(g_handle_avformat, out_funcs, avformat_open_input);
+    LOAD_SYM(g_handle_avformat, out_funcs, avformat_alloc_context);
+    LOAD_SYM(g_handle_avformat, out_funcs, avio_alloc_context);
+    LOAD_SYM(g_handle_avformat, out_funcs, avio_context_free);
     LOAD_SYM(g_handle_avformat, out_funcs, avformat_find_stream_info);
     LOAD_SYM(g_handle_avformat, out_funcs, av_find_best_stream);
     LOAD_SYM(g_handle_avformat, out_funcs, av_read_frame);

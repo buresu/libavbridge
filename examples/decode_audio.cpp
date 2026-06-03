@@ -54,7 +54,7 @@ int main(int argc, char *argv[]) {
     int total_frames = 0;
 
     while (true) {
-        int got = avb_decoder_read_audio_f32(ctx, buf.data(), BLOCK_FRAMES);
+        int got = avb_decoder_read_audio_f32(ctx, buf.data(), BLOCK_FRAMES, nullptr);
         if (got <= 0) break;
         fwrite(buf.data(), sizeof(float), got * info.audio.channels, out);
         total_frames += got;

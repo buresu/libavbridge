@@ -18,12 +18,14 @@
  *   which (for decoding) would enable neither audio nor video.
  */
 
+#include <stddef.h> /* size_t */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 #define AVB_VERSION_MAJOR 0
-#define AVB_VERSION_MINOR 2
+#define AVB_VERSION_MINOR 3
 #define AVB_VERSION_PATCH 0
 
 #ifdef _WIN32
@@ -196,22 +198,90 @@ AVB_API avb_result avb_decoder_open(
     const avb_decode_options *options
 );
 
+/* Custom-I/O source for decoding from something other than a file path (e.g.
+ * bytes embedded in an application package). All callbacks receive the `user`
+ * pointer passed to avb_decoder_open_io. */
+typedef struct avb_io_callbacks {
+    /* Read up to `size` bytes into `buf`. Return the number of bytes read,
+     * 0 at end of stream, or a negative value on error. Required. */
+    int (*read)(void *user, unsigned char *buf, int size);
+    /* Seek to `offset` relative to `whence` (SEEK_SET/SEEK_CUR/SEEK_END from
+     * <stdio.h>). Return the new absolute offset, or a negative value on error.
+     * May be NULL for a non-seekable source (seeking and duration are then
+     * limited, and some backends fall back to buffering the whole stream). */
+    long long (*seek)(void *user, long long offset, int whence);
+    /* Total size in bytes, or a negative value if unknown. May be NULL. */
+    long long (*size)(void *user);
+} avb_io_callbacks;
+
+/* Open a custom I/O source for decoding. `cb` and `user` (and any data they
+ * reference) must remain valid until avb_decoder_close. Backends that cannot
+ * consume callbacks natively buffer the stream into a temporary file first; the
+ * FFmpeg backend reads through the callbacks directly. */
+AVB_API avb_result avb_decoder_open_io(
+    avb_decoder **out_dec,
+    const avb_io_callbacks *cb,
+    void *user,
+    const avb_decode_options *options
+);
+
+/* Open an in-memory media buffer for decoding. `data` is NOT copied: it must
+ * remain valid until avb_decoder_close. Convenience wrapper over
+ * avb_decoder_open_io. */
+AVB_API avb_result avb_decoder_open_memory(
+    avb_decoder **out_dec,
+    const void *data,
+    size_t size,
+    const avb_decode_options *options
+);
+
 AVB_API avb_result avb_decoder_get_media_info(
     avb_decoder *dec,
     avb_media_info *out_info
 );
 
+/* Seek both the audio and video streams to ~`seconds`. The decoders are
+ * flushed; the next video frame returned starts at or just after the target
+ * (frames between the preceding keyframe and the target are dropped), and audio
+ * resumes at approximately the target. Exact frame-accurate seeking is not
+ * guaranteed.
+ *
+ * If `out_landed_sec` is non-NULL it receives the requested time clamped to
+ * [0, duration]; the *exact* landing time is reported by the pts of the next
+ * decoded video frame (or out_first_pts of the next audio read). */
 AVB_API avb_result avb_decoder_seek(
     avb_decoder *dec,
-    double seconds
+    double seconds,
+    double *out_landed_sec
 );
 
+/* Reading both streams: when a decoder has audio AND video enabled, read the two
+ * streams roughly interleaved (as a player does). Draining one stream to EOF
+ * while never reading the other is NOT supported — a backend may bound its
+ * internal decoded-frame buffering and deadlock. For bulk per-stream decoding
+ * (e.g. dump all audio, or all video), open a decoder with only that stream
+ * enabled. */
+
 /* Read up to `frames` interleaved float frames. Returns the number of frames
- * written, or 0 at end of stream / when no audio track is present. */
+ * written, or 0 at end of stream / when no audio track is present (use
+ * avb_decoder_audio_at_eof / avb_media_info.audio.available to distinguish).
+ *
+ * If `out_first_pts` is non-NULL it receives the presentation time (seconds) of
+ * the first sample in this block, or a negative value if unknown (some backends
+ * do not report audio timestamps). */
 AVB_API int avb_decoder_read_audio_f32(
     avb_decoder *dec,
     float *dst_interleaved,
-    int frames
+    int frames,
+    double *out_first_pts
+);
+
+/* 1 if an audio track exists and has been fully consumed (the last
+ * read_audio_f32 returned 0 because of end of stream), else 0. Returns 0 when
+ * there is no audio track at all (check avb_media_info.audio.available for
+ * that). Reset by avb_decoder_seek. */
+AVB_API int avb_decoder_audio_at_eof(
+    avb_decoder *dec
 );
 
 /* Read the next video frame. Returns AVB_ERROR_EOF at end of stream. A returned

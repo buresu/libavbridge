@@ -130,15 +130,23 @@ int main(int argc, char *argv[]) {
     check_str(info.video.codec_name, "h264", "video codec_name == h264 (source codec)");
 
     // --- Audio decode ---
+    // Drain audio on a dedicated audio-only decoder. Bulk-draining one stream to
+    // EOF while never pulling the other is not supported on a dual-stream
+    // decoder (see avb_decoder_read_* docs), so each stream is decoded alone.
     printf("audio decode:\n");
-    int total_audio_frames = 0;
     {
+        avb_decode_options ao = opts;
+        ao.enable_video = 0;
+        avb_decoder *adec = nullptr;
+        check(avb_decoder_open(&adec, path, &ao) == AVB_OK, "open audio-only decoder");
+
         const int BLOCK = 4096;
         std::vector<float> buf(BLOCK * info.audio.channels);
         double sumsq = 0.0;
         long count = 0;
+        int total_audio_frames = 0;
         for (;;) {
-            int got = avb_decoder_read_audio_f32(ctx, buf.data(), BLOCK);
+            int got = avb_decoder_read_audio_f32(adec, buf.data(), BLOCK, nullptr);
             if (got <= 0) break;
             for (int i = 0; i < got * info.audio.channels; ++i) {
                 sumsq += (double)buf[i] * buf[i];
@@ -150,15 +158,21 @@ int main(int argc, char *argv[]) {
         check_near(seconds, 3.0, 0.2, "decoded audio duration ~3.0s");
         double rms = count > 0 ? std::sqrt(sumsq / count) : 0.0;
         check(rms > 0.001, "decoded audio is non-silent");
+        avb_decoder_close(adec);
     }
 
     // --- Video decode ---
     printf("video decode:\n");
-    int total_video_frames = 0;
     {
+        avb_decode_options vo = opts;
+        vo.enable_audio = 0;
+        avb_decoder *vdec = nullptr;
+        check(avb_decoder_open(&vdec, path, &vo) == AVB_OK, "open video-only decoder");
+
+        int total_video_frames = 0;
         for (;;) {
             avb_video_frame f{};
-            avb_result vr = avb_decoder_read_video_frame(ctx, &f);
+            avb_result vr = avb_decoder_read_video_frame(vdec, &f);
             if (vr == AVB_ERROR_EOF) break;
             if (vr != AVB_OK) { check(false, "read_video_frame returns OK or EOF"); break; }
 
@@ -168,17 +182,18 @@ int main(int argc, char *argv[]) {
                 check(f.data != nullptr && f.data_size > 0, "video frame has data");
                 check(f.data_size >= f.stride * f.height, "data_size covers stride*height");
             }
-            avb_decoder_release_video_frame(ctx, &f);
+            avb_decoder_release_video_frame(vdec, &f);
             ++total_video_frames;
         }
         // 3s * 25fps = 75 frames; allow a small tolerance for fps rounding.
         check_near(total_video_frames, 75, 3, "decoded ~75 video frames");
+        avb_decoder_close(vdec);
     }
 
     // --- Seek ---
     printf("seek:\n");
     {
-        avb_result sr = avb_decoder_seek(ctx, 1.5);
+        avb_result sr = avb_decoder_seek(ctx, 1.5, nullptr);
         check(sr == AVB_OK, "seek(1.5) succeeds");
         avb_video_frame f{};
         avb_result vr = avb_decoder_read_video_frame(ctx, &f);
@@ -284,7 +299,7 @@ int main(int argc, char *argv[]) {
             std::vector<float> buf(4096 * 2);
             long frames = 0;
             for (;;) {
-                int got = avb_decoder_read_audio_f32(actx, buf.data(), 4096);
+                int got = avb_decoder_read_audio_f32(actx, buf.data(), 4096, nullptr);
                 if (got <= 0) break;
                 frames += got;
             }

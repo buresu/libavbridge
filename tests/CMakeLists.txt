@@ -20,6 +20,12 @@ if(AVB_BUILD_SHARED)
     target_compile_definitions(avb_codecs PRIVATE AVB_USING_SHARED)
 endif()
 
+add_executable(avb_io io.cpp)
+target_link_libraries(avb_io PRIVATE avbridge)
+if(AVB_BUILD_SHARED)
+    target_compile_definitions(avb_io PRIVATE AVB_USING_SHARED)
+endif()
+
 find_program(FFMPEG_EXECUTABLE ffmpeg)
 
 if(FFMPEG_EXECUTABLE)
@@ -41,6 +47,7 @@ if(FFMPEG_EXECUTABLE)
     add_dependencies(avb_conformance avb_conformance_fixture)
     add_dependencies(avb_roundtrip avb_conformance_fixture)
     add_dependencies(avb_codecs avb_conformance_fixture)
+    add_dependencies(avb_io avb_conformance_fixture)
 
     # The conformance contract is backend-agnostic, so run it against every
     # backend compiled into this build (each skips itself if not present). A
@@ -56,7 +63,8 @@ if(FFMPEG_EXECUTABLE)
         add_test(NAME conformance_${be} COMMAND avb_conformance "${AVB_FIXTURE}" ${be})
         add_test(NAME roundtrip_${be}
                  COMMAND avb_roundtrip "${AVB_FIXTURE}" "${AVB_OUT}/roundtrip_${be}.mp4" ${be})
-        set_tests_properties(conformance_${be} roundtrip_${be}
+        add_test(NAME io_${be} COMMAND avb_io "${AVB_FIXTURE}" ${be})
+        set_tests_properties(conformance_${be} roundtrip_${be} io_${be}
                              PROPERTIES SKIP_RETURN_CODE 77)
     endforeach()
 

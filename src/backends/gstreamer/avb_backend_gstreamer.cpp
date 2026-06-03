@@ -115,6 +115,7 @@ void AvbBackendGStreamer::close_internal() {
 
     m_audio_buf.clear();
     m_audio_buf_pos = 0;
+    m_audio_buf_pts = -1.0;
     m_video_out_buf.clear();
     m_out_sample_rate = 0;
     m_out_channels    = 0;
@@ -225,18 +226,19 @@ avb_result AvbBackendGStreamer::open_file(const char *path, const avb_decode_opt
 
     // Build the video sink bin: convert to the requested packed/planar format.
     if (options.enable_video) {
-        // Bound the decoded-video buffering so that a consumer pulling at
-        // playback rate (slower than the decoder) does not let raw frames pile
-        // up without limit — for 1080p RGBA that is ~8 MB/frame and reaches
-        // gigabytes within seconds. max-buffers applies backpressure: the video
-        // branch blocks its streaming thread once the sink is full, pausing the
-        // decoder until the consumer pulls.
+        // Bound the decoded-video buffering. appsink queues *decoded* frames, so
+        // an unbounded sink lets memory pile up without limit when the consumer
+        // pulls slower than the decoder — for 1080p RGBA that is ~8 MB/frame and
+        // reaches gigabytes within seconds. max-buffers applies backpressure: the
+        // video branch blocks its streaming thread once the sink is full, pausing
+        // the decoder until the consumer pulls. A normal player pulls both
+        // streams in step, so it never fills.
         //
-        // The audio sink is left unbounded (audio data is tiny), so the deadlock
-        // that a *bounded* video sink could cause — a consumer draining audio
-        // far ahead of video, backing up the demuxer and starving audio — is
-        // avoided: audio always keeps flowing, and a normal player pulls both
-        // streams roughly in step, well within this bound.
+        // Consequence (documented on avb_decoder_read_*): the two streams must be
+        // read roughly interleaved. Draining one to EOF while never pulling the
+        // other deadlocks — the full video sink blocks its streaming thread,
+        // backs up the demuxer and starves audio. For bulk per-stream decoding,
+        // open a decoder with only that stream enabled.
         char desc[256];
         snprintf(desc, sizeof(desc),
             "videoconvert ! appsink name=avb_vsink sync=false max-buffers=16 "
@@ -370,6 +372,7 @@ avb_result AvbBackendGStreamer::seek(double seconds) {
 
     m_audio_buf.clear();
     m_audio_buf_pos = 0;
+    m_audio_buf_pts = -1.0;
     m_audio_eof = false;
     m_seek_target = seconds;
     return AVB_OK;
@@ -391,6 +394,13 @@ bool AvbBackendGStreamer::fill_audio_buffer() {
     if (buf && m_gst.gst_buffer_map(buf, &map, GST_MAP_READ)) {
         size_t n_floats = map.size / sizeof(float);
         const float *src = (const float *)map.data;
+        // If this buffer becomes the head of an empty queue, record its PTS.
+        if (m_audio_buf_pos >= (int)m_audio_buf.size()) {
+            m_audio_buf.clear();
+            m_audio_buf_pos = 0;
+            m_audio_buf_pts = GST_BUFFER_PTS_IS_VALID(buf)
+                ? (double)GST_BUFFER_PTS(buf) / GST_SECOND : -1.0;
+        }
         m_audio_buf.insert(m_audio_buf.end(), src, src + n_floats);
         m_gst.gst_buffer_unmap(buf, &map);
     }
@@ -415,6 +425,8 @@ int AvbBackendGStreamer::read_audio_f32(float *dst_interleaved, int frames) {
                    to_copy * sizeof(float));
             m_audio_buf_pos += to_copy;
             samples_written += to_copy;
+            if (m_audio_buf_pts >= 0.0)
+                m_audio_buf_pts += (double)(to_copy / nb_channels) / m_out_sample_rate;
             if (m_audio_buf_pos >= (int)m_audio_buf.size()) {
                 m_audio_buf.clear();
                 m_audio_buf_pos = 0;
@@ -425,6 +437,14 @@ int AvbBackendGStreamer::read_audio_f32(float *dst_interleaved, int frames) {
     }
 
     return samples_written / nb_channels;
+}
+
+double AvbBackendGStreamer::audio_next_pts() {
+    if (!m_audio_sink || m_out_channels <= 0) return -1.0;
+    if (m_audio_buf_pos >= (int)m_audio_buf.size()) {
+        if (!fill_audio_buffer()) return -1.0;
+    }
+    return m_audio_buf_pts;
 }
 
 avb_result AvbBackendGStreamer::read_video_frame(avb_video_frame &out_frame) {
