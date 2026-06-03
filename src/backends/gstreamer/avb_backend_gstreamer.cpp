@@ -225,14 +225,21 @@ avb_result AvbBackendGStreamer::open_file(const char *path, const avb_decode_opt
 
     // Build the video sink bin: convert to the requested packed/planar format.
     if (options.enable_video) {
-        // max-buffers=0 (unbounded) so the video branch never blocks its
-        // streaming thread when a consumer drains audio far ahead of video.
-        // A bounded queue here deadlocks playbin: the blocked video branch backs
-        // up the demuxer and starves the audio branch. This mirrors the ffmpeg
-        // backend, whose per-stream packet queue is likewise unbounded.
+        // Bound the decoded-video buffering so that a consumer pulling at
+        // playback rate (slower than the decoder) does not let raw frames pile
+        // up without limit — for 1080p RGBA that is ~8 MB/frame and reaches
+        // gigabytes within seconds. max-buffers applies backpressure: the video
+        // branch blocks its streaming thread once the sink is full, pausing the
+        // decoder until the consumer pulls.
+        //
+        // The audio sink is left unbounded (audio data is tiny), so the deadlock
+        // that a *bounded* video sink could cause — a consumer draining audio
+        // far ahead of video, backing up the demuxer and starving audio — is
+        // avoided: audio always keeps flowing, and a normal player pulls both
+        // streams roughly in step, well within this bound.
         char desc[256];
         snprintf(desc, sizeof(desc),
-            "videoconvert ! appsink name=avb_vsink sync=false max-buffers=0 "
+            "videoconvert ! appsink name=avb_vsink sync=false max-buffers=16 "
             "caps=video/x-raw,format=%s", vfmt);
 
         GstElement *vbin = m_gst.gst_parse_bin_from_description(desc, TRUE, &err);
