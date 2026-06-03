@@ -86,6 +86,8 @@ build/examples/avb_decode_video  sample.mp4 frame_%04d.rgba
 
 ## License
 
-Permissively licensed (MIT / BSD-2-Clause). GStreamer and FFmpeg are external
-runtime dependencies loaded dynamically; they are neither bundled nor linked at
-build time.
+libavbridge is licensed under the MIT License. See [LICENSE](LICENSE) for
+details.
+
+GStreamer and FFmpeg are external runtime dependencies loaded dynamically; they
+are neither bundled nor linked at build time.
