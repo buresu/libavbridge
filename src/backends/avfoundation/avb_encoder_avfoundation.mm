@@ -298,20 +298,22 @@ avb_result AvbEncoderAVFoundation::write_video(const avb_video_frame &frame, dou
     }
 
     @autoreleasepool {
-        double pts = pts_sec >= 0.0
-            ? pts_sec
-            : (double)m_impl->video_frame_index / m_impl->frame_rate;
+        // PTS resolution order: explicit arg, then the frame's own pts (so
+        // decoded frames pass straight through), then derived from frame_rate.
+        double pts = pts_sec >= 0.0      ? pts_sec
+                   : frame.pts_sec >= 0.0 ? frame.pts_sec
+                   : (double)m_impl->video_frame_index / m_impl->frame_rate;
         CMTime t = CMTimeMakeWithSeconds(pts, 90000);
 
         CVPixelBufferRef pb = avb_make_pixel_buffer(frame, m_impl->cv_pixel_format);
         if (!pb) {
             m_last_error = "CVPixelBuffer creation failed.";
-            return AVB_ERROR_UNKNOWN;
+            return AVB_ERROR_ENCODE_FAILED;
         }
         m_impl->video_q.emplace_back(pb, t);
         m_impl->video_frame_index++;
 
-        if (!drain()) return AVB_ERROR_UNKNOWN;
+        if (!drain()) return AVB_ERROR_ENCODE_FAILED;
         return AVB_OK;
     }
 }
@@ -328,7 +330,7 @@ avb_result AvbEncoderAVFoundation::write_audio_f32(const float *src_interleaved,
             0, data_size, kCMBlockBufferAssureMemoryNowFlag, &block);
         if (st != kCMBlockBufferNoErr || !block) {
             m_last_error = "CMBlockBufferCreate failed.";
-            return AVB_ERROR_UNKNOWN;
+            return AVB_ERROR_ENCODE_FAILED;
         }
         CMBlockBufferReplaceDataBytes(src_interleaved, block, 0, data_size);
 
@@ -343,12 +345,12 @@ avb_result AvbEncoderAVFoundation::write_audio_f32(const float *src_interleaved,
         CFRelease(block);
         if (st != noErr || !sb) {
             m_last_error = "CMSampleBufferCreate (audio) failed.";
-            return AVB_ERROR_UNKNOWN;
+            return AVB_ERROR_ENCODE_FAILED;
         }
         m_impl->audio_q.push_back(sb);
         m_impl->audio_sample_count += frames;
 
-        if (!drain()) return AVB_ERROR_UNKNOWN;
+        if (!drain()) return AVB_ERROR_ENCODE_FAILED;
         return AVB_OK;
     }
 }
@@ -364,12 +366,12 @@ avb_result AvbEncoderAVFoundation::finish() {
         while (!m_impl->video_q.empty() || !m_impl->audio_q.empty()) {
             if (m_impl->writer.status != AVAssetWriterStatusWriting) break;
             size_t before = m_impl->video_q.size() + m_impl->audio_q.size();
-            if (!drain()) return AVB_ERROR_UNKNOWN;
+            if (!drain()) return AVB_ERROR_ENCODE_FAILED;
             size_t after = m_impl->video_q.size() + m_impl->audio_q.size();
             if (after == before) {
                 if (++idle > 10000) { // ~10s with no progress
                     m_last_error = "Timed out draining encoder queues.";
-                    return AVB_ERROR_UNKNOWN;
+                    return AVB_ERROR_ENCODE_FAILED;
                 }
                 usleep(1000);
             } else {
@@ -391,7 +393,7 @@ avb_result AvbEncoderAVFoundation::finish() {
             m_last_error = m_impl->writer.error
                 ? m_impl->writer.error.localizedDescription.UTF8String
                 : "finishWriting did not complete.";
-            return AVB_ERROR_UNKNOWN;
+            return AVB_ERROR_ENCODE_FAILED;
         }
         return AVB_OK;
     }

@@ -8,6 +8,10 @@
 #include "backends/avfoundation/avb_encoder_avfoundation.hh"
 #endif
 
+#if defined(AVB_ENABLE_FFMPEG)
+#include "backends/ffmpeg/avb_encoder_ffmpeg.hpp"
+#endif
+
 struct avb_encoder {
     std::unique_ptr<AvbEncoderBackend> backend;
     std::string last_error;
@@ -24,7 +28,14 @@ AvbEncoderBackend *avb_create_encoder_backend(avb_backend backend) {
 #elif defined(__APPLE__)
         resolved = AVB_BACKEND_AVFOUNDATION;
 #elif defined(__linux__)
+        // Linux: the default decode backend is GStreamer, but there is no
+        // GStreamer *encoder* yet, so AUTO uses FFmpeg when it is available.
+        // (When a GStreamer encoder lands, prefer it here to mirror decoding.)
+#  if defined(AVB_ENABLE_FFMPEG)
         resolved = AVB_BACKEND_FFMPEG;
+#  else
+        return nullptr;
+#  endif
 #else
         return nullptr;
 #endif
@@ -34,6 +45,10 @@ AvbEncoderBackend *avb_create_encoder_backend(avb_backend backend) {
 #if defined(AVB_ENABLE_AVFOUNDATION)
         case AVB_BACKEND_AVFOUNDATION:
             return new AvbEncoderAVFoundation();
+#endif
+#if defined(AVB_ENABLE_FFMPEG)
+        case AVB_BACKEND_FFMPEG:
+            return new AvbEncoderFFmpeg();
 #endif
         default:
             return nullptr;

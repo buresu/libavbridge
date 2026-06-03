@@ -28,16 +28,15 @@ typedef enum avb_result {
     AVB_ERROR_DECODE_FAILED = -6,
     AVB_ERROR_SEEK_FAILED = -7,
     AVB_ERROR_EOF = -8,
+    AVB_ERROR_ENCODE_FAILED = -9,
 } avb_result;
 
 typedef enum avb_backend {
     AVB_BACKEND_AUTO = 0,
     AVB_BACKEND_MEDIAFOUNDATION,
     AVB_BACKEND_AVFOUNDATION,
-    AVB_BACKEND_FFMPEG,
-    /* Optional Linux backend, dynamically loaded like ffmpeg. Never selected by
-     * AVB_BACKEND_AUTO (which stays ffmpeg on Linux) — request it explicitly. */
     AVB_BACKEND_GSTREAMER,
+    AVB_BACKEND_FFMPEG,
 } avb_backend;
 
 typedef enum avb_pixel_format {
@@ -188,16 +187,26 @@ typedef struct avb_encode_options {
     avb_audio_encode_params audio;
 } avb_encode_options;
 
-/* When both audio and video are enabled, write the two tracks roughly
- * interleaved in increasing-PTS order (the standard muxer contract). Writing one
- * track far ahead of the other will fail rather than buffer unboundedly. */
+/* Open an encoder writing to `path`; the container is inferred from the file
+ * extension (.mp4/.mov/.m4a). When both audio and video are enabled, feed the
+ * two tracks roughly interleaved in increasing-PTS order (the standard muxer
+ * contract); writing one track far ahead of the other may fail rather than
+ * buffer unboundedly.
+ *
+ * On failure a non-NULL *out_enc is still returned so the caller can read
+ * avb_encoder_get_last_error(); it must still be released with
+ * avb_encoder_close(). */
 AVB_API avb_result avb_encoder_open(
     avb_encoder **out_enc,
     const char *path,
     const avb_encode_options *options
 );
 
-/* Encode one video frame. pts_sec < 0 derives the timestamp from frame_rate. */
+/* Encode one video frame. The presentation timestamp is resolved in this order:
+ *   1. the `pts_sec` argument, if >= 0;
+ *   2. otherwise frame->pts_sec, if >= 0 (so decoded frames pass through);
+ *   3. otherwise it is derived from the configured frame_rate and frame count.
+ * frame->format must match avb_video_encode_params::input_format. */
 AVB_API avb_result avb_encoder_write_video(
     avb_encoder *enc,
     const avb_video_frame *frame,

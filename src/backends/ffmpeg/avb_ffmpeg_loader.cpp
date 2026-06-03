@@ -188,6 +188,26 @@ bool avb_ffmpeg_load(AvbFFmpegFuncs &out_funcs, char *err_buf, int err_buf_size)
     LOAD_SYM(g_handle_swscale, out_funcs, sws_scale);
     LOAD_SYM(g_handle_swscale, out_funcs, sws_freeContext);
 
+    // Encoding / muxing
+    LOAD_SYM(g_handle_avformat, out_funcs, avformat_alloc_output_context2);
+    LOAD_SYM(g_handle_avformat, out_funcs, avformat_new_stream);
+    LOAD_SYM(g_handle_avformat, out_funcs, avformat_write_header);
+    LOAD_SYM(g_handle_avformat, out_funcs, av_interleaved_write_frame);
+    LOAD_SYM(g_handle_avformat, out_funcs, av_write_trailer);
+    LOAD_SYM(g_handle_avformat, out_funcs, avio_open);
+    LOAD_SYM(g_handle_avformat, out_funcs, avio_closep);
+
+    LOAD_SYM(g_handle_avcodec, out_funcs, avcodec_find_encoder);
+    LOAD_SYM(g_handle_avcodec, out_funcs, avcodec_send_frame);
+    LOAD_SYM(g_handle_avcodec, out_funcs, avcodec_receive_packet);
+    LOAD_SYM(g_handle_avcodec, out_funcs, avcodec_parameters_from_context);
+    LOAD_SYM(g_handle_avcodec, out_funcs, av_packet_rescale_ts);
+
+    LOAD_SYM(g_handle_avutil, out_funcs, av_frame_make_writable);
+    LOAD_SYM(g_handle_avutil, out_funcs, av_dict_set);
+    LOAD_SYM(g_handle_avutil, out_funcs, av_dict_free);
+    LOAD_SYM(g_handle_avutil, out_funcs, av_d2q);
+
     return true;
 }
 

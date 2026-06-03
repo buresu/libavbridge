@@ -67,6 +67,28 @@ struct AvbFFmpegFuncs {
     int (*sws_scale)(SwsContext *, const uint8_t *const [], const int [],
                      int, int, uint8_t *const [], const int []);
     void (*sws_freeContext)(SwsContext *);
+
+    // --- Encoding / muxing ---
+    // avformat
+    int (*avformat_alloc_output_context2)(AVFormatContext **, const AVOutputFormat *,
+                                          const char *, const char *);
+    AVStream *(*avformat_new_stream)(AVFormatContext *, const AVCodec *);
+    int (*avformat_write_header)(AVFormatContext *, AVDictionary **);
+    int (*av_interleaved_write_frame)(AVFormatContext *, AVPacket *);
+    int (*av_write_trailer)(AVFormatContext *);
+    int (*avio_open)(AVIOContext **, const char *, int);
+    int (*avio_closep)(AVIOContext **);
+    // avcodec
+    const AVCodec *(*avcodec_find_encoder)(enum AVCodecID);
+    int (*avcodec_send_frame)(AVCodecContext *, const AVFrame *);
+    int (*avcodec_receive_packet)(AVCodecContext *, AVPacket *);
+    int (*avcodec_parameters_from_context)(AVCodecParameters *, const AVCodecContext *);
+    void (*av_packet_rescale_ts)(AVPacket *, AVRational, AVRational);
+    // avutil
+    int (*av_frame_make_writable)(AVFrame *);
+    int (*av_dict_set)(AVDictionary **, const char *, const char *, int);
+    void (*av_dict_free)(AVDictionary **);
+    AVRational (*av_d2q)(double, int);
 };
 
 bool avb_ffmpeg_load(AvbFFmpegFuncs &out_funcs, char *err_buf, int err_buf_size);

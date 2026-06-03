@@ -65,6 +65,7 @@ endif()
 if(AVB_ENABLE_FFMPEG)
     list(APPEND AVB_SOURCES
         src/backends/ffmpeg/avb_backend_ffmpeg.cpp
+        src/backends/ffmpeg/avb_encoder_ffmpeg.cpp
         src/backends/ffmpeg/avb_ffmpeg_loader.cpp
     )
 endif()
