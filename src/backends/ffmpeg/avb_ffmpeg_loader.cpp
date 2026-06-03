@@ -70,27 +70,41 @@ bool avb_ffmpeg_load(AvbFFmpegFuncs &out_funcs, char *err_buf, int err_buf_size)
         "swscale-9.dll", "swscale-8.dll", "swscale-7.dll", "swscale-6.dll"
     };
 #elif defined(__APPLE__)
+    // Homebrew installs to /opt/homebrew/lib on Apple Silicon and /usr/local/lib
+    // on Intel; neither is in dyld's default search path, so try the SONAME-matched
+    // major under both prefixes first, then fall back to bare names (found when the
+    // caller sets DYLD_FALLBACK_LIBRARY_PATH or the lib is alongside the binary).
     const char *avformat_names[] = {
+        "/opt/homebrew/lib/libavformat." AV_STRINGIFY(LIBAVFORMAT_VERSION_MAJOR) ".dylib",
+        "/usr/local/lib/libavformat." AV_STRINGIFY(LIBAVFORMAT_VERSION_MAJOR) ".dylib",
         "libavformat." AV_STRINGIFY(LIBAVFORMAT_VERSION_MAJOR) ".dylib",
         "libavformat.62.dylib", "libavformat.61.dylib", "libavformat.60.dylib",
         "libavformat.59.dylib", "libavformat.dylib"
     };
     const char *avcodec_names[] = {
+        "/opt/homebrew/lib/libavcodec." AV_STRINGIFY(LIBAVCODEC_VERSION_MAJOR) ".dylib",
+        "/usr/local/lib/libavcodec." AV_STRINGIFY(LIBAVCODEC_VERSION_MAJOR) ".dylib",
         "libavcodec." AV_STRINGIFY(LIBAVCODEC_VERSION_MAJOR) ".dylib",
         "libavcodec.62.dylib", "libavcodec.61.dylib", "libavcodec.60.dylib",
         "libavcodec.59.dylib", "libavcodec.dylib"
     };
     const char *avutil_names[] = {
+        "/opt/homebrew/lib/libavutil." AV_STRINGIFY(LIBAVUTIL_VERSION_MAJOR) ".dylib",
+        "/usr/local/lib/libavutil." AV_STRINGIFY(LIBAVUTIL_VERSION_MAJOR) ".dylib",
         "libavutil." AV_STRINGIFY(LIBAVUTIL_VERSION_MAJOR) ".dylib",
         "libavutil.60.dylib", "libavutil.59.dylib", "libavutil.58.dylib",
         "libavutil.57.dylib", "libavutil.dylib"
     };
     const char *swresample_names[] = {
+        "/opt/homebrew/lib/libswresample." AV_STRINGIFY(LIBSWRESAMPLE_VERSION_MAJOR) ".dylib",
+        "/usr/local/lib/libswresample." AV_STRINGIFY(LIBSWRESAMPLE_VERSION_MAJOR) ".dylib",
         "libswresample." AV_STRINGIFY(LIBSWRESAMPLE_VERSION_MAJOR) ".dylib",
         "libswresample.6.dylib", "libswresample.5.dylib", "libswresample.4.dylib",
         "libswresample.3.dylib", "libswresample.dylib"
     };
     const char *swscale_names[] = {
+        "/opt/homebrew/lib/libswscale." AV_STRINGIFY(LIBSWSCALE_VERSION_MAJOR) ".dylib",
+        "/usr/local/lib/libswscale." AV_STRINGIFY(LIBSWSCALE_VERSION_MAJOR) ".dylib",
         "libswscale." AV_STRINGIFY(LIBSWSCALE_VERSION_MAJOR) ".dylib",
         "libswscale.9.dylib", "libswscale.8.dylib", "libswscale.7.dylib",
         "libswscale.6.dylib", "libswscale.dylib"
