@@ -73,6 +73,7 @@ endif()
 if(AVB_ENABLE_GSTREAMER)
     list(APPEND AVB_SOURCES
         src/backends/gstreamer/avb_backend_gstreamer.cpp
+        src/backends/gstreamer/avb_encoder_gstreamer.cpp
         src/backends/gstreamer/avb_gstreamer_loader.cpp
     )
 endif()

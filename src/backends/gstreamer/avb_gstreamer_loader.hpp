@@ -3,6 +3,7 @@
 extern "C" {
 #include <gst/gst.h>
 #include <gst/app/gstappsink.h>
+#include <gst/app/gstappsrc.h>
 #include <gst/pbutils/pbutils.h>
 }
 
@@ -43,11 +44,22 @@ struct AvbGstFuncs {
     void (*gst_object_unref)(gpointer);
     gchar *(*gst_filename_to_uri)(const gchar *, GError **);
 
+    // Encoding (appsrc -> encoders -> muxer -> filesink)
+    GstElement *(*gst_parse_launch)(const gchar *, GError **);
+    GstCaps *(*gst_caps_from_string)(const gchar *);
+    GstBuffer *(*gst_buffer_new_allocate)(GstAllocator *, gsize, GstAllocationParams *);
+    gsize (*gst_buffer_fill)(GstBuffer *, gsize, gconstpointer, gsize);
+    GstBus *(*gst_element_get_bus)(GstElement *);
+    GstMessage *(*gst_bus_timed_pop_filtered)(GstBus *, GstClockTime, GstMessageType);
+    void (*gst_message_parse_error)(GstMessage *, GError **, gchar **);
+
     // libgstapp-1.0
     GstSample *(*gst_app_sink_pull_sample)(GstAppSink *);
     GstSample *(*gst_app_sink_try_pull_preroll)(GstAppSink *, GstClockTime);
     void (*gst_app_sink_set_max_buffers)(GstAppSink *, guint);
     void (*gst_app_sink_set_drop)(GstAppSink *, gboolean);
+    GstFlowReturn (*gst_app_src_push_buffer)(GstAppSrc *, GstBuffer *);
+    GstFlowReturn (*gst_app_src_end_of_stream)(GstAppSrc *);
 
     // libgstpbutils-1.0 (source codec discovery)
     GstDiscoverer *(*gst_discoverer_new)(GstClockTime, GError **);
@@ -64,6 +76,7 @@ struct AvbGstFuncs {
     // libglib-2.0
     void (*g_free)(gpointer);
     void (*g_clear_error)(GError **);
+    void (*g_error_free)(GError *);
 };
 
 bool avb_gst_load(AvbGstFuncs &out_funcs, char *err_buf, int err_buf_size);

@@ -69,11 +69,20 @@ bool avb_gst_load(AvbGstFuncs &out_funcs, char *err_buf, int err_buf_size) {
     LOAD_SYM(g_handle_gst, out_funcs, gst_mini_object_unref);
     LOAD_SYM(g_handle_gst, out_funcs, gst_object_unref);
     LOAD_SYM(g_handle_gst, out_funcs, gst_filename_to_uri);
+    LOAD_SYM(g_handle_gst, out_funcs, gst_parse_launch);
+    LOAD_SYM(g_handle_gst, out_funcs, gst_caps_from_string);
+    LOAD_SYM(g_handle_gst, out_funcs, gst_buffer_new_allocate);
+    LOAD_SYM(g_handle_gst, out_funcs, gst_buffer_fill);
+    LOAD_SYM(g_handle_gst, out_funcs, gst_element_get_bus);
+    LOAD_SYM(g_handle_gst, out_funcs, gst_bus_timed_pop_filtered);
+    LOAD_SYM(g_handle_gst, out_funcs, gst_message_parse_error);
 
     LOAD_SYM(g_handle_gstapp, out_funcs, gst_app_sink_pull_sample);
     LOAD_SYM(g_handle_gstapp, out_funcs, gst_app_sink_try_pull_preroll);
     LOAD_SYM(g_handle_gstapp, out_funcs, gst_app_sink_set_max_buffers);
     LOAD_SYM(g_handle_gstapp, out_funcs, gst_app_sink_set_drop);
+    LOAD_SYM(g_handle_gstapp, out_funcs, gst_app_src_push_buffer);
+    LOAD_SYM(g_handle_gstapp, out_funcs, gst_app_src_end_of_stream);
 
     LOAD_SYM(g_handle_pbutils, out_funcs, gst_discoverer_new);
     LOAD_SYM(g_handle_pbutils, out_funcs, gst_discoverer_discover_uri);
@@ -87,6 +96,7 @@ bool avb_gst_load(AvbGstFuncs &out_funcs, char *err_buf, int err_buf_size) {
 
     LOAD_SYM(g_handle_glib, out_funcs, g_free);
     LOAD_SYM(g_handle_glib, out_funcs, g_clear_error);
+    LOAD_SYM(g_handle_glib, out_funcs, g_error_free);
 
     return true;
 }
