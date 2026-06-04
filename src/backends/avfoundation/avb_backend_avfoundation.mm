@@ -123,6 +123,7 @@ struct AvbBackendAVFoundation::Impl {
 
     int sample_rate  = 0;   // effective output rate
     int channels     = 0;   // effective output channel count
+    int audio_track_count = 0; // selectable audio tracks in the container
     int req_sample_rate = 0; // requested override (0 = source)
     int req_channels    = 0; // requested override (0 = source)
     int width        = 0;
@@ -187,6 +188,7 @@ avb_result AvbBackendAVFoundation::open_file(const char *path, const avb_decode_
         if (options.enable_audio) {
             NSArray<AVAssetTrack *> *audio_tracks =
                 avb_load_tracks(m_impl->asset, AVMediaTypeAudio);
+            m_impl->audio_track_count = (int)audio_tracks.count;
             int idx = options.audio_stream_index >= 0 ? options.audio_stream_index : 0;
             if (idx < (int)audio_tracks.count) {
                 AVAssetTrack *track = audio_tracks[idx];
@@ -279,6 +281,7 @@ avb_result AvbBackendAVFoundation::get_media_info(avb_media_info &out_info) {
     if (m_impl->audio_output) {
         out_info.audio.available    = 1;
         out_info.audio.stream_index = m_impl->audio_stream_idx;
+        out_info.audio.track_count  = m_impl->audio_track_count;
         out_info.audio.sample_rate  = m_impl->sample_rate;
         out_info.audio.channels     = m_impl->channels;
         out_info.audio.duration_sec = m_impl->duration_sec;
