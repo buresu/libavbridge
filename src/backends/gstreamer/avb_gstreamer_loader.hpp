@@ -69,8 +69,9 @@ struct AvbGstFuncs {
     GstCaps *(*gst_discoverer_stream_info_get_caps)(GstDiscovererStreamInfo *);
     void (*gst_discoverer_stream_info_list_free)(GList *);
 
-    // libgobject-2.0 (variadic property setter)
+    // libgobject-2.0 (variadic property setter/getter)
     void (*g_object_set)(gpointer, const gchar *, ...);
+    void (*g_object_get)(gpointer, const gchar *, ...);
     void (*g_object_unref)(gpointer);
 
     // libglib-2.0

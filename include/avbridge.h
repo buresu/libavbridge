@@ -115,6 +115,9 @@ typedef struct avb_video_frame {
 typedef struct avb_audio_info {
     int available;
     int stream_index;
+    int track_count; /* number of selectable audio tracks in the container
+                      * (>=1 when audio is available); pick one with
+                      * avb_decode_options::audio_stream_index */
     int sample_rate;
     int channels;
     double duration_sec;

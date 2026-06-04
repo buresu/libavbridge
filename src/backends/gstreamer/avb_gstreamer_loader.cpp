@@ -92,6 +92,7 @@ bool avb_gst_load(AvbGstFuncs &out_funcs, char *err_buf, int err_buf_size) {
     LOAD_SYM(g_handle_pbutils, out_funcs, gst_discoverer_stream_info_list_free);
 
     LOAD_SYM(g_handle_gobject, out_funcs, g_object_set);
+    LOAD_SYM(g_handle_gobject, out_funcs, g_object_get);
     LOAD_SYM(g_handle_gobject, out_funcs, g_object_unref);
 
     LOAD_SYM(g_handle_glib, out_funcs, g_free);

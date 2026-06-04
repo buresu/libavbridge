@@ -119,6 +119,8 @@ void AvbBackendGStreamer::close_internal() {
     m_video_out_buf.clear();
     m_out_sample_rate = 0;
     m_out_channels    = 0;
+    m_audio_track       = 0;
+    m_audio_track_count = 0;
     m_width = m_height = 0;
     m_frame_rate = 0.0;
     m_duration   = 0.0;
@@ -137,8 +139,12 @@ void AvbBackendGStreamer::discover_codec_names(const char *uri) {
     if (info) {
         GList *al = m_gst.gst_discoverer_info_get_audio_streams(info);
         if (al) {
+            // Report the *selected* track's codec (m_audio_track), not just the
+            // first audio stream.
+            GList *node = al;
+            for (int i = 0; i < m_audio_track && node->next; ++i) node = node->next;
             GstCaps *caps = m_gst.gst_discoverer_stream_info_get_caps(
-                (GstDiscovererStreamInfo *)al->data);
+                (GstDiscovererStreamInfo *)node->data);
             m_audio_codec_name = caps_to_codec_name(m_gst, caps);
             if (caps) m_gst.gst_mini_object_unref((GstMiniObject *)caps);
             m_gst.gst_discoverer_stream_info_list_free(al);
@@ -323,11 +329,40 @@ avb_result AvbBackendGStreamer::open_file(const char *path, const avb_decode_opt
         return AVB_ERROR_STREAM_NOT_FOUND;
     }
 
+    // Start decoding.
+    m_gst.gst_element_set_state(m_pipeline, GST_STATE_PLAYING);
+
+    // Audio track selection. playbin lists the tracks it found in "n-audio" and
+    // selects one by logical 0-based "current-audio". We switch here (in PLAYING)
+    // and flush via a seek to 0 to drop stale buffers from the previous track —
+    // a flushing seek while PAUSED can wedge the pipeline, but the PLAYING seek
+    // path is the same one used for normal seeking. Priming fill_audio_buffer()
+    // then reads the selected track's real channels/rate from a live sample.
+    if (m_audio_sink) {
+        gint n_audio = 0, current = 0;
+        m_gst.g_object_get(m_pipeline, "n-audio", &n_audio, nullptr);
+        m_audio_track_count = n_audio;
+
+        int want = options.audio_stream_index < 0 ? 0 : options.audio_stream_index;
+        if (n_audio > 0 && want >= n_audio) want = n_audio - 1;
+
+        m_gst.g_object_get(m_pipeline, "current-audio", &current, nullptr);
+        if (n_audio > 0 && want != current) {
+            m_gst.g_object_set(m_pipeline, "current-audio", (gint)want, nullptr);
+            m_gst.gst_element_seek_simple(
+                m_pipeline, GST_FORMAT_TIME,
+                (GstSeekFlags)(GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_ACCURATE), 0);
+        }
+        m_gst.g_object_get(m_pipeline, "current-audio", &current, nullptr);
+        m_audio_track = current < 0 ? 0 : current;
+
+        fill_audio_buffer(); // prime channels/rate from the selected track
+    }
+
+    // Codec names (uses m_audio_track, set above).
     discover_codec_names(uri);
     m_gst.g_free(uri);
 
-    // Start decoding.
-    m_gst.gst_element_set_state(m_pipeline, GST_STATE_PLAYING);
     return AVB_OK;
 }
 
@@ -340,7 +375,8 @@ avb_result AvbBackendGStreamer::get_media_info(avb_media_info &out_info) {
 
     if (m_audio_sink) {
         out_info.audio.available    = 1;
-        out_info.audio.stream_index = 0;
+        out_info.audio.stream_index = m_audio_track;
+        out_info.audio.track_count  = m_audio_track_count > 0 ? m_audio_track_count : 1;
         out_info.audio.sample_rate  = m_out_sample_rate;
         out_info.audio.channels     = m_out_channels;
         out_info.audio.duration_sec = m_duration;
@@ -386,6 +422,18 @@ bool AvbBackendGStreamer::fill_audio_buffer() {
     if (!sample) {
         m_audio_eof = true;
         return false;
+    }
+
+    // Track the negotiated output format from the live sample, so it reflects
+    // the actually-selected audio track (the preroll caps can be stale after a
+    // track switch).
+    GstCaps *scaps = m_gst.gst_sample_get_caps(sample);
+    if (scaps) {
+        GstStructure *str = m_gst.gst_caps_get_structure(scaps, 0);
+        if (str) {
+            m_gst.gst_structure_get_int(str, "rate", &m_out_sample_rate);
+            m_gst.gst_structure_get_int(str, "channels", &m_out_channels);
+        }
     }
 
     GstBuffer *buf = m_gst.gst_sample_get_buffer(sample);

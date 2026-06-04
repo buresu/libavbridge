@@ -318,8 +318,13 @@ avb_result AvbBackendFFmpeg::setup_after_open(const avb_decode_options &options)
 
     if (m_audio_stream_idx >= 0) {
         AVStream *st = m_fmt_ctx->streams[m_audio_stream_idx];
+        unsigned audio_streams = 0;
+        for (unsigned i = 0; i < m_fmt_ctx->nb_streams; ++i)
+            if (m_fmt_ctx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO)
+                ++audio_streams;
         m_media_info.audio.available    = 1;
         m_media_info.audio.stream_index = m_audio_stream_idx;
+        m_media_info.audio.track_count  = (int)audio_streams;
         m_media_info.audio.sample_rate  = m_out_sample_rate;
         m_media_info.audio.channels     = m_out_channels;
         m_media_info.audio.codec_name   = m_audio_codec_name.c_str();

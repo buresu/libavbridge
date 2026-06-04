@@ -44,6 +44,10 @@ private:
     int m_req_sample_rate = 0; // 0 = source
     int m_req_channels    = 0; // 0 = source
 
+    // Audio track selection (playbin "current-audio" is a logical 0-based index).
+    int m_audio_track       = 0; // selected logical track
+    int m_audio_track_count = 0; // playbin "n-audio"
+
     int    m_width      = 0;
     int    m_height     = 0;
     double m_frame_rate = 0.0;
