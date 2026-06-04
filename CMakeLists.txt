@@ -10,6 +10,17 @@ option(AVB_BUILD_SHARED "Build shared library" ON)
 option(AVB_BUILD_EXAMPLES "Build examples" ON)
 option(AVB_BUILD_TESTS "Build tests" OFF)
 
+# Generate install rules only when avbridge is the top-level project. When it is
+# pulled in with add_subdirectory() (e.g. linked statically into a plugin), a
+# parent's `cmake --install` must not try to install avbridge into the system
+# prefix — that fails with a permission error on platforms like macOS.
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    set(AVB_INSTALL_DEFAULT ON)
+else()
+    set(AVB_INSTALL_DEFAULT OFF)
+endif()
+option(AVB_INSTALL "Generate install rules for avbridge" ${AVB_INSTALL_DEFAULT})
+
 # Native platform backends (each only builds on its own OS).
 option(AVB_ENABLE_MEDIAFOUNDATION "Enable Windows Media Foundation backend" ON)
 option(AVB_ENABLE_AVFOUNDATION "Enable Apple AVFoundation backend" ON)
@@ -170,9 +181,11 @@ if(AVB_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
 
-install(TARGETS avbridge
-    LIBRARY DESTINATION lib
-    ARCHIVE DESTINATION lib
-    RUNTIME DESTINATION bin
-    PUBLIC_HEADER DESTINATION include/avbridge
-)
+if(AVB_INSTALL)
+    install(TARGETS avbridge
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+        RUNTIME DESTINATION bin
+        PUBLIC_HEADER DESTINATION include/avbridge
+    )
+endif()
