@@ -24,6 +24,7 @@ struct AvbBackendMediaFoundation::Impl {
 
     int sample_rate  = 0;
     int channels     = 0;
+    int audio_track_count = 0;   // selectable audio tracks in the container
     int width        = 0;
     int height       = 0;
     int video_stride = 0;        // bytes per row; may exceed width*4 due to alignment
@@ -59,6 +60,7 @@ struct AvbBackendMediaFoundation::Impl {
         reader.Reset();
         audio_stream_idx = video_stream_idx = -1;
         sample_rate = channels = width = height = video_stride = 0;
+        audio_track_count = 0;
         video_bottom_up = false;
         video_avb_fmt = AVB_PIXEL_FORMAT_BGRA8;
         swizzle_rgba = false;
@@ -101,9 +103,11 @@ const char *AvbBackendMediaFoundation::get_last_error() const {
     return m_last_error.empty() ? nullptr : m_last_error.c_str();
 }
 
-static void find_stream_indices(IMFSourceReader *reader, int *audio_idx, int *video_idx) {
+static void find_stream_indices(IMFSourceReader *reader, int *audio_idx, int *video_idx,
+                                int *audio_count) {
     *audio_idx = -1;
     *video_idx = -1;
+    *audio_count = 0;
     for (DWORD i = 0; ; ++i) {
         ComPtr<IMFMediaType> type;
         if (FAILED(reader->GetNativeMediaType(i, 0, &type))) break;
@@ -111,8 +115,10 @@ static void find_stream_indices(IMFSourceReader *reader, int *audio_idx, int *vi
         GUID major = GUID_NULL;
         type->GetGUID(MF_MT_MAJOR_TYPE, &major);
 
-        if (*audio_idx < 0 && IsEqualGUID(major, MFMediaType_Audio))
-            *audio_idx = (int)i;
+        if (IsEqualGUID(major, MFMediaType_Audio)) {
+            if (*audio_idx < 0) *audio_idx = (int)i;
+            ++*audio_count;
+        }
         if (*video_idx < 0 && IsEqualGUID(major, MFMediaType_Video))
             *video_idx = (int)i;
     }
@@ -189,8 +195,9 @@ avb_result AvbBackendMediaFoundation::open_file(const char *path, const avb_deco
         return AVB_ERROR_OPEN_FAILED;
     }
 
-    int found_audio = -1, found_video = -1;
-    find_stream_indices(m_impl->reader.Get(), &found_audio, &found_video);
+    int found_audio = -1, found_video = -1, audio_count = 0;
+    find_stream_indices(m_impl->reader.Get(), &found_audio, &found_video, &audio_count);
+    m_impl->audio_track_count = audio_count;
 
     if (!options.enable_audio) found_audio = -1;
     if (!options.enable_video) found_video = -1;
@@ -329,6 +336,7 @@ avb_result AvbBackendMediaFoundation::get_media_info(avb_media_info &out_info) {
     if (m_impl->audio_stream_idx >= 0) {
         out_info.audio.available    = 1;
         out_info.audio.stream_index = m_impl->audio_stream_idx;
+        out_info.audio.track_count  = m_impl->audio_track_count;
         out_info.audio.sample_rate  = m_impl->sample_rate;
         out_info.audio.channels     = m_impl->channels;
         out_info.audio.duration_sec = m_impl->duration_sec;
