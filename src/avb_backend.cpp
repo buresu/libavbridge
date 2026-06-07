@@ -1,6 +1,8 @@
 #include "avb_backend.hpp"
 
+#include <cstring>
 #include <cstdio>
+#include <string>
 #include <vector>
 
 #if defined(_WIN32)
@@ -32,6 +34,25 @@ AvbBackend::~AvbBackend() {
     }
 }
 
+namespace {
+
+const char *avb_extension_for_magic(const std::vector<unsigned char> &head) {
+    if (head.size() >= 12 && std::memcmp(head.data() + 4, "ftyp", 4) == 0) {
+        if (std::memcmp(head.data() + 8, "qt  ", 4) == 0) return ".mov";
+        return ".mp4";
+    }
+    if (head.size() >= 4 && std::memcmp(head.data(), "OggS", 4) == 0) return ".ogg";
+    if (head.size() >= 4 && std::memcmp(head.data(), "RIFF", 4) == 0) return ".wav";
+    if (head.size() >= 3 && std::memcmp(head.data(), "ID3", 3) == 0) return ".mp3";
+    if (head.size() >= 4 &&
+        head[0] == 0x1a && head[1] == 0x45 && head[2] == 0xdf && head[3] == 0xa3) {
+        return ".mkv";
+    }
+    return "";
+}
+
+} // namespace
+
 // Default custom-I/O open: spill the entire stream to a temp file (sequential
 // reads only, so a NULL seek callback is fine) and open that file. Backends
 // that read callbacks natively override this.
@@ -61,15 +82,29 @@ avb_result AvbBackend::open_io(const avb_io_callbacks &cb, void *user,
     if (!f) { std::remove(path.c_str()); return AVB_ERROR_OPEN_FAILED; }
 
     unsigned char chunk[64 * 1024];
+    std::vector<unsigned char> head;
     for (;;) {
         int n = cb.read(user, chunk, (int)sizeof(chunk));
         if (n < 0) { std::fclose(f); std::remove(path.c_str()); return AVB_ERROR_OPEN_FAILED; }
         if (n == 0) break;
+        if (head.size() < 16) {
+            size_t want = 16 - head.size();
+            if ((size_t)n < want) want = (size_t)n;
+            head.insert(head.end(), chunk, chunk + want);
+        }
         if (std::fwrite(chunk, 1, (size_t)n, f) != (size_t)n) {
             std::fclose(f); std::remove(path.c_str()); return AVB_ERROR_OPEN_FAILED;
         }
     }
     std::fclose(f);
+
+    const char *ext = avb_extension_for_magic(head);
+    if (ext[0] != '\0') {
+        std::string ext_path = path + ext;
+        if (std::rename(path.c_str(), ext_path.c_str()) == 0) {
+            path = ext_path;
+        }
+    }
 
     m_spill_path = path; // removed by ~AvbBackend
     return open_file(path.c_str(), options);

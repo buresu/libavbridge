@@ -17,6 +17,7 @@ public:
 private:
     struct Impl;
     bool drain(); // append queued samples to whichever inputs are ready
+    avb_result write_custom_video_packet(avb_encoded_packet &packet, double fallback_pts);
 
     Impl *m_impl = nullptr;
     std::string m_last_error;

@@ -50,16 +50,17 @@ Applications can register process-wide custom video decoders with
 audio decoding, then route matching video packets to the registered decoder.
 This is intended for formats such as HAP where a plugin may want to return
 GPU-ready compressed frames instead of CPU-expanded pixels. FFmpeg, GStreamer,
-and Media Foundation can use custom video decoders.
+Media Foundation, and AVFoundation can use custom video decoders.
 
 Applications can also register custom video encoders with
-`avb_register_video_encoder`. FFmpeg, GStreamer, and Media Foundation can use a
-registered encoder for video compression while continuing to mux regular audio
-through the backend. FFmpeg writes the returned encoded packets directly to the
-container muxer; GStreamer pushes them through an encoded `appsrc` using the
-caps reported by the plugin; Media Foundation writes encoded samples directly to
-Sink Writer streams when the selected Windows media sink accepts that compressed
-format.
+`avb_register_video_encoder`. FFmpeg, GStreamer, Media Foundation, and
+AVFoundation can use a registered encoder for video compression while continuing
+to mux regular audio through the backend. FFmpeg writes the returned encoded
+packets directly to the container muxer; GStreamer pushes them through an
+encoded `appsrc` using the caps reported by the plugin; Media Foundation writes
+encoded samples directly to Sink Writer streams when the selected Windows media
+sink accepts that compressed format; AVFoundation wraps them in
+`CMSampleBuffer` objects for `AVAssetWriter`.
 
 Compressed block formats are represented through `avb_video_frame` using
 `AVB_PIXEL_FORMAT_BC1_RGBA`, `AVB_PIXEL_FORMAT_BC3_RGBA`, `AVB_PIXEL_FORMAT_BC4_R`,

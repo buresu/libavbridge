@@ -104,6 +104,14 @@ if(FFMPEG_EXECUTABLE)
                  COMMAND avb_custom_encoder "${AVB_OUT}/custom_encoder_gstreamer.mkv" gstreamer)
         set_tests_properties(custom_encoder_gstreamer PROPERTIES SKIP_RETURN_CODE 77)
     endif()
+    if(AVB_ENABLE_AVFOUNDATION)
+        add_test(NAME custom_decoder_avfoundation
+                 COMMAND avb_custom_decoder "${AVB_FIXTURE}" avfoundation)
+        set_tests_properties(custom_decoder_avfoundation PROPERTIES SKIP_RETURN_CODE 77)
+        add_test(NAME custom_encoder_avfoundation
+                 COMMAND avb_custom_encoder "${AVB_OUT}/custom_encoder_avfoundation.mov" avfoundation)
+        set_tests_properties(custom_encoder_avfoundation PROPERTIES SKIP_RETURN_CODE 77)
+    endif()
 else()
     message(WARNING
         "ffmpeg not found; the conformance test fixture cannot be generated. "

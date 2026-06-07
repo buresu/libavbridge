@@ -1,4 +1,5 @@
 #include "avb_backend_avfoundation.hh"
+#include "../../avb_video_codec_registry.hpp"
 
 #ifdef __APPLE__
 
@@ -112,11 +113,20 @@ static FourCharCode avb_track_codec(AVAssetTrack *track) {
     return CMFormatDescriptionGetMediaSubType(fmt);
 }
 
+static uint32_t avb_bswap32(uint32_t v) {
+    return ((v & 0x000000ffu) << 24) |
+           ((v & 0x0000ff00u) << 8)  |
+           ((v & 0x00ff0000u) >> 8)  |
+           ((v & 0xff000000u) >> 24);
+}
+
 struct AvbBackendAVFoundation::Impl {
     AVAsset *asset = nil;
     AVAssetReader *reader = nil;
     AVAssetReaderTrackOutput *audio_output = nil;
     AVAssetReaderTrackOutput *video_output = nil;
+    const avb_video_decoder_plugin *custom_video_decoder = nullptr;
+    void *custom_video_ctx = nullptr;
 
     int audio_stream_idx = -1;
     int video_stream_idx = -1;
@@ -140,6 +150,8 @@ struct AvbBackendAVFoundation::Impl {
 
     std::vector<float> audio_buf;
     int audio_buf_pos = 0;
+    double audio_buf_start_pts = -1.0;
+    bool end_of_stream = false;
 
     std::vector<unsigned char> video_frame_buf;
 };
@@ -151,6 +163,12 @@ AvbBackendAVFoundation::AvbBackendAVFoundation() {
 AvbBackendAVFoundation::~AvbBackendAVFoundation() {
     if (m_impl) {
         if (m_impl->reader) [m_impl->reader cancelReading];
+        if (m_impl->custom_video_decoder) {
+            if (m_impl->custom_video_decoder->close && m_impl->custom_video_ctx)
+                m_impl->custom_video_decoder->close(m_impl->custom_video_ctx);
+            m_impl->custom_video_decoder = nullptr;
+            m_impl->custom_video_ctx = nullptr;
+        }
         delete m_impl;
     }
 }
@@ -158,6 +176,47 @@ AvbBackendAVFoundation::~AvbBackendAVFoundation() {
 const char *AvbBackendAVFoundation::get_backend_name() const { return "avfoundation"; }
 const char *AvbBackendAVFoundation::get_last_error() const {
     return m_last_error.empty() ? nullptr : m_last_error.c_str();
+}
+
+avb_result AvbBackendAVFoundation::open_custom_video_decoder(
+    void *track_ptr,
+    const avb_decode_options &options
+) {
+    AVAssetTrack *track = (__bridge AVAssetTrack *)track_ptr;
+    FourCharCode codec = avb_track_codec(track);
+
+    avb_video_stream_info stream{};
+    stream.stream_index = m_impl->video_stream_idx;
+    stream.width = m_impl->width;
+    stream.height = m_impl->height;
+    stream.frame_rate = m_impl->frame_rate;
+    stream.duration_sec = m_impl->duration_sec;
+    stream.codec_tag = avb_bswap32((uint32_t)codec);
+    m_impl->video_codec_name = avb_fourcc_to_name(codec);
+    stream.codec_name = m_impl->video_codec_name.empty()
+        ? nullptr : m_impl->video_codec_name.c_str();
+    stream.time_base_num = 1;
+    stream.time_base_den = 600;
+
+    const avb_video_decoder_plugin *plugin =
+        avb_find_video_decoder_plugin(stream, options);
+    if (!plugin) return AVB_ERROR_STREAM_NOT_FOUND;
+
+    void *ctx = nullptr;
+    avb_result res = plugin->open(&ctx, &stream, &options);
+    if (res != AVB_OK) {
+        m_last_error = "Custom video decoder failed to open.";
+        return res;
+    }
+
+    m_impl->video_output = [AVAssetReaderTrackOutput
+        assetReaderTrackOutputWithTrack:track
+        outputSettings:nil];
+    m_impl->video_output.alwaysCopiesSampleData = YES;
+    [m_impl->reader addOutput:m_impl->video_output];
+    m_impl->custom_video_decoder = plugin;
+    m_impl->custom_video_ctx = ctx;
+    return AVB_OK;
 }
 
 avb_result AvbBackendAVFoundation::open_file(const char *path, const avb_decode_options &options) {
@@ -230,23 +289,6 @@ avb_result AvbBackendAVFoundation::open_file(const char *path, const avb_decode_
             int idx = options.video_stream_index >= 0 ? options.video_stream_index : 0;
             if (idx < (int)video_tracks.count) {
                 AVAssetTrack *track = video_tracks[idx];
-
-                m_impl->cv_pixel_format = avb_cvpixfmt(options.video_format);
-                m_impl->video_avb_fmt =
-                    options.video_format == AVB_PIXEL_FORMAT_UNKNOWN
-                        ? AVB_PIXEL_FORMAT_BGRA8 : options.video_format;
-                m_impl->swizzle_rgba =
-                    (options.video_format == AVB_PIXEL_FORMAT_RGBA8);
-                NSDictionary *settings = @{
-                    (NSString *)kCVPixelBufferPixelFormatTypeKey:
-                        @(m_impl->cv_pixel_format),
-                };
-
-                m_impl->video_output = [AVAssetReaderTrackOutput
-                    assetReaderTrackOutputWithTrack:track
-                    outputSettings:settings];
-                m_impl->video_output.alwaysCopiesSampleData = NO;
-                [m_impl->reader addOutput:m_impl->video_output];
                 m_impl->video_stream_idx = idx;
 
                 CGSize size = track.naturalSize;
@@ -254,6 +296,34 @@ avb_result AvbBackendAVFoundation::open_file(const char *path, const avb_decode_
                 m_impl->height = (int)size.height;
                 m_impl->frame_rate   = track.nominalFrameRate;
                 m_impl->video_codec_name = avb_fourcc_to_name(avb_track_codec(track));
+
+                if (options.enable_custom_video_decoders) {
+                    avb_result custom_res =
+                        open_custom_video_decoder((__bridge void *)track, options);
+                    if (custom_res != AVB_OK &&
+                        custom_res != AVB_ERROR_STREAM_NOT_FOUND) {
+                        return custom_res;
+                    }
+                }
+
+                if (!m_impl->custom_video_decoder) {
+                    m_impl->cv_pixel_format = avb_cvpixfmt(options.video_format);
+                    m_impl->video_avb_fmt =
+                        options.video_format == AVB_PIXEL_FORMAT_UNKNOWN
+                            ? AVB_PIXEL_FORMAT_BGRA8 : options.video_format;
+                    m_impl->swizzle_rgba =
+                        (options.video_format == AVB_PIXEL_FORMAT_RGBA8);
+                    NSDictionary *settings = @{
+                        (NSString *)kCVPixelBufferPixelFormatTypeKey:
+                            @(m_impl->cv_pixel_format),
+                    };
+
+                    m_impl->video_output = [AVAssetReaderTrackOutput
+                        assetReaderTrackOutputWithTrack:track
+                        outputSettings:settings];
+                    m_impl->video_output.alwaysCopiesSampleData = NO;
+                    [m_impl->reader addOutput:m_impl->video_output];
+                }
             }
         }
 
@@ -267,6 +337,7 @@ avb_result AvbBackendAVFoundation::open_file(const char *path, const avb_decode_
             return AVB_ERROR_OPEN_FAILED;
         }
 
+        m_impl->end_of_stream = false;
         return AVB_OK;
     }
 }
@@ -307,6 +378,17 @@ avb_result AvbBackendAVFoundation::seek(double seconds) {
     // AVAssetReader does not support seeking directly — recreate it with a time range.
     @autoreleasepool {
         [m_impl->reader cancelReading];
+        m_impl->audio_buf.clear();
+        m_impl->audio_buf_pos = 0;
+        m_impl->audio_buf_start_pts = -1.0;
+
+        if (m_impl->duration_sec > 0.0 && seconds >= m_impl->duration_sec) {
+            m_impl->end_of_stream = true;
+            if (m_impl->custom_video_decoder && m_impl->custom_video_decoder->flush)
+                m_impl->custom_video_decoder->flush(m_impl->custom_video_ctx);
+            return AVB_OK;
+        }
+        m_impl->end_of_stream = false;
 
         NSError *error = nil;
         m_impl->reader = [AVAssetReader assetReaderWithAsset:m_impl->asset error:&error];
@@ -335,12 +417,15 @@ avb_result AvbBackendAVFoundation::seek(double seconds) {
         if (m_impl->video_output) {
             AVAssetTrack *track =
                 avb_load_tracks(m_impl->asset, AVMediaTypeVideo)[m_impl->video_stream_idx];
-            NSDictionary *settings = @{
-                (NSString *)kCVPixelBufferPixelFormatTypeKey: @(m_impl->cv_pixel_format),
-            };
+            NSDictionary *settings = m_impl->custom_video_decoder
+                ? nil
+                : @{ (NSString *)kCVPixelBufferPixelFormatTypeKey:
+                         @(m_impl->cv_pixel_format) };
             m_impl->video_output = [AVAssetReaderTrackOutput
-                assetReaderTrackOutputWithTrack:track outputSettings:settings];
-            m_impl->video_output.alwaysCopiesSampleData = NO;
+                assetReaderTrackOutputWithTrack:track
+                outputSettings:settings];
+            m_impl->video_output.alwaysCopiesSampleData =
+                m_impl->custom_video_decoder ? YES : NO;
             [m_impl->reader addOutput:m_impl->video_output];
         }
 
@@ -349,14 +434,49 @@ avb_result AvbBackendAVFoundation::seek(double seconds) {
             return AVB_ERROR_SEEK_FAILED;
         }
 
-        m_impl->audio_buf.clear();
-        m_impl->audio_buf_pos = 0;
+        if (m_impl->custom_video_decoder && m_impl->custom_video_decoder->flush)
+            m_impl->custom_video_decoder->flush(m_impl->custom_video_ctx);
     }
 
     return AVB_OK;
 }
 
+bool AvbBackendAVFoundation::fill_audio_buffer() {
+    if (!m_impl->audio_output || !m_impl->audio_buf.empty()) return false;
+
+    @autoreleasepool {
+        CMSampleBufferRef sample_buf =
+            [m_impl->audio_output copyNextSampleBuffer];
+        if (!sample_buf) return false;
+
+        CMTime pts = CMSampleBufferGetPresentationTimeStamp(sample_buf);
+        CMBlockBufferRef block = CMSampleBufferGetDataBuffer(sample_buf);
+        size_t len = CMBlockBufferGetDataLength(block);
+        size_t n_floats = len / sizeof(float);
+        m_impl->audio_buf.resize(n_floats);
+        m_impl->audio_buf_pos = 0;
+        m_impl->audio_buf_start_pts = CMTIME_IS_VALID(pts) ? CMTimeGetSeconds(pts) : -1.0;
+        CMBlockBufferCopyDataBytes(block, 0, len, m_impl->audio_buf.data());
+
+        CFRelease(sample_buf);
+        return true;
+    }
+}
+
+double AvbBackendAVFoundation::audio_next_pts() {
+    if (m_impl->end_of_stream) return -1.0;
+    if (!m_impl->audio_output || m_impl->channels <= 0 || m_impl->sample_rate <= 0)
+        return -1.0;
+    if (m_impl->audio_buf.empty()) fill_audio_buffer();
+    if (m_impl->audio_buf.empty() || m_impl->audio_buf_start_pts < 0.0)
+        return -1.0;
+
+    double frames_offset = (double)m_impl->audio_buf_pos / (double)m_impl->channels;
+    return m_impl->audio_buf_start_pts + frames_offset / (double)m_impl->sample_rate;
+}
+
 int AvbBackendAVFoundation::read_audio_f32(float *dst_interleaved, int frames) {
+    if (m_impl->end_of_stream) return 0;
     if (!m_impl->audio_output) return 0;
 
     int nb_channels    = m_impl->channels;
@@ -376,30 +496,84 @@ int AvbBackendAVFoundation::read_audio_f32(float *dst_interleaved, int frames) {
             if (m_impl->audio_buf_pos >= (int)m_impl->audio_buf.size()) {
                 m_impl->audio_buf.clear();
                 m_impl->audio_buf_pos = 0;
+                m_impl->audio_buf_start_pts = -1.0;
             }
             continue;
         }
 
-        @autoreleasepool {
-            CMSampleBufferRef sample_buf =
-                [m_impl->audio_output copyNextSampleBuffer];
-            if (!sample_buf) break;
-
-            CMBlockBufferRef block = CMSampleBufferGetDataBuffer(sample_buf);
-            size_t len = CMBlockBufferGetDataLength(block);
-            size_t n_floats = len / sizeof(float);
-            m_impl->audio_buf.resize(n_floats);
-            CMBlockBufferCopyDataBytes(block, 0, len, m_impl->audio_buf.data());
-            m_impl->audio_buf_pos = 0;
-
-            CFRelease(sample_buf);
-        }
+        if (!fill_audio_buffer()) break;
     }
 
     return samples_written / nb_channels;
 }
 
+avb_result AvbBackendAVFoundation::read_custom_video_frame(avb_video_frame &out_frame) {
+    if (!m_impl->custom_video_decoder || !m_impl->custom_video_ctx)
+        return AVB_ERROR_STREAM_NOT_FOUND;
+
+    while (true) {
+        @autoreleasepool {
+            CMSampleBufferRef sample_buf =
+                [m_impl->video_output copyNextSampleBuffer];
+            if (!sample_buf) return AVB_ERROR_EOF;
+
+            CMSampleBufferMakeDataReady(sample_buf);
+            CMBlockBufferRef block = CMSampleBufferGetDataBuffer(sample_buf);
+            if (!block) {
+                CFRelease(sample_buf);
+                continue;
+            }
+
+            size_t len = CMBlockBufferGetDataLength(block);
+            if (len == 0) {
+                CFRelease(sample_buf);
+                continue;
+            }
+            m_impl->video_frame_buf.resize(len);
+            CMBlockBufferCopyDataBytes(block, 0, len, m_impl->video_frame_buf.data());
+
+            CMTime pts = CMSampleBufferGetPresentationTimeStamp(sample_buf);
+            CMTime dts = CMSampleBufferGetDecodeTimeStamp(sample_buf);
+            CMTime dur = CMSampleBufferGetDuration(sample_buf);
+
+            avb_encoded_packet packet{};
+            packet.data = m_impl->video_frame_buf.data();
+            packet.size = (int)len;
+            packet.pts_sec = CMTIME_IS_VALID(pts) ? CMTimeGetSeconds(pts) : -1.0;
+            packet.duration_sec = CMTIME_IS_VALID(dur) ? CMTimeGetSeconds(dur) : -1.0;
+            packet.stream_index = m_impl->video_stream_idx;
+            packet.pts = CMTIME_IS_VALID(pts) ? pts.value : -1;
+            packet.dts = CMTIME_IS_VALID(dts) ? dts.value : packet.pts;
+            packet.duration = CMTIME_IS_VALID(dur) ? dur.value : -1;
+            packet.time_base_num = 1;
+            packet.time_base_den = CMTIME_IS_VALID(pts) ? (int)pts.timescale : 1;
+            packet.keyframe = 1;
+
+            CFArrayRef attachments =
+                CMSampleBufferGetSampleAttachmentsArray(sample_buf, false);
+            if (attachments && CFArrayGetCount(attachments) > 0) {
+                CFDictionaryRef dict =
+                    (CFDictionaryRef)CFArrayGetValueAtIndex(attachments, 0);
+                packet.keyframe =
+                    !CFDictionaryContainsKey(dict, kCMSampleAttachmentKey_NotSync);
+            }
+
+            avb_result res = m_impl->custom_video_decoder->decode_packet(
+                m_impl->custom_video_ctx, &packet, &out_frame);
+            CFRelease(sample_buf);
+            if (res == AVB_OK) {
+                if (out_frame.pts_sec < 0.0) out_frame.pts_sec = packet.pts_sec;
+                return AVB_OK;
+            }
+            if (res == AVB_ERROR_AGAIN) continue;
+            return res;
+        }
+    }
+}
+
 avb_result AvbBackendAVFoundation::read_video_frame(avb_video_frame &out_frame) {
+    if (m_impl->end_of_stream) return AVB_ERROR_EOF;
+    if (m_impl->custom_video_decoder) return read_custom_video_frame(out_frame);
     if (!m_impl->video_output) return AVB_ERROR_STREAM_NOT_FOUND;
 
     @autoreleasepool {
@@ -494,6 +668,10 @@ avb_result AvbBackendAVFoundation::read_video_frame(avb_video_frame &out_frame) 
 }
 
 void AvbBackendAVFoundation::release_video_frame(avb_video_frame &frame) {
+    if (m_impl->custom_video_decoder && m_impl->custom_video_decoder->release_frame) {
+        m_impl->custom_video_decoder->release_frame(m_impl->custom_video_ctx, &frame);
+        return;
+    }
     memset(&frame, 0, sizeof(frame));
 }
 
@@ -516,6 +694,7 @@ avb_result AvbBackendAVFoundation::get_media_info(avb_media_info &) {
 }
 avb_result AvbBackendAVFoundation::seek(double) { return AVB_ERROR_BACKEND_NOT_AVAILABLE; }
 int AvbBackendAVFoundation::read_audio_f32(float *, int) { return 0; }
+double AvbBackendAVFoundation::audio_next_pts() { return -1.0; }
 avb_result AvbBackendAVFoundation::read_video_frame(avb_video_frame &) {
     return AVB_ERROR_BACKEND_NOT_AVAILABLE;
 }
