@@ -88,6 +88,11 @@ if(FFMPEG_EXECUTABLE)
     add_test(NAME custom_decoder_ffmpeg
              COMMAND avb_custom_decoder "${AVB_FIXTURE}" ffmpeg)
     set_tests_properties(custom_decoder_ffmpeg PROPERTIES SKIP_RETURN_CODE 77)
+    if(WIN32 AND AVB_ENABLE_MEDIAFOUNDATION)
+        add_test(NAME custom_decoder_mediafoundation
+                 COMMAND avb_custom_decoder "${AVB_FIXTURE}" mediafoundation)
+        set_tests_properties(custom_decoder_mediafoundation PROPERTIES SKIP_RETURN_CODE 77)
+    endif()
     add_test(NAME custom_encoder_ffmpeg
              COMMAND avb_custom_encoder "${AVB_OUT}/custom_encoder_ffmpeg.mov" ffmpeg)
     set_tests_properties(custom_encoder_ffmpeg PROPERTIES SKIP_RETURN_CODE 77)

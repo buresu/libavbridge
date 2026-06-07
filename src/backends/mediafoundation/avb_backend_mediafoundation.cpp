@@ -1,4 +1,5 @@
 #include "avb_backend_mediafoundation.hpp"
+#include "../../avb_video_codec_registry.hpp"
 
 #ifdef _WIN32
 
@@ -44,6 +45,11 @@ struct AvbBackendMediaFoundation::Impl {
     std::vector<float>         audio_buf;
     int                        audio_buf_pos = 0;
     std::vector<unsigned char> video_frame_buf;
+    std::vector<unsigned char> custom_packet_buf;
+
+    const avb_video_decoder_plugin *custom_video_decoder = nullptr;
+    void *custom_video_ctx = nullptr;
+    bool custom_video = false;
 
     // After a seek, Media Foundation resumes at the nearest preceding keyframe
     // and does not drop the pre-roll itself, so the first samples carry
@@ -57,6 +63,11 @@ struct AvbBackendMediaFoundation::Impl {
     bool mf_initialized = false;
 
     void close_streams() {
+        if (custom_video_decoder && custom_video_decoder->close && custom_video_ctx)
+            custom_video_decoder->close(custom_video_ctx);
+        custom_video_decoder = nullptr;
+        custom_video_ctx = nullptr;
+        custom_video = false;
         reader.Reset();
         audio_stream_idx = video_stream_idx = -1;
         sample_rate = channels = width = height = video_stride = 0;
@@ -72,6 +83,7 @@ struct AvbBackendMediaFoundation::Impl {
         audio_buf.clear();
         audio_buf_pos = 0;
         video_frame_buf.clear();
+        custom_packet_buf.clear();
         seek_target_sec    = 0.0;
         video_seek_pending = false;
         audio_seek_pending = false;
@@ -167,6 +179,88 @@ static std::string mf_native_codec_name(IMFSourceReader *reader, DWORD stream) {
     return mf_subtype_name(sub);
 }
 
+static uint32_t mf_fourcc_from_subtype(const GUID &sub) {
+    return sub.Data1;
+}
+
+static bool mf_get_blob(IMFMediaType *type, REFGUID key,
+                        std::vector<unsigned char> &out) {
+    UINT32 size = 0;
+    if (!type || FAILED(type->GetBlobSize(key, &size)) || size == 0) return false;
+    out.resize(size);
+    UINT32 got = 0;
+    if (FAILED(type->GetBlob(key, out.data(), size, &got))) {
+        out.clear();
+        return false;
+    }
+    out.resize(got);
+    return true;
+}
+
+static avb_result mf_open_custom_video_decoder(
+    IMFSourceReader *reader,
+    DWORD stream_idx,
+    const avb_decode_options &options,
+    const avb_video_decoder_plugin **out_plugin,
+    void **out_ctx,
+    std::string &out_codec_name,
+    int *out_width,
+    int *out_height,
+    double *out_frame_rate
+) {
+    if (!options.enable_custom_video_decoders) return AVB_ERROR_STREAM_NOT_FOUND;
+
+    ComPtr<IMFMediaType> native;
+    if (FAILED(reader->GetNativeMediaType(stream_idx, 0, &native)) || !native)
+        return AVB_ERROR_STREAM_NOT_FOUND;
+
+    GUID sub = GUID_NULL;
+    native->GetGUID(MF_MT_SUBTYPE, &sub);
+
+    UINT32 w = 0, h = 0;
+    MFGetAttributeSize(native.Get(), MF_MT_FRAME_SIZE, &w, &h);
+    UINT32 fps_num = 0, fps_den = 1;
+    MFGetAttributeRatio(native.Get(), MF_MT_FRAME_RATE, &fps_num, &fps_den);
+
+    std::vector<unsigned char> extradata;
+    mf_get_blob(native.Get(), MF_MT_MPEG_SEQUENCE_HEADER, extradata);
+
+    avb_video_stream_info stream{};
+    stream.stream_index = (int)stream_idx;
+    stream.width = (int)w;
+    stream.height = (int)h;
+    stream.frame_rate = fps_den != 0 ? (double)fps_num / fps_den : 0.0;
+    stream.codec_tag = mf_fourcc_from_subtype(sub);
+    stream.extradata = extradata.empty() ? nullptr : extradata.data();
+    stream.extradata_size = (int)extradata.size();
+    stream.time_base_num = 1;
+    stream.time_base_den = 10000000;
+
+    out_codec_name = mf_subtype_name(sub);
+    stream.codec_name = out_codec_name.empty() ? nullptr : out_codec_name.c_str();
+
+    const avb_video_decoder_plugin *plugin =
+        avb_find_video_decoder_plugin(stream, options);
+    if (!plugin) return AVB_ERROR_STREAM_NOT_FOUND;
+
+    void *ctx = nullptr;
+    avb_result res = plugin->open(&ctx, &stream, &options);
+    if (res != AVB_OK) return res;
+
+    HRESULT hr = reader->SetCurrentMediaType(stream_idx, nullptr, native.Get());
+    if (FAILED(hr)) {
+        if (plugin->close && ctx) plugin->close(ctx);
+        return AVB_ERROR_OPEN_FAILED;
+    }
+
+    *out_plugin = plugin;
+    *out_ctx = ctx;
+    if (out_width) *out_width = (int)w;
+    if (out_height) *out_height = (int)h;
+    if (out_frame_rate) *out_frame_rate = stream.frame_rate;
+    return AVB_OK;
+}
+
 avb_result AvbBackendMediaFoundation::open_file(const char *path, const avb_decode_options &options) {
     if (!m_impl->mf_initialized) return AVB_ERROR_BACKEND_NOT_AVAILABLE;
 
@@ -239,6 +333,20 @@ avb_result AvbBackendMediaFoundation::open_file(const char *path, const avb_deco
     }
 
     if (found_video >= 0) {
+        avb_result custom_res = mf_open_custom_video_decoder(
+            m_impl->reader.Get(), (DWORD)found_video, options,
+            &m_impl->custom_video_decoder, &m_impl->custom_video_ctx,
+            m_impl->video_codec_name, &m_impl->width, &m_impl->height,
+            &m_impl->frame_rate);
+        if (custom_res == AVB_OK) {
+            m_impl->reader->SetStreamSelection((DWORD)found_video, TRUE);
+            m_impl->video_stream_idx = found_video;
+            m_impl->custom_video = true;
+        } else if (custom_res != AVB_ERROR_STREAM_NOT_FOUND) {
+            m_last_error = "Custom video decoder failed to open.";
+            m_impl->close_streams();
+            return custom_res;
+        } else {
         // Pick the output subtype the Video Processor MFT should convert to.
         // NV12 is emitted as two planes (Y + interleaved CbCr); ARGB32 is a
         // packed 32-bit BGRA buffer, optionally swizzled to RGBA after the copy.
@@ -302,6 +410,7 @@ avb_result AvbBackendMediaFoundation::open_file(const char *path, const avb_deco
             }
             m_impl->video_codec_name =
                 mf_native_codec_name(m_impl->reader.Get(), (DWORD)found_video);
+        }
         }
     }
 
@@ -376,6 +485,8 @@ avb_result AvbBackendMediaFoundation::seek(double seconds) {
 
     m_impl->audio_buf.clear();
     m_impl->audio_buf_pos = 0;
+    if (m_impl->custom_video_decoder && m_impl->custom_video_decoder->flush)
+        m_impl->custom_video_decoder->flush(m_impl->custom_video_ctx);
 
     // Arm pre-roll dropping for whichever streams are active.
     m_impl->seek_target_sec    = seconds;
@@ -472,6 +583,43 @@ avb_result AvbBackendMediaFoundation::read_video_frame(avb_video_frame &out_fram
         if (m_impl->video_seek_pending) {
             if ((double)ts / 1e7 + 1e-6 < m_impl->seek_target_sec) continue;
             m_impl->video_seek_pending = false;
+        }
+        if (m_impl->custom_video) {
+            ComPtr<IMFMediaBuffer> buf;
+            sample->ConvertToContiguousBuffer(&buf);
+            if (!buf) return AVB_ERROR_DECODE_FAILED;
+
+            BYTE *data = nullptr;
+            DWORD len = 0;
+            if (FAILED(buf->Lock(&data, nullptr, &len))) return AVB_ERROR_DECODE_FAILED;
+            m_impl->custom_packet_buf.resize(len);
+            memcpy(m_impl->custom_packet_buf.data(), data, len);
+            buf->Unlock();
+
+            LONGLONG dur = 0;
+            sample->GetSampleDuration(&dur);
+            UINT32 clean_point = 0;
+            sample->GetUINT32(MFSampleExtension_CleanPoint, &clean_point);
+
+            avb_encoded_packet packet{};
+            packet.data = m_impl->custom_packet_buf.data();
+            packet.size = (int)m_impl->custom_packet_buf.size();
+            packet.pts_sec = (double)ts / 1e7;
+            packet.duration_sec = dur > 0 ? (double)dur / 1e7 : 0.0;
+            packet.keyframe = clean_point ? 1 : 0;
+            packet.stream_index = m_impl->video_stream_idx;
+            packet.pts = ts;
+            packet.dts = ts;
+            packet.duration = dur;
+            packet.time_base_num = 1;
+            packet.time_base_den = 10000000;
+
+            avb_result res = m_impl->custom_video_decoder->decode_packet(
+                m_impl->custom_video_ctx, &packet, &out_frame);
+            if (res == AVB_ERROR_AGAIN) continue;
+            if (res == AVB_OK && out_frame.pts_sec < 0.0)
+                out_frame.pts_sec = packet.pts_sec;
+            return res;
         }
         break;
     }
@@ -714,6 +862,12 @@ avb_result AvbBackendMediaFoundation::read_video_frame(avb_video_frame &out_fram
 }
 
 void AvbBackendMediaFoundation::release_video_frame(avb_video_frame &frame) {
+    if (m_impl && m_impl->custom_video_decoder) {
+        if (m_impl->custom_video_decoder->release_frame)
+            m_impl->custom_video_decoder->release_frame(m_impl->custom_video_ctx, &frame);
+        memset(&frame, 0, sizeof(frame));
+        return;
+    }
     memset(&frame, 0, sizeof(frame));
 }
 

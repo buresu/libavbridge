@@ -300,9 +300,9 @@ typedef struct avb_video_decoder_plugin {
 /* Register a process-wide custom video decoder. The plugin struct and any
  * callback targets it references must remain valid until unregistered. The
  * first registered plugin whose can_decode() returns non-zero handles a stream.
- * Currently custom video decoders are used by the FFmpeg backend, which still
- * supplies demuxing and regular audio decoding. Do not unregister a plugin
- * while any decoder using it may still be open. */
+ * Custom video decoders are used by backends that can expose compressed video
+ * packets while still supplying demuxing and regular audio decoding. Do not
+ * unregister a plugin while any decoder using it may still be open. */
 AVB_API avb_result avb_register_video_decoder(
     const avb_video_decoder_plugin *plugin
 );
@@ -348,7 +348,7 @@ typedef struct avb_video_encoder_plugin {
 } avb_video_encoder_plugin;
 
 /* Register a process-wide custom video encoder. When a video encode request is
- * matched by can_encode(), FFmpeg/GStreamer backends use the plugin for video
+ * matched by can_encode(), capable backends use the plugin for video
  * compression and still mux audio through their native encoders. Do not
  * unregister a plugin while any encoder using it may still be open. */
 AVB_API avb_result avb_register_video_encoder(

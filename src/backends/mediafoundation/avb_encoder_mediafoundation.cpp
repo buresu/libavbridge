@@ -1,4 +1,5 @@
 #include "avb_encoder_mediafoundation.hpp"
+#include "../../avb_video_codec_registry.hpp"
 
 #ifdef _WIN32
 
@@ -42,6 +43,10 @@ struct AvbEncoderMediaFoundation::Impl {
     bool             video_is_nv12 = false;
     bool             video_is_i420 = false;
     bool             swizzle_rgba   = false; // RGBA8 input -> swizzle to BGRA for RGB32
+    bool             custom_video = false;
+    const avb_video_encoder_plugin *custom_video_encoder = nullptr;
+    void            *custom_video_ctx = nullptr;
+    avb_encoded_video_stream custom_video_stream{};
 
     int     sample_rate = 0;
     int     channels    = 0;
@@ -56,6 +61,40 @@ struct AvbEncoderMediaFoundation::Impl {
 
     std::vector<unsigned char> video_stage; // contiguous repack scratch
     std::vector<int16_t>       audio_stage; // float -> S16 scratch
+
+    void close_custom_video() {
+        if (custom_video_encoder && custom_video_encoder->close && custom_video_ctx)
+            custom_video_encoder->close(custom_video_ctx);
+        custom_video_encoder = nullptr;
+        custom_video_ctx = nullptr;
+        custom_video_stream = {};
+        custom_video = false;
+    }
+
+    void reset_streams() {
+        writer.Reset();
+        close_custom_video();
+        video_stream = 0;
+        audio_stream = 0;
+        has_video = false;
+        has_audio = false;
+        width = height = 0;
+        frame_rate = 30.0;
+        fps_num = 30;
+        fps_den = 1;
+        input_format = AVB_PIXEL_FORMAT_BGRA8;
+        video_is_nv12 = false;
+        video_is_i420 = false;
+        swizzle_rgba = false;
+        sample_rate = 0;
+        channels = 0;
+        video_index = 0;
+        audio_samples = 0;
+        began = false;
+        finished = false;
+        video_stage.clear();
+        audio_stage.clear();
+    }
 };
 
 AvbEncoderMediaFoundation::AvbEncoderMediaFoundation() {
@@ -72,6 +111,7 @@ AvbEncoderMediaFoundation::AvbEncoderMediaFoundation() {
 
 AvbEncoderMediaFoundation::~AvbEncoderMediaFoundation() {
     if (m_impl) {
+        m_impl->close_custom_video();
         m_impl->writer.Reset();
         if (m_impl->mf_initialized) MFShutdown();
         delete m_impl;
@@ -96,8 +136,36 @@ static UINT32 aac_bytes_per_sec(int bitrate_bps) {
     return best;
 }
 
+static GUID mf_video_subtype_from_fourcc(uint32_t fcc) {
+    GUID g = { fcc, 0x0000, 0x0010,
+        { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+    return g;
+}
+
+static GUID mf_video_subtype_from_codec(avb_codec codec, uint32_t codec_tag) {
+    switch (codec) {
+        case AVB_CODEC_H264: return MFVideoFormat_H264;
+        case AVB_CODEC_HEVC: return MFVideoFormat_HEVC;
+        case AVB_CODEC_VP9:  return MFVideoFormat_VP90;
+        default:
+            if (codec_tag == 0) return GUID_NULL;
+            return mf_video_subtype_from_fourcc(codec_tag);
+    }
+}
+
+static const char *mf_codec_name(avb_codec codec) {
+    switch (codec) {
+        case AVB_CODEC_H264: return "H264";
+        case AVB_CODEC_HEVC: return "HEVC";
+        case AVB_CODEC_VP9:  return "VP9";
+        case AVB_CODEC_HAP:  return "HAP";
+        default:             return "custom";
+    }
+}
+
 avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_options &options) {
     if (!m_impl->mf_initialized) return AVB_ERROR_BACKEND_NOT_AVAILABLE;
+    m_impl->reset_streams();
     m_last_error.clear();
 
     if (!options.video.enable && !options.audio.enable) {
@@ -139,6 +207,93 @@ avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_op
         MFAverageTimePerFrameToFrameRate(sec_to_hns(1.0 / m_impl->frame_rate),
                                          &m_impl->fps_num, &m_impl->fps_den);
         if (m_impl->fps_den == 0) { m_impl->fps_num = 30; m_impl->fps_den = 1; }
+
+        switch (options.video.input_format) {
+            case AVB_PIXEL_FORMAT_NV12:
+                m_impl->input_format = AVB_PIXEL_FORMAT_NV12;
+                break;
+            case AVB_PIXEL_FORMAT_I420:
+                m_impl->input_format = AVB_PIXEL_FORMAT_I420;
+                break;
+            case AVB_PIXEL_FORMAT_RGBA8:
+                m_impl->input_format = AVB_PIXEL_FORMAT_RGBA8;
+                break;
+            case AVB_PIXEL_FORMAT_BGRA8:
+            case AVB_PIXEL_FORMAT_UNKNOWN:
+            default:
+                m_impl->input_format = AVB_PIXEL_FORMAT_BGRA8;
+                break;
+        }
+
+        avb_video_encode_info custom_info{};
+        custom_info.width = m_impl->width;
+        custom_info.height = m_impl->height;
+        custom_info.frame_rate = m_impl->frame_rate;
+        custom_info.input_format = m_impl->input_format;
+        custom_info.codec = options.video.codec;
+        custom_info.bitrate = options.video.bitrate;
+        const avb_video_encoder_plugin *plugin =
+            avb_find_video_encoder_plugin(custom_info);
+        if (plugin) {
+            void *ctx = nullptr;
+            avb_encoded_video_stream stream{};
+            avb_result cres = plugin->open(&ctx, &custom_info, &stream);
+            if (cres != AVB_OK) {
+                m_last_error = "Custom video encoder failed to open.";
+                return cres;
+            }
+
+            GUID out_subtype = mf_video_subtype_from_codec(
+                stream.codec != AVB_CODEC_AUTO ? stream.codec : options.video.codec,
+                stream.codec_tag);
+            if (IsEqualGUID(out_subtype, GUID_NULL)) {
+                if (plugin->close && ctx) plugin->close(ctx);
+                m_last_error = "Custom video encoder did not provide a muxable codec or codec_tag.";
+                return AVB_ERROR_INVALID_ARGUMENT;
+            }
+
+            ComPtr<IMFMediaType> out_type;
+            MFCreateMediaType(&out_type);
+            out_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+            out_type->SetGUID(MF_MT_SUBTYPE, out_subtype);
+            out_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+            if (options.video.bitrate > 0)
+                out_type->SetUINT32(MF_MT_AVG_BITRATE, (UINT32)options.video.bitrate);
+            MFSetAttributeSize(out_type.Get(), MF_MT_FRAME_SIZE, m_impl->width, m_impl->height);
+            MFSetAttributeRatio(out_type.Get(), MF_MT_FRAME_RATE, m_impl->fps_num, m_impl->fps_den);
+            MFSetAttributeRatio(out_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+            if (stream.extradata && stream.extradata_size > 0) {
+                out_type->SetBlob(MF_MT_MPEG_SEQUENCE_HEADER,
+                                  stream.extradata, (UINT32)stream.extradata_size);
+            }
+
+            hr = m_impl->writer->AddStream(out_type.Get(), &m_impl->video_stream);
+            if (FAILED(hr)) {
+                if (plugin->close && ctx) plugin->close(ctx);
+                char buf[192];
+                snprintf(buf, sizeof(buf),
+                         "AddStream (custom video/%s) failed: 0x%08lx",
+                         stream.codec_name ? stream.codec_name : mf_codec_name(stream.codec), hr);
+                m_last_error = buf;
+                return AVB_ERROR_OPEN_FAILED;
+            }
+
+            hr = m_impl->writer->SetInputMediaType(m_impl->video_stream, out_type.Get(), nullptr);
+            if (FAILED(hr)) {
+                if (plugin->close && ctx) plugin->close(ctx);
+                char buf[160];
+                snprintf(buf, sizeof(buf),
+                         "SetInputMediaType (custom video) failed: 0x%08lx", hr);
+                m_last_error = buf;
+                return AVB_ERROR_OPEN_FAILED;
+            }
+
+            m_impl->custom_video_encoder = plugin;
+            m_impl->custom_video_ctx = ctx;
+            m_impl->custom_video_stream = stream;
+            m_impl->custom_video = true;
+            m_impl->has_video = true;
+        } else {
 
         // Choose the encoder output (compressed) subtype from the requested
         // codec. Media Foundation ships H.264 and (on Win10+, via the HEVC Video
@@ -230,6 +385,7 @@ avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_op
             return AVB_ERROR_OPEN_FAILED;
         }
         m_impl->has_video = true;
+        }
     }
 
     // --- Audio ---
@@ -329,6 +485,56 @@ static HRESULT write_buffer(IMFSinkWriter *writer, DWORD stream,
 
 avb_result AvbEncoderMediaFoundation::write_video(const avb_video_frame &frame, double pts_sec) {
     if (!m_impl->has_video) return AVB_ERROR_INVALID_ARGUMENT;
+    if (m_impl->custom_video) {
+        avb_encoded_packet packet{};
+        avb_result res = m_impl->custom_video_encoder->encode_frame(
+            m_impl->custom_video_ctx, &frame, pts_sec, &packet);
+        if (res != AVB_OK) return res;
+        if (!packet.data || packet.size <= 0) {
+            if (m_impl->custom_video_encoder->release_packet)
+                m_impl->custom_video_encoder->release_packet(m_impl->custom_video_ctx, &packet);
+            m_last_error = "Custom video encoder returned an empty packet.";
+            return AVB_ERROR_ENCODE_FAILED;
+        }
+
+        double pts = packet.pts_sec >= 0.0 ? packet.pts_sec
+                   : pts_sec >= 0.0 ? pts_sec
+                   : frame.pts_sec >= 0.0 ? frame.pts_sec
+                   : (double)m_impl->video_index / m_impl->frame_rate;
+        double dur = packet.duration_sec > 0.0
+                   ? packet.duration_sec : 1.0 / m_impl->frame_rate;
+
+        ComPtr<IMFMediaBuffer> buf;
+        HRESULT hr = MFCreateMemoryBuffer((DWORD)packet.size, &buf);
+        if (FAILED(hr)) {
+            if (m_impl->custom_video_encoder->release_packet)
+                m_impl->custom_video_encoder->release_packet(m_impl->custom_video_ctx, &packet);
+            m_last_error = "MFCreateMemoryBuffer (custom video) failed.";
+            return AVB_ERROR_ENCODE_FAILED;
+        }
+        BYTE *data = nullptr;
+        if (FAILED(buf->Lock(&data, nullptr, nullptr))) {
+            if (m_impl->custom_video_encoder->release_packet)
+                m_impl->custom_video_encoder->release_packet(m_impl->custom_video_ctx, &packet);
+            m_last_error = "Lock (custom video buffer) failed.";
+            return AVB_ERROR_ENCODE_FAILED;
+        }
+        memcpy(data, packet.data, packet.size);
+        buf->Unlock();
+
+        hr = write_buffer(m_impl->writer.Get(), m_impl->video_stream, buf,
+                          (DWORD)packet.size, sec_to_hns(pts), sec_to_hns(dur));
+        if (m_impl->custom_video_encoder->release_packet)
+            m_impl->custom_video_encoder->release_packet(m_impl->custom_video_ctx, &packet);
+        if (FAILED(hr)) {
+            char b[144];
+            snprintf(b, sizeof(b), "WriteSample (custom video) failed: 0x%08lx", hr);
+            m_last_error = b;
+            return AVB_ERROR_ENCODE_FAILED;
+        }
+        m_impl->video_index++;
+        return AVB_OK;
+    }
     if (frame.format != m_impl->input_format) {
         m_last_error = "Frame pixel format does not match configured input_format.";
         return AVB_ERROR_INVALID_ARGUMENT;
@@ -465,6 +671,35 @@ avb_result AvbEncoderMediaFoundation::write_audio_f32(const float *src_interleav
 avb_result AvbEncoderMediaFoundation::finish() {
     if (!m_impl->writer || !m_impl->began) return AVB_ERROR_INVALID_ARGUMENT;
     if (m_impl->finished) return AVB_OK;
+
+    if (m_impl->custom_video) {
+        while (m_impl->custom_video_encoder->flush) {
+            avb_encoded_packet packet{};
+            avb_result r = m_impl->custom_video_encoder->flush(
+                m_impl->custom_video_ctx, &packet);
+            if (r == AVB_ERROR_EOF || r == AVB_ERROR_AGAIN) break;
+            if (r != AVB_OK) return r;
+            if (packet.data && packet.size > 0) {
+                double pts = packet.pts_sec >= 0.0
+                    ? packet.pts_sec : (double)m_impl->video_index / m_impl->frame_rate;
+                double dur = packet.duration_sec > 0.0
+                    ? packet.duration_sec : 1.0 / m_impl->frame_rate;
+                ComPtr<IMFMediaBuffer> buf;
+                HRESULT bhr = MFCreateMemoryBuffer((DWORD)packet.size, &buf);
+                if (FAILED(bhr)) return AVB_ERROR_ENCODE_FAILED;
+                BYTE *data = nullptr;
+                if (FAILED(buf->Lock(&data, nullptr, nullptr))) return AVB_ERROR_ENCODE_FAILED;
+                memcpy(data, packet.data, packet.size);
+                buf->Unlock();
+                bhr = write_buffer(m_impl->writer.Get(), m_impl->video_stream, buf,
+                                   (DWORD)packet.size, sec_to_hns(pts), sec_to_hns(dur));
+                if (FAILED(bhr)) return AVB_ERROR_ENCODE_FAILED;
+                m_impl->video_index++;
+            }
+            if (m_impl->custom_video_encoder->release_packet)
+                m_impl->custom_video_encoder->release_packet(m_impl->custom_video_ctx, &packet);
+        }
+    }
 
     HRESULT hr = m_impl->writer->Finalize();
     if (FAILED(hr)) {
