@@ -26,6 +26,7 @@ private:
     // produces into `stream`.
     avb_result encode_and_mux(AVCodecContext *enc, AVStream *stream, AVFrame *frame);
     avb_result encode_audio_frame(int nb_samples); // consumes from m_audio_fifo
+    avb_result write_custom_video_packet(avb_encoded_packet &packet);
 
     AvbFFmpegFuncs m_ff{};
     bool m_libs_loaded = false;
@@ -35,6 +36,9 @@ private:
     // Video
     AVCodecContext *m_venc        = nullptr;
     AVStream       *m_vstream     = nullptr;
+    const avb_video_encoder_plugin *m_custom_video_encoder = nullptr;
+    void           *m_custom_video_ctx = nullptr;
+    avb_encoded_video_stream m_custom_video_stream{};
     SwsContext     *m_sws         = nullptr;
     AVFrame        *m_vframe      = nullptr; // YUV420P, reused
     AVPacket       *m_packet      = nullptr;
@@ -46,6 +50,7 @@ private:
     int             m_fps_den     = 30; // encoder time_base = 1 / m_fps_den
     long            m_video_index = 0;  // for derived PTS
     bool            m_has_video   = false;
+    bool            m_custom_video = false;
 
     // Audio
     AVCodecContext *m_aenc          = nullptr;

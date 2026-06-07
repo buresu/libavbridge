@@ -177,6 +177,7 @@ bool avb_ffmpeg_load(AvbFFmpegFuncs &out_funcs, char *err_buf, int err_buf_size)
     LOAD_SYM(g_handle_avcodec, out_funcs, avcodec_flush_buffers);
     LOAD_SYM(g_handle_avcodec, out_funcs, avcodec_free_context);
     LOAD_SYM(g_handle_avcodec, out_funcs, av_packet_alloc);
+    LOAD_SYM(g_handle_avcodec, out_funcs, av_new_packet);
     LOAD_SYM(g_handle_avcodec, out_funcs, av_packet_free);
     LOAD_SYM(g_handle_avcodec, out_funcs, av_packet_unref);
     LOAD_SYM(g_handle_avcodec, out_funcs, av_packet_move_ref);

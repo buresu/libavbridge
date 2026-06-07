@@ -43,6 +43,27 @@ FFmpeg backend (optional):
 > GStreamer / FFmpeg builds and codec usage comply with applicable licenses and
 > patent requirements. FDK-AAC is not used.
 
+## Custom video decoders
+
+Applications can register process-wide custom video decoders with
+`avb_register_video_decoder`. The FFmpeg backend still handles demuxing and
+regular audio decoding, then routes matching video packets to the registered
+decoder. This is intended for formats such as HAP where a plugin may want to
+return GPU-ready compressed frames instead of CPU-expanded pixels.
+
+Applications can also register custom video encoders with
+`avb_register_video_encoder`. The FFmpeg and GStreamer backends can use a
+registered encoder for video compression while continuing to mux regular audio
+through the backend. FFmpeg writes the returned encoded packets directly to the
+container muxer; GStreamer pushes them through an encoded `appsrc` using the
+caps reported by the plugin.
+
+Compressed block formats are represented through `avb_video_frame` using
+`AVB_PIXEL_FORMAT_BC1_RGBA`, `AVB_PIXEL_FORMAT_BC3_RGBA`, `AVB_PIXEL_FORMAT_BC4_R`,
+`AVB_PIXEL_FORMAT_BC5_RG`, or `AVB_PIXEL_FORMAT_BC7_RGBA`. For these formats,
+`data` points to the compressed payload and `stride` is the byte count for one
+row of 4x4 blocks.
+
 ## Building
 
 ```bash

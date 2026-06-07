@@ -42,6 +42,9 @@ private:
     // or nullptr at end of file.
     AVPacket *demux_next(int stream_idx);
     void clear_packet_queues();
+    avb_result open_custom_video_decoder(AVStream *st,
+                                         const avb_decode_options &options);
+    avb_result read_custom_video_frame(avb_video_frame &out_frame);
 
     AvbFFmpegFuncs m_ff{};
     bool m_libs_loaded = false;
@@ -49,6 +52,8 @@ private:
     AVFormatContext *m_fmt_ctx         = nullptr;
     AVCodecContext  *m_audio_codec_ctx = nullptr;
     AVCodecContext  *m_video_codec_ctx = nullptr;
+    const avb_video_decoder_plugin *m_custom_video_decoder = nullptr;
+    void            *m_custom_video_ctx = nullptr;
     AVPacket        *m_packet          = nullptr;
     AVFrame         *m_audio_frame     = nullptr;
     AVFrame         *m_video_frame     = nullptr; // raw decoded video frame
@@ -108,6 +113,7 @@ private:
     std::string m_last_error;
     std::string m_audio_codec_name;
     std::string m_video_codec_name;
+    std::string m_custom_video_codec_name;
 
     avb_media_info m_media_info{};
 

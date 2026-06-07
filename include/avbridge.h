@@ -19,6 +19,7 @@
  */
 
 #include <stddef.h> /* size_t */
+#include <stdint.h> /* int64_t, uint32_t */
 
 #ifdef __cplusplus
 extern "C" {
@@ -51,6 +52,7 @@ typedef enum avb_result {
     AVB_ERROR_SEEK_FAILED = -7,
     AVB_ERROR_EOF = -8,
     AVB_ERROR_ENCODE_FAILED = -9,
+    AVB_ERROR_AGAIN = -10,
 } avb_result;
 
 typedef enum avb_backend {
@@ -67,10 +69,15 @@ typedef enum avb_pixel_format {
     AVB_PIXEL_FORMAT_BGRA8,  /* packed, 1 plane */
     AVB_PIXEL_FORMAT_NV12,   /* planar, 2 planes: Y, interleaved CbCr */
     AVB_PIXEL_FORMAT_I420,   /* planar, 3 planes: Y, Cb, Cr (half size) */
+    AVB_PIXEL_FORMAT_BC1_RGBA, /* compressed, 4x4 blocks, 8 bytes/block */
+    AVB_PIXEL_FORMAT_BC3_RGBA, /* compressed, 4x4 blocks, 16 bytes/block */
+    AVB_PIXEL_FORMAT_BC4_R,    /* compressed, 4x4 blocks, 8 bytes/block */
+    AVB_PIXEL_FORMAT_BC5_RG,   /* compressed, 4x4 blocks, 16 bytes/block */
+    AVB_PIXEL_FORMAT_BC7_RGBA, /* compressed, 4x4 blocks, 16 bytes/block */
 } avb_pixel_format;
 
 /* Codecs usable for encoding. AUTO selects the backend default (H.264 video,
- * AAC audio). Video codecs: H264, HEVC, VP9. Audio codecs: AAC, OPUS. Passing a
+ * AAC audio). Video codecs: H264, HEVC, VP9, HAP. Audio codecs: AAC, OPUS. Passing a
  * codec of the wrong media kind (e.g. AAC for video) is an invalid argument, as
  * is a codec a particular backend/container cannot produce. */
 typedef enum avb_codec {
@@ -80,6 +87,7 @@ typedef enum avb_codec {
     AVB_CODEC_HEVC = 3,
     AVB_CODEC_VP9  = 4,
     AVB_CODEC_OPUS = 5,
+    AVB_CODEC_HAP  = 6,
 } avb_codec;
 
 /* ------------------------------------------------------------------------- *
@@ -88,11 +96,15 @@ typedef enum avb_codec {
 
 #define AVB_MAX_PLANES 3
 
-/* A raw video frame. Used both as decoder output and encoder input. As decoder
+/* A video frame. Used both as decoder output and encoder input. As decoder
  * output the decoder owns the backing memory until avb_decoder_release_video_frame.
  * As encoder input the caller fills width/height/format and plane_data/plane_stride
  * for plane_count planes (data/stride alias plane 0); pts_sec may carry a
- * timestamp (see avb_encoder_write_video). */
+ * timestamp (see avb_encoder_write_video).
+ *
+ * For compressed block formats (BC1/BC3/BC4/BC5/BC7), plane_count is 1,
+ * plane_data[0]/data points to the compressed block payload, data_size is the
+ * payload byte size, and stride is the byte count for one row of 4x4 blocks. */
 typedef struct avb_video_frame {
     int width;
     int height;
@@ -185,6 +197,9 @@ typedef struct avb_decode_options {
      * rate/channel count, and avb_audio_info reports the effective values. */
     int audio_sample_rate;
     int audio_channels;
+    /* 1 = allow registered custom video decoders to handle matching video
+     * streams before the backend's built-in video decoder is opened. */
+    int enable_custom_video_decoders;
 } avb_decode_options;
 
 /* Sensible defaults: AUTO backend, both audio and video enabled, default
@@ -236,6 +251,112 @@ AVB_API avb_result avb_decoder_open_memory(
     const void *data,
     size_t size,
     const avb_decode_options *options
+);
+
+typedef struct avb_video_stream_info {
+    int stream_index;
+    int width;
+    int height;
+    double frame_rate;
+    double duration_sec;
+    const char *codec_name;
+    uint32_t codec_tag; /* Container fourcc when available, e.g. 'Hap1'. */
+    const unsigned char *extradata;
+    int extradata_size;
+    int time_base_num;
+    int time_base_den;
+} avb_video_stream_info;
+
+typedef struct avb_encoded_packet {
+    const unsigned char *data;
+    int size;
+    double pts_sec;
+    double duration_sec;
+    int keyframe;
+    int stream_index;
+    int64_t pts;
+    int64_t dts;
+    int64_t duration;
+    int time_base_num;
+    int time_base_den;
+} avb_encoded_packet;
+
+typedef struct avb_video_decoder_plugin {
+    size_t struct_size; /* Set to sizeof(avb_video_decoder_plugin). */
+    const char *name;
+    int (*can_decode)(const avb_video_stream_info *stream,
+                      const avb_decode_options *options);
+    avb_result (*open)(void **out_ctx,
+                       const avb_video_stream_info *stream,
+                       const avb_decode_options *options);
+    avb_result (*decode_packet)(void *ctx,
+                                const avb_encoded_packet *packet,
+                                avb_video_frame *out_frame);
+    void (*release_frame)(void *ctx, avb_video_frame *frame);
+    void (*flush)(void *ctx);
+    void (*close)(void *ctx);
+} avb_video_decoder_plugin;
+
+/* Register a process-wide custom video decoder. The plugin struct and any
+ * callback targets it references must remain valid until unregistered. The
+ * first registered plugin whose can_decode() returns non-zero handles a stream.
+ * Currently custom video decoders are used by the FFmpeg backend, which still
+ * supplies demuxing and regular audio decoding. Do not unregister a plugin
+ * while any decoder using it may still be open. */
+AVB_API avb_result avb_register_video_decoder(
+    const avb_video_decoder_plugin *plugin
+);
+
+AVB_API avb_result avb_unregister_video_decoder(
+    const avb_video_decoder_plugin *plugin
+);
+
+typedef struct avb_video_encode_info {
+    int width;
+    int height;
+    double frame_rate;
+    avb_pixel_format input_format;
+    avb_codec codec;
+    int bitrate;
+} avb_video_encode_info;
+
+typedef struct avb_encoded_video_stream {
+    avb_codec codec;
+    uint32_t codec_tag; /* Container fourcc when available, e.g. 'Hap1'. */
+    const char *codec_name;
+    const char *gst_caps; /* Optional encoded caps for GStreamer appsrc. */
+    const unsigned char *extradata;
+    int extradata_size;
+    int time_base_num;
+    int time_base_den;
+} avb_encoded_video_stream;
+
+typedef struct avb_video_encoder_plugin {
+    size_t struct_size; /* Set to sizeof(avb_video_encoder_plugin). */
+    const char *name;
+    int (*can_encode)(const avb_video_encode_info *info);
+    avb_result (*open)(void **out_ctx,
+                       const avb_video_encode_info *info,
+                       avb_encoded_video_stream *out_stream);
+    avb_result (*encode_frame)(void *ctx,
+                               const avb_video_frame *frame,
+                               double pts_sec,
+                               avb_encoded_packet *out_packet);
+    avb_result (*flush)(void *ctx, avb_encoded_packet *out_packet);
+    void (*release_packet)(void *ctx, avb_encoded_packet *packet);
+    void (*close)(void *ctx);
+} avb_video_encoder_plugin;
+
+/* Register a process-wide custom video encoder. When a video encode request is
+ * matched by can_encode(), FFmpeg/GStreamer backends use the plugin for video
+ * compression and still mux audio through their native encoders. Do not
+ * unregister a plugin while any encoder using it may still be open. */
+AVB_API avb_result avb_register_video_encoder(
+    const avb_video_encoder_plugin *plugin
+);
+
+AVB_API avb_result avb_unregister_video_encoder(
+    const avb_video_encoder_plugin *plugin
 );
 
 AVB_API avb_result avb_decoder_get_media_info(

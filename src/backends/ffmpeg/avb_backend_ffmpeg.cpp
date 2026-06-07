@@ -1,4 +1,5 @@
 #include "avb_backend_ffmpeg.hpp"
+#include "../../avb_video_codec_registry.hpp"
 
 #include <cstdio>
 #include <cstdarg>
@@ -68,7 +69,8 @@ AVPacket *AvbBackendFFmpeg::demux_next(int stream_idx) {
             AVPacket *p = m_ff.av_packet_alloc();
             m_ff.av_packet_move_ref(p, m_packet);
             m_audio_pkts.push_back(p);
-        } else if (sidx == m_video_stream_idx && m_video_codec_ctx) {
+        } else if (sidx == m_video_stream_idx &&
+                   (m_video_codec_ctx || m_custom_video_decoder)) {
             AVPacket *p = m_ff.av_packet_alloc();
             m_ff.av_packet_move_ref(p, m_packet);
             m_video_pkts.push_back(p);
@@ -108,6 +110,12 @@ void AvbBackendFFmpeg::close_internal() {
         m_ff.avcodec_free_context(&m_video_codec_ctx);
         m_video_codec_ctx = nullptr;
     }
+    if (m_custom_video_decoder) {
+        if (m_custom_video_decoder->close && m_custom_video_ctx)
+            m_custom_video_decoder->close(m_custom_video_ctx);
+        m_custom_video_decoder = nullptr;
+        m_custom_video_ctx = nullptr;
+    }
     if (m_fmt_ctx) {
         m_ff.avformat_close_input(&m_fmt_ctx);
         m_fmt_ctx = nullptr;
@@ -132,6 +140,7 @@ void AvbBackendFFmpeg::close_internal() {
     m_audio_seek_target = -1.0;
     m_audio_stream_idx = -1;
     m_video_stream_idx = -1;
+    m_custom_video_codec_name.clear();
 }
 
 int AvbBackendFFmpeg::ffio_read(void *opaque, uint8_t *buf, int size) {
@@ -196,6 +205,64 @@ avb_result AvbBackendFFmpeg::open_io(const avb_io_callbacks &cb, void *user,
         return AVB_ERROR_OPEN_FAILED;
     }
     return setup_after_open(options);
+}
+
+static double avb_ff_seconds(int64_t value, AVRational time_base) {
+    if (value == AV_NOPTS_VALUE || time_base.den == 0) return -1.0;
+    return (double)value * time_base.num / time_base.den;
+}
+
+static std::string avb_ff_codec_tag_name(uint32_t tag) {
+    if (tag == 0) return "";
+    char s[5];
+    s[0] = (char)(tag & 0xff);
+    s[1] = (char)((tag >> 8) & 0xff);
+    s[2] = (char)((tag >> 16) & 0xff);
+    s[3] = (char)((tag >> 24) & 0xff);
+    s[4] = '\0';
+    for (int i = 0; i < 4; ++i) {
+        if ((unsigned char)s[i] < 32 || (unsigned char)s[i] > 126) return "";
+    }
+    return s;
+}
+
+avb_result AvbBackendFFmpeg::open_custom_video_decoder(
+    AVStream *st,
+    const avb_decode_options &options
+) {
+    avb_video_stream_info stream{};
+    stream.stream_index = m_video_stream_idx;
+    stream.width = st->codecpar->width;
+    stream.height = st->codecpar->height;
+    stream.codec_tag = (uint32_t)st->codecpar->codec_tag;
+    stream.extradata = st->codecpar->extradata;
+    stream.extradata_size = st->codecpar->extradata_size;
+    stream.time_base_num = st->time_base.num;
+    stream.time_base_den = st->time_base.den;
+    if (st->avg_frame_rate.den != 0)
+        stream.frame_rate = (double)st->avg_frame_rate.num / st->avg_frame_rate.den;
+    stream.duration_sec = avb_ff_seconds(st->duration, st->time_base);
+
+    const AVCodec *codec = m_ff.avcodec_find_decoder(st->codecpar->codec_id);
+    std::string tag_name = avb_ff_codec_tag_name(stream.codec_tag);
+    m_custom_video_codec_name = (codec && codec->name) ? codec->name : tag_name;
+    stream.codec_name = m_custom_video_codec_name.empty()
+        ? nullptr : m_custom_video_codec_name.c_str();
+
+    const avb_video_decoder_plugin *plugin =
+        avb_find_video_decoder_plugin(stream, options);
+    if (!plugin) return AVB_ERROR_STREAM_NOT_FOUND;
+
+    void *ctx = nullptr;
+    avb_result res = plugin->open(&ctx, &stream, &options);
+    if (res != AVB_OK) {
+        set_error("Custom video decoder '%s' failed to open.",
+                  plugin->name ? plugin->name : "(unnamed)");
+        return res;
+    }
+    m_custom_video_decoder = plugin;
+    m_custom_video_ctx = ctx;
+    return AVB_OK;
 }
 
 avb_result AvbBackendFFmpeg::setup_after_open(const avb_decode_options &options) {
@@ -271,34 +338,53 @@ avb_result AvbBackendFFmpeg::setup_after_open(const avb_decode_options &options)
     // Open video decoder
     if (m_video_stream_idx >= 0) {
         AVStream *st = m_fmt_ctx->streams[m_video_stream_idx];
-        const AVCodec *codec = m_ff.avcodec_find_decoder(st->codecpar->codec_id);
-        if (!codec) {
-            set_error("No video decoder found for codec id %d.", st->codecpar->codec_id);
-            return AVB_ERROR_STREAM_NOT_FOUND;
-        }
-        m_video_codec_name = codec->name ? codec->name : "";
+        avb_result custom_res = options.enable_custom_video_decoders
+            ? open_custom_video_decoder(st, options)
+            : AVB_ERROR_STREAM_NOT_FOUND;
+        if (custom_res == AVB_OK) {
+            m_video_codec_name = m_custom_video_codec_name;
+        } else {
+            if (custom_res != AVB_ERROR_STREAM_NOT_FOUND) return custom_res;
+            const AVCodec *codec = m_ff.avcodec_find_decoder(st->codecpar->codec_id);
+            if (!codec) {
+                set_error("No video decoder found for codec id %d.", st->codecpar->codec_id);
+                return AVB_ERROR_STREAM_NOT_FOUND;
+            }
+            m_video_codec_name = codec->name ? codec->name : "";
 
-        m_video_codec_ctx = m_ff.avcodec_alloc_context3(codec);
-        if (!m_video_codec_ctx) { set_error("avcodec_alloc_context3 (video) failed."); return AVB_ERROR_OPEN_FAILED; }
+            m_video_codec_ctx = m_ff.avcodec_alloc_context3(codec);
+            if (!m_video_codec_ctx) {
+                set_error("avcodec_alloc_context3 (video) failed.");
+                return AVB_ERROR_OPEN_FAILED;
+            }
 
-        ret = m_ff.avcodec_parameters_to_context(m_video_codec_ctx, st->codecpar);
-        if (ret < 0) { set_ff_error("avcodec_parameters_to_context (video)", ret); return AVB_ERROR_OPEN_FAILED; }
+            ret = m_ff.avcodec_parameters_to_context(m_video_codec_ctx, st->codecpar);
+            if (ret < 0) {
+                set_ff_error("avcodec_parameters_to_context (video)", ret);
+                return AVB_ERROR_OPEN_FAILED;
+            }
 
-        ret = m_ff.avcodec_open2(m_video_codec_ctx, codec, nullptr);
-        if (ret < 0) { set_ff_error("avcodec_open2 (video)", ret); return AVB_ERROR_OPEN_FAILED; }
+            ret = m_ff.avcodec_open2(m_video_codec_ctx, codec, nullptr);
+            if (ret < 0) {
+                set_ff_error("avcodec_open2 (video)", ret);
+                return AVB_ERROR_OPEN_FAILED;
+            }
 
-        // Resolve the requested output pixel format (UNKNOWN -> BGRA8 default).
-        switch (options.video_format) {
-            case AVB_PIXEL_FORMAT_RGBA8:
-                m_video_format = AVB_PIXEL_FORMAT_RGBA8; m_dst_av_fmt = AV_PIX_FMT_RGBA; break;
-            case AVB_PIXEL_FORMAT_NV12:
-                m_video_format = AVB_PIXEL_FORMAT_NV12;  m_dst_av_fmt = AV_PIX_FMT_NV12; break;
-            case AVB_PIXEL_FORMAT_I420:
-                m_video_format = AVB_PIXEL_FORMAT_I420;  m_dst_av_fmt = AV_PIX_FMT_YUV420P; break;
-            case AVB_PIXEL_FORMAT_BGRA8:
-            case AVB_PIXEL_FORMAT_UNKNOWN:
-            default:
-                m_video_format = AVB_PIXEL_FORMAT_BGRA8; m_dst_av_fmt = AV_PIX_FMT_BGRA; break;
+            // Resolve the requested output pixel format (UNKNOWN -> BGRA8 default).
+            switch (options.video_format) {
+                case AVB_PIXEL_FORMAT_RGBA8:
+                    m_video_format = AVB_PIXEL_FORMAT_RGBA8; m_dst_av_fmt = AV_PIX_FMT_RGBA; break;
+                case AVB_PIXEL_FORMAT_NV12:
+                    m_video_format = AVB_PIXEL_FORMAT_NV12;  m_dst_av_fmt = AV_PIX_FMT_NV12; break;
+                case AVB_PIXEL_FORMAT_I420:
+                    m_video_format = AVB_PIXEL_FORMAT_I420;  m_dst_av_fmt = AV_PIX_FMT_YUV420P; break;
+                case AVB_PIXEL_FORMAT_BGRA8:
+                case AVB_PIXEL_FORMAT_UNKNOWN:
+                    m_video_format = AVB_PIXEL_FORMAT_BGRA8; m_dst_av_fmt = AV_PIX_FMT_BGRA; break;
+                default:
+                    set_error("Requested video pixel format is not supported by FFmpeg conversion.");
+                    return AVB_ERROR_INVALID_ARGUMENT;
+            }
         }
     }
 
@@ -372,6 +458,8 @@ avb_result AvbBackendFFmpeg::seek(double seconds) {
 
     if (m_audio_codec_ctx) m_ff.avcodec_flush_buffers(m_audio_codec_ctx);
     if (m_video_codec_ctx) m_ff.avcodec_flush_buffers(m_video_codec_ctx);
+    if (m_custom_video_decoder && m_custom_video_decoder->flush)
+        m_custom_video_decoder->flush(m_custom_video_ctx);
 
     clear_packet_queues();
     m_audio_buf.clear();
@@ -502,7 +590,55 @@ double AvbBackendFFmpeg::audio_next_pts() {
     return m_audio_buf_pts;
 }
 
+avb_result AvbBackendFFmpeg::read_custom_video_frame(avb_video_frame &out_frame) {
+    if (!m_custom_video_decoder || !m_custom_video_ctx)
+        return AVB_ERROR_STREAM_NOT_FOUND;
+
+    while (true) {
+        AVPacket *pkt = demux_next(m_video_stream_idx);
+        if (!pkt) return AVB_ERROR_EOF;
+
+        AVStream *vst = m_fmt_ctx->streams[m_video_stream_idx];
+        double packet_pts = avb_ff_seconds(pkt->pts, vst->time_base);
+        if (packet_pts < 0.0)
+            packet_pts = avb_ff_seconds(pkt->dts, vst->time_base);
+
+        // Drop pre-roll packets after seeking. HAP-like intra-frame codecs can
+        // resume directly from the first packet at/after the target.
+        if (m_seek_target >= 0.0 && packet_pts >= 0.0 &&
+            packet_pts < m_seek_target - 1e-3) {
+            m_ff.av_packet_free(&pkt);
+            continue;
+        }
+        m_seek_target = -1.0;
+
+        avb_encoded_packet packet{};
+        packet.data = pkt->data;
+        packet.size = pkt->size;
+        packet.pts_sec = packet_pts;
+        packet.duration_sec = avb_ff_seconds(pkt->duration, vst->time_base);
+        packet.keyframe = (pkt->flags & AV_PKT_FLAG_KEY) ? 1 : 0;
+        packet.stream_index = pkt->stream_index;
+        packet.pts = pkt->pts;
+        packet.dts = pkt->dts;
+        packet.duration = pkt->duration;
+        packet.time_base_num = vst->time_base.num;
+        packet.time_base_den = vst->time_base.den;
+
+        avb_result res = m_custom_video_decoder->decode_packet(
+            m_custom_video_ctx, &packet, &out_frame);
+        m_ff.av_packet_free(&pkt);
+        if (res == AVB_OK) {
+            if (out_frame.pts_sec < 0.0) out_frame.pts_sec = packet_pts;
+            return AVB_OK;
+        }
+        if (res == AVB_ERROR_AGAIN) continue;
+        return res;
+    }
+}
+
 avb_result AvbBackendFFmpeg::read_video_frame(avb_video_frame &out_frame) {
+    if (m_custom_video_decoder) return read_custom_video_frame(out_frame);
     if (!m_video_codec_ctx) return AVB_ERROR_STREAM_NOT_FOUND;
 
     while (true) {
@@ -628,6 +764,12 @@ avb_result AvbBackendFFmpeg::read_video_frame(avb_video_frame &out_frame) {
 }
 
 void AvbBackendFFmpeg::release_video_frame(avb_video_frame &frame) {
+    if (m_custom_video_decoder) {
+        if (m_custom_video_decoder->release_frame)
+            m_custom_video_decoder->release_frame(m_custom_video_ctx, &frame);
+        memset(&frame, 0, sizeof(frame));
+        return;
+    }
     // Output buffer is owned by the backend and reused on the next read_video_frame call.
     // Just zero the caller's frame struct so they can't accidentally use stale pointers.
     memset(&frame, 0, sizeof(frame));

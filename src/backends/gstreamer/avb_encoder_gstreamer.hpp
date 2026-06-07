@@ -24,6 +24,7 @@ public:
 private:
     void close_internal();
     avb_result check_bus_error(); // poll the bus, surface any ERROR message
+    avb_result write_custom_video_packet(avb_encoded_packet &packet, double fallback_pts);
 
     AvbGstFuncs m_gst{};
     bool m_libs_loaded = false;
@@ -34,6 +35,10 @@ private:
 
     bool   m_has_video = false;
     bool   m_has_audio = false;
+    bool   m_custom_video = false;
+    const avb_video_encoder_plugin *m_custom_video_encoder = nullptr;
+    void *m_custom_video_ctx = nullptr;
+    avb_encoded_video_stream m_custom_video_stream{};
     int    m_width = 0, m_height = 0;
     double m_frame_rate = 30.0;
     int    m_fps_n = 30; // framerate numerator (denominator fixed at 1)

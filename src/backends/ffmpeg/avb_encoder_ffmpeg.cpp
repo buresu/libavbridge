@@ -1,10 +1,21 @@
 #include "avb_encoder_ffmpeg.hpp"
+#include "../../avb_video_codec_registry.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+
+static AVCodecID avb_ff_video_codec_id(avb_codec codec) {
+    switch (codec) {
+        case AVB_CODEC_H264: return AV_CODEC_ID_H264;
+        case AVB_CODEC_HEVC: return AV_CODEC_ID_HEVC;
+        case AVB_CODEC_VP9:  return AV_CODEC_ID_VP9;
+        case AVB_CODEC_HAP:  return AV_CODEC_ID_HAP;
+        default:             return AV_CODEC_ID_NONE;
+    }
+}
 
 AvbEncoderFFmpeg::AvbEncoderFFmpeg() {
     char err_buf[512];
@@ -43,6 +54,13 @@ void AvbEncoderFFmpeg::close_internal() {
     if (m_vframe) { m_ff.av_frame_free(&m_vframe); m_vframe = nullptr; }
     if (m_aframe) { m_ff.av_frame_free(&m_aframe); m_aframe = nullptr; }
     if (m_packet) { m_ff.av_packet_free(&m_packet); m_packet = nullptr; }
+    if (m_custom_video_encoder) {
+        if (m_custom_video_encoder->close && m_custom_video_ctx)
+            m_custom_video_encoder->close(m_custom_video_ctx);
+        m_custom_video_encoder = nullptr;
+        m_custom_video_ctx = nullptr;
+        m_custom_video_stream = {};
+    }
     if (m_venc)   { m_ff.avcodec_free_context(&m_venc); m_venc = nullptr; }
     if (m_aenc)   { m_ff.avcodec_free_context(&m_aenc); m_aenc = nullptr; }
     if (m_fmt_ctx) {
@@ -80,6 +98,13 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
             case AVB_PIXEL_FORMAT_RGBA8: m_input_format = AVB_PIXEL_FORMAT_RGBA8; m_src_av_fmt = AV_PIX_FMT_RGBA; break;
             case AVB_PIXEL_FORMAT_NV12:  m_input_format = AVB_PIXEL_FORMAT_NV12;  m_src_av_fmt = AV_PIX_FMT_NV12; break;
             case AVB_PIXEL_FORMAT_I420:  m_input_format = AVB_PIXEL_FORMAT_I420;  m_src_av_fmt = AV_PIX_FMT_YUV420P; break;
+            case AVB_PIXEL_FORMAT_BC1_RGBA:
+            case AVB_PIXEL_FORMAT_BC3_RGBA:
+            case AVB_PIXEL_FORMAT_BC4_R:
+            case AVB_PIXEL_FORMAT_BC5_RG:
+            case AVB_PIXEL_FORMAT_BC7_RGBA:
+                m_input_format = options.video.input_format;
+                break;
             case AVB_PIXEL_FORMAT_BGRA8:
             case AVB_PIXEL_FORMAT_UNKNOWN:
             default:                     m_input_format = AVB_PIXEL_FORMAT_BGRA8; m_src_av_fmt = AV_PIX_FMT_BGRA; break;
@@ -88,6 +113,55 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
         m_height     = options.video.height;
         m_frame_rate = options.video.frame_rate > 0 ? options.video.frame_rate : 30.0;
         m_fps_den    = std::max(1L, std::lround(m_frame_rate));
+
+        avb_video_encode_info custom_info{};
+        custom_info.width = m_width;
+        custom_info.height = m_height;
+        custom_info.frame_rate = m_frame_rate;
+        custom_info.input_format = m_input_format;
+        custom_info.codec = options.video.codec;
+        custom_info.bitrate = options.video.bitrate;
+        const avb_video_encoder_plugin *plugin =
+            avb_find_video_encoder_plugin(custom_info);
+        if (plugin) {
+            void *ctx = nullptr;
+            avb_encoded_video_stream stream{};
+            avb_result cres = plugin->open(&ctx, &custom_info, &stream);
+            if (cres != AVB_OK) {
+                set_error("Custom video encoder '%s' failed to open.",
+                          plugin->name ? plugin->name : "(unnamed)");
+                return cres;
+            }
+
+            m_vstream = m_ff.avformat_new_stream(m_fmt_ctx, nullptr);
+            if (!m_vstream) { set_error("avformat_new_stream (custom video) failed."); return AVB_ERROR_OPEN_FAILED; }
+            m_vstream->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
+            m_vstream->codecpar->codec_id = avb_ff_video_codec_id(stream.codec);
+            if (m_vstream->codecpar->codec_id == AV_CODEC_ID_NONE)
+                m_vstream->codecpar->codec_id = avb_ff_video_codec_id(options.video.codec);
+            m_vstream->codecpar->codec_tag = stream.codec_tag;
+            m_vstream->codecpar->width = m_width;
+            m_vstream->codecpar->height = m_height;
+            if (stream.extradata && stream.extradata_size > 0) {
+                m_vstream->codecpar->extradata =
+                    (uint8_t *)m_ff.av_malloc((size_t)stream.extradata_size + AV_INPUT_BUFFER_PADDING_SIZE);
+                if (!m_vstream->codecpar->extradata) {
+                    set_error("av_malloc (custom video extradata) failed.");
+                    return AVB_ERROR_OPEN_FAILED;
+                }
+                memcpy(m_vstream->codecpar->extradata, stream.extradata, stream.extradata_size);
+                memset(m_vstream->codecpar->extradata + stream.extradata_size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+                m_vstream->codecpar->extradata_size = stream.extradata_size;
+            }
+            int tb_den = stream.time_base_den > 0 ? stream.time_base_den : m_fps_den;
+            int tb_num = stream.time_base_num > 0 ? stream.time_base_num : 1;
+            m_vstream->time_base = AVRational{tb_num, tb_den};
+            m_custom_video_encoder = plugin;
+            m_custom_video_ctx = ctx;
+            m_custom_video_stream = stream;
+            m_custom_video = true;
+            m_has_video = true;
+        } else {
 
         AVCodecID vid;
         const char *vname;
@@ -140,6 +214,7 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
         if (ret < 0) { set_ff_error("av_frame_get_buffer (video)", ret); return AVB_ERROR_OPEN_FAILED; }
 
         m_has_video = true;
+        }
     }
 
     // --- Audio ---
@@ -262,6 +337,17 @@ avb_result AvbEncoderFFmpeg::encode_and_mux(AVCodecContext *enc, AVStream *strea
 
 avb_result AvbEncoderFFmpeg::write_video(const avb_video_frame &frame, double pts_sec) {
     if (!m_has_video) return AVB_ERROR_INVALID_ARGUMENT;
+    if (m_custom_video) {
+        avb_encoded_packet packet{};
+        avb_result res = m_custom_video_encoder->encode_frame(
+            m_custom_video_ctx, &frame, pts_sec, &packet);
+        if (res != AVB_OK) return res;
+        res = write_custom_video_packet(packet);
+        if (m_custom_video_encoder->release_packet)
+            m_custom_video_encoder->release_packet(m_custom_video_ctx, &packet);
+        if (res == AVB_OK) m_video_index++;
+        return res;
+    }
     if (frame.format != m_input_format) {
         set_error("Frame pixel format does not match configured input_format.");
         return AVB_ERROR_INVALID_ARGUMENT;
@@ -294,6 +380,37 @@ avb_result AvbEncoderFFmpeg::write_video(const avb_video_frame &frame, double pt
     m_video_index++;
 
     return encode_and_mux(m_venc, m_vstream, m_vframe);
+}
+
+avb_result AvbEncoderFFmpeg::write_custom_video_packet(avb_encoded_packet &packet) {
+    if (!packet.data || packet.size <= 0) return AVB_ERROR_INVALID_ARGUMENT;
+
+    AVPacket pkt;
+    memset(&pkt, 0, sizeof(pkt));
+    int ret = m_ff.av_new_packet(&pkt, packet.size);
+    if (ret < 0) { set_ff_error("av_new_packet (custom video)", ret); return AVB_ERROR_ENCODE_FAILED; }
+    memcpy(pkt.data, packet.data, packet.size);
+    pkt.stream_index = m_vstream->index;
+    pkt.pts = packet.pts >= 0
+        ? packet.pts
+        : (int64_t)std::llround((packet.pts_sec >= 0.0
+            ? packet.pts_sec
+            : (double)m_video_index / m_frame_rate) / av_q2d(m_vstream->time_base));
+    pkt.dts = packet.dts >= 0 ? packet.dts : pkt.pts;
+    pkt.duration = packet.duration >= 0
+        ? packet.duration
+        : (int64_t)std::llround((packet.duration_sec > 0.0
+            ? packet.duration_sec
+            : 1.0 / m_frame_rate) / av_q2d(m_vstream->time_base));
+    if (packet.keyframe) pkt.flags |= AV_PKT_FLAG_KEY;
+
+    ret = m_ff.av_interleaved_write_frame(m_fmt_ctx, &pkt);
+    m_ff.av_packet_unref(&pkt);
+    if (ret < 0) {
+        set_ff_error("av_interleaved_write_frame (custom video)", ret);
+        return AVB_ERROR_ENCODE_FAILED;
+    }
+    return AVB_OK;
 }
 
 avb_result AvbEncoderFFmpeg::encode_audio_frame(int nb_samples) {
@@ -345,8 +462,21 @@ avb_result AvbEncoderFFmpeg::finish() {
         if (r != AVB_OK) return r;
     }
     if (m_has_video) {
-        avb_result r = encode_and_mux(m_venc, m_vstream, nullptr);
-        if (r != AVB_OK) return r;
+        if (m_custom_video) {
+            while (m_custom_video_encoder->flush) {
+                avb_encoded_packet packet{};
+                avb_result r = m_custom_video_encoder->flush(m_custom_video_ctx, &packet);
+                if (r == AVB_ERROR_EOF || r == AVB_ERROR_AGAIN) break;
+                if (r != AVB_OK) return r;
+                r = write_custom_video_packet(packet);
+                if (m_custom_video_encoder->release_packet)
+                    m_custom_video_encoder->release_packet(m_custom_video_ctx, &packet);
+                if (r != AVB_OK) return r;
+            }
+        } else {
+            avb_result r = encode_and_mux(m_venc, m_vstream, nullptr);
+            if (r != AVB_OK) return r;
+        }
     }
 
     int ret = m_ff.av_write_trailer(m_fmt_ctx);

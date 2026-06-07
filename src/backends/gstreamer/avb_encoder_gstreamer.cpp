@@ -1,4 +1,5 @@
 #include "avb_encoder_gstreamer.hpp"
+#include "../../avb_video_codec_registry.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -7,6 +8,14 @@
 #include <string>
 
 static inline int round_up_4(int x) { return (x + 3) & ~3; }
+
+static bool avb_is_compressed_format(avb_pixel_format fmt) {
+    return fmt == AVB_PIXEL_FORMAT_BC1_RGBA ||
+           fmt == AVB_PIXEL_FORMAT_BC3_RGBA ||
+           fmt == AVB_PIXEL_FORMAT_BC4_R ||
+           fmt == AVB_PIXEL_FORMAT_BC5_RG ||
+           fmt == AVB_PIXEL_FORMAT_BC7_RGBA;
+}
 
 AvbEncoderGStreamer::AvbEncoderGStreamer() {
     char err_buf[512];
@@ -25,11 +34,19 @@ void AvbEncoderGStreamer::close_internal() {
     if (!m_libs_loaded) return;
     if (m_vsrc) { m_gst.gst_object_unref(m_vsrc); m_vsrc = nullptr; }
     if (m_asrc) { m_gst.gst_object_unref(m_asrc); m_asrc = nullptr; }
+    if (m_custom_video_encoder) {
+        if (m_custom_video_encoder->close && m_custom_video_ctx)
+            m_custom_video_encoder->close(m_custom_video_ctx);
+        m_custom_video_encoder = nullptr;
+        m_custom_video_ctx = nullptr;
+        m_custom_video_stream = {};
+    }
     if (m_pipeline) {
         m_gst.gst_element_set_state(m_pipeline, GST_STATE_NULL);
         m_gst.gst_object_unref(m_pipeline);
-        m_pipeline = nullptr;
+    m_pipeline = nullptr;
     }
+    m_custom_video = false;
 }
 
 // Poll the bus (non-blocking) for an ERROR posted by the pipeline and turn it
@@ -79,11 +96,19 @@ avb_result AvbEncoderGStreamer::open(const char *path, const avb_encode_options 
     // Video codec -> encoder element (with its bitrate property/units).
     char venc[128] = "x264enc speed-preset=veryfast";
     const char *vfmt = "BGRA";
+    std::string custom_vcaps;
     if (options.video.enable) {
         switch (options.video.input_format) {
             case AVB_PIXEL_FORMAT_RGBA8: m_input_format = AVB_PIXEL_FORMAT_RGBA8; vfmt = "RGBA"; break;
             case AVB_PIXEL_FORMAT_NV12:  m_input_format = AVB_PIXEL_FORMAT_NV12;  vfmt = "NV12"; break;
             case AVB_PIXEL_FORMAT_I420:  m_input_format = AVB_PIXEL_FORMAT_I420;  vfmt = "I420"; break;
+            case AVB_PIXEL_FORMAT_BC1_RGBA:
+            case AVB_PIXEL_FORMAT_BC3_RGBA:
+            case AVB_PIXEL_FORMAT_BC4_R:
+            case AVB_PIXEL_FORMAT_BC5_RG:
+            case AVB_PIXEL_FORMAT_BC7_RGBA:
+                m_input_format = options.video.input_format;
+                break;
             case AVB_PIXEL_FORMAT_BGRA8:
             case AVB_PIXEL_FORMAT_UNKNOWN:
             default:                     m_input_format = AVB_PIXEL_FORMAT_BGRA8; vfmt = "BGRA"; break;
@@ -103,8 +128,10 @@ avb_result AvbEncoderGStreamer::open(const char *path, const avb_encode_options 
                 if (options.video.bitrate > 0) snprintf(venc, sizeof(venc), "vp9enc deadline=1 target-bitrate=%d", options.video.bitrate);
                 else          snprintf(venc, sizeof(venc), "vp9enc deadline=1");
                 break;
+            case AVB_CODEC_HAP:
+                break;
             default:
-                m_last_error = "Invalid video codec (use AUTO/H264/HEVC/VP9).";
+                m_last_error = "Invalid video codec (use AUTO/H264/HEVC/VP9/HAP).";
                 return AVB_ERROR_INVALID_ARGUMENT;
         }
         if (options.video.width <= 0 || options.video.height <= 0) {
@@ -115,6 +142,45 @@ avb_result AvbEncoderGStreamer::open(const char *path, const avb_encode_options 
         m_height     = options.video.height;
         m_frame_rate = options.video.frame_rate > 0 ? options.video.frame_rate : 30.0;
         m_fps_n      = std::max(1L, std::lround(m_frame_rate));
+
+        avb_video_encode_info custom_info{};
+        custom_info.width = m_width;
+        custom_info.height = m_height;
+        custom_info.frame_rate = m_frame_rate;
+        custom_info.input_format = m_input_format;
+        custom_info.codec = options.video.codec;
+        custom_info.bitrate = options.video.bitrate;
+        const avb_video_encoder_plugin *plugin =
+            avb_find_video_encoder_plugin(custom_info);
+        if (plugin) {
+            void *ctx = nullptr;
+            avb_encoded_video_stream stream{};
+            avb_result cres = plugin->open(&ctx, &custom_info, &stream);
+            if (cres != AVB_OK) {
+                m_last_error = "Custom video encoder failed to open.";
+                return cres;
+            }
+            m_custom_video_encoder = plugin;
+            m_custom_video_ctx = ctx;
+            m_custom_video_stream = stream;
+            m_custom_video = true;
+            if (stream.gst_caps && stream.gst_caps[0]) {
+                custom_vcaps = stream.gst_caps;
+            } else if (stream.codec == AVB_CODEC_HAP || options.video.codec == AVB_CODEC_HAP) {
+                custom_vcaps = "video/x-hap,width=%d,height=%d,framerate=%d/1";
+            } else {
+                m_last_error = "Custom GStreamer video encoder requires gst_caps.";
+                return AVB_ERROR_INVALID_ARGUMENT;
+            }
+        }
+        if (!m_custom_video && options.video.codec == AVB_CODEC_HAP) {
+            m_last_error = "HAP encoding requires a registered custom video encoder.";
+            return AVB_ERROR_INVALID_ARGUMENT;
+        }
+        if (!m_custom_video && avb_is_compressed_format(m_input_format)) {
+            m_last_error = "Compressed video input requires a registered custom video encoder.";
+            return AVB_ERROR_INVALID_ARGUMENT;
+        }
     }
 
     // Audio codec -> encoder element.
@@ -149,9 +215,14 @@ avb_result AvbEncoderGStreamer::open(const char *path, const avb_encode_options 
     char desc[1024];
     int n = snprintf(desc, sizeof(desc), "%s name=mux ! filesink name=sink ", mux);
     if (options.video.enable) {
-        n += snprintf(desc + n, sizeof(desc) - n,
-            "appsrc name=vsrc is-live=false format=time max-bytes=0 ! videoconvert ! "
-            "%s ! queue ! mux. ", venc);
+        if (m_custom_video) {
+            n += snprintf(desc + n, sizeof(desc) - n,
+                "appsrc name=vsrc is-live=false format=time max-bytes=0 ! queue ! mux. ");
+        } else {
+            n += snprintf(desc + n, sizeof(desc) - n,
+                "appsrc name=vsrc is-live=false format=time max-bytes=0 ! videoconvert ! "
+                "%s ! queue ! mux. ", venc);
+        }
     }
     if (options.audio.enable) {
         n += snprintf(desc + n, sizeof(desc) - n,
@@ -179,9 +250,18 @@ avb_result AvbEncoderGStreamer::open(const char *path, const avb_encode_options 
     if (options.video.enable) {
         m_vsrc = m_gst.gst_bin_get_by_name((GstBin *)m_pipeline, "vsrc");
         char caps_str[256];
-        snprintf(caps_str, sizeof(caps_str),
-                 "video/x-raw,format=%s,width=%d,height=%d,framerate=%d/1",
-                 vfmt, m_width, m_height, m_fps_n);
+        if (m_custom_video) {
+            if (custom_vcaps.find("%d") != std::string::npos) {
+                snprintf(caps_str, sizeof(caps_str), custom_vcaps.c_str(),
+                         m_width, m_height, m_fps_n);
+            } else {
+                snprintf(caps_str, sizeof(caps_str), "%s", custom_vcaps.c_str());
+            }
+        } else {
+            snprintf(caps_str, sizeof(caps_str),
+                     "video/x-raw,format=%s,width=%d,height=%d,framerate=%d/1",
+                     vfmt, m_width, m_height, m_fps_n);
+        }
         GstCaps *caps = m_gst.gst_caps_from_string(caps_str);
         m_gst.g_object_set(m_vsrc, "caps", caps, nullptr);
         m_gst.gst_mini_object_unref((GstMiniObject *)caps);
@@ -211,6 +291,20 @@ avb_result AvbEncoderGStreamer::open(const char *path, const avb_encode_options 
 
 avb_result AvbEncoderGStreamer::write_video(const avb_video_frame &frame, double pts_sec) {
     if (!m_has_video) return AVB_ERROR_INVALID_ARGUMENT;
+    if (m_custom_video) {
+        avb_encoded_packet packet{};
+        avb_result res = m_custom_video_encoder->encode_frame(
+            m_custom_video_ctx, &frame, pts_sec, &packet);
+        if (res != AVB_OK) return res;
+        double fallback_pts = pts_sec >= 0.0 ? pts_sec
+                           : frame.pts_sec >= 0.0 ? frame.pts_sec
+                           : (double)m_video_index / m_frame_rate;
+        res = write_custom_video_packet(packet, fallback_pts);
+        if (m_custom_video_encoder->release_packet)
+            m_custom_video_encoder->release_packet(m_custom_video_ctx, &packet);
+        if (res == AVB_OK) m_video_index++;
+        return res;
+    }
     if (frame.format != m_input_format) {
         m_last_error = "Frame pixel format does not match configured input_format.";
         return AVB_ERROR_INVALID_ARGUMENT;
@@ -275,6 +369,36 @@ avb_result AvbEncoderGStreamer::write_video(const avb_video_frame &frame, double
     return AVB_OK;
 }
 
+avb_result AvbEncoderGStreamer::write_custom_video_packet(
+    avb_encoded_packet &packet,
+    double fallback_pts
+) {
+    if (!packet.data || packet.size <= 0) return AVB_ERROR_INVALID_ARGUMENT;
+
+    GstBuffer *buf = m_gst.gst_buffer_new_allocate(nullptr, packet.size, nullptr);
+    if (!buf) {
+        m_last_error = "gst_buffer_new_allocate (custom video) failed.";
+        return AVB_ERROR_ENCODE_FAILED;
+    }
+    m_gst.gst_buffer_fill(buf, 0, packet.data, packet.size);
+    double pts = packet.pts_sec >= 0.0 ? packet.pts_sec : fallback_pts;
+    double dur = packet.duration_sec > 0.0 ? packet.duration_sec : 1.0 / m_frame_rate;
+    buf->pts = (GstClockTime)std::llround(pts * GST_SECOND);
+    buf->dts = packet.dts >= 0
+        ? (GstClockTime)packet.dts
+        : buf->pts;
+    buf->duration = (GstClockTime)std::llround(dur * GST_SECOND);
+    if (!packet.keyframe)
+        GST_BUFFER_FLAG_SET(buf, GST_BUFFER_FLAG_DELTA_UNIT);
+
+    GstFlowReturn fr = m_gst.gst_app_src_push_buffer((GstAppSrc *)m_vsrc, buf);
+    if (fr != GST_FLOW_OK) {
+        if (check_bus_error() == AVB_OK) m_last_error = "appsrc push (custom video) failed.";
+        return AVB_ERROR_ENCODE_FAILED;
+    }
+    return AVB_OK;
+}
+
 avb_result AvbEncoderGStreamer::write_audio_f32(const float *src_interleaved, int frames) {
     if (!m_has_audio) return AVB_ERROR_INVALID_ARGUMENT;
 
@@ -298,7 +422,22 @@ avb_result AvbEncoderGStreamer::finish() {
     if (!m_pipeline) return AVB_ERROR_INVALID_ARGUMENT;
     if (m_finished) return AVB_OK;
 
-    if (m_has_video) m_gst.gst_app_src_end_of_stream((GstAppSrc *)m_vsrc);
+    if (m_has_video) {
+        if (m_custom_video) {
+            while (m_custom_video_encoder->flush) {
+                avb_encoded_packet packet{};
+                avb_result r = m_custom_video_encoder->flush(m_custom_video_ctx, &packet);
+                if (r == AVB_ERROR_EOF || r == AVB_ERROR_AGAIN) break;
+                if (r != AVB_OK) return r;
+                r = write_custom_video_packet(packet, (double)m_video_index / m_frame_rate);
+                if (m_custom_video_encoder->release_packet)
+                    m_custom_video_encoder->release_packet(m_custom_video_ctx, &packet);
+                if (r != AVB_OK) return r;
+                m_video_index++;
+            }
+        }
+        m_gst.gst_app_src_end_of_stream((GstAppSrc *)m_vsrc);
+    }
     if (m_has_audio) m_gst.gst_app_src_end_of_stream((GstAppSrc *)m_asrc);
 
     // Wait for the muxer/filesink to finalize the file (EOS) or report an error.

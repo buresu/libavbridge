@@ -47,6 +47,21 @@ static void check_str(const char *got, const char *want, const char *what) {
 // compiled into this build, so the run is reported as skipped, not failed.
 static const int AVB_TEST_SKIP = 77;
 
+static int dummy_can_decode(const avb_video_stream_info *,
+                            const avb_decode_options *) {
+    return 0;
+}
+
+static avb_result dummy_open(void **, const avb_video_stream_info *,
+                             const avb_decode_options *) {
+    return AVB_ERROR_OPEN_FAILED;
+}
+
+static avb_result dummy_decode_packet(void *, const avb_encoded_packet *,
+                                      avb_video_frame *) {
+    return AVB_ERROR_AGAIN;
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         fprintf(stderr, "Usage: %s <fixture.mp4> [backend]\n", argv[0]);
@@ -84,11 +99,27 @@ int main(int argc, char *argv[]) {
     }
     check(std::strcmp(avb_result_string(AVB_ERROR_EOF), "AVB_ERROR_EOF") == 0,
           "result_string(EOF)");
+    check(std::strcmp(avb_result_string(AVB_ERROR_AGAIN), "AVB_ERROR_AGAIN") == 0,
+          "result_string(AGAIN)");
+    {
+        avb_video_decoder_plugin plugin{};
+        plugin.struct_size = sizeof(plugin);
+        plugin.name = "dummy";
+        plugin.can_decode = dummy_can_decode;
+        plugin.open = dummy_open;
+        plugin.decode_packet = dummy_decode_packet;
+        check(avb_register_video_decoder(&plugin) == AVB_OK,
+              "register dummy video decoder");
+        check(avb_unregister_video_decoder(&plugin) == AVB_OK,
+              "unregister dummy video decoder");
+    }
     // A default-constructed decode options must enable both tracks (no footgun).
     {
         avb_decode_options d = avb_decode_options_default();
         check(d.enable_audio == 1 && d.enable_video == 1,
               "decode_options_default enables audio+video");
+        check(d.enable_custom_video_decoders == 1,
+              "decode_options_default enables custom video decoders");
     }
 
     avb_decode_options opts{};

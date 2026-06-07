@@ -88,6 +88,7 @@ const char *avb_result_string(avb_result result) {
         case AVB_ERROR_SEEK_FAILED:           return "AVB_ERROR_SEEK_FAILED";
         case AVB_ERROR_EOF:                   return "AVB_ERROR_EOF";
         case AVB_ERROR_ENCODE_FAILED:         return "AVB_ERROR_ENCODE_FAILED";
+        case AVB_ERROR_AGAIN:                 return "AVB_ERROR_AGAIN";
         default:                              return "AVB_ERROR_UNKNOWN";
     }
 }

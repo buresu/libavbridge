@@ -1,4 +1,5 @@
 #include "avb_backend_gstreamer.hpp"
+#include "../../avb_video_codec_registry.hpp"
 
 #include <cstdarg>
 #include <cstdio>
@@ -12,6 +13,24 @@ enum {
 };
 
 static inline int round_up_4(int x) { return (x + 3) & ~3; }
+
+static bool avb_is_compressed_format(avb_pixel_format fmt) {
+    return fmt == AVB_PIXEL_FORMAT_BC1_RGBA ||
+           fmt == AVB_PIXEL_FORMAT_BC3_RGBA ||
+           fmt == AVB_PIXEL_FORMAT_BC4_R ||
+           fmt == AVB_PIXEL_FORMAT_BC5_RG ||
+           fmt == AVB_PIXEL_FORMAT_BC7_RGBA;
+}
+
+static std::string gst_launch_quote(const char *s) {
+    std::string out = "\"";
+    for (const char *p = s; p && *p; ++p) {
+        if (*p == '\\' || *p == '"') out.push_back('\\');
+        out.push_back(*p);
+    }
+    out.push_back('"');
+    return out;
+}
 
 // Map a GStreamer source-stream caps name to the same short codec name the
 // ffmpeg backend reports, so avb_*_info::codec_name is consistent across
@@ -105,6 +124,16 @@ void AvbBackendGStreamer::set_error(const char *fmt, ...) {
 void AvbBackendGStreamer::close_internal() {
     if (!m_libs_loaded) return;
 
+    if (m_video_preroll_sample) {
+        m_gst.gst_mini_object_unref((GstMiniObject *)m_video_preroll_sample);
+        m_video_preroll_sample = nullptr;
+    }
+    if (m_custom_video_decoder) {
+        if (m_custom_video_decoder->close && m_custom_video_ctx)
+            m_custom_video_decoder->close(m_custom_video_ctx);
+        m_custom_video_decoder = nullptr;
+        m_custom_video_ctx = nullptr;
+    }
     if (m_audio_sink) { m_gst.gst_object_unref(m_audio_sink); m_audio_sink = nullptr; }
     if (m_video_sink) { m_gst.gst_object_unref(m_video_sink); m_video_sink = nullptr; }
     if (m_pipeline) {
@@ -126,6 +155,7 @@ void AvbBackendGStreamer::close_internal() {
     m_duration   = 0.0;
     m_audio_eof  = false;
     m_seek_target = -1.0;
+    m_custom_pipeline = false;
     m_audio_codec_name.clear();
     m_video_codec_name.clear();
 }
@@ -163,6 +193,151 @@ void AvbBackendGStreamer::discover_codec_names(const char *uri) {
     m_gst.g_object_unref(disc);
 }
 
+avb_result AvbBackendGStreamer::open_custom_file(
+    const char *path,
+    const avb_decode_options &options
+) {
+    if (!options.enable_video || !options.enable_custom_video_decoders ||
+        !avb_is_compressed_format(options.video_format)) {
+        return AVB_ERROR_STREAM_NOT_FOUND;
+    }
+
+    std::string desc = "filesrc location=" + gst_launch_quote(path) +
+        " ! qtdemux name=demux "
+        "demux.video_0 ! queue ! appsink name=avb_vsink sync=false max-buffers=16";
+
+    if (options.enable_audio) {
+        desc += " demux.audio_0 ! queue ! decodebin ! audioconvert ! audioresample ! "
+                "appsink name=avb_asink sync=false max-buffers=0 "
+                "caps=audio/x-raw,format=F32LE,layout=interleaved";
+        if (options.audio_channels > 0) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), ",channels=%d", options.audio_channels);
+            desc += buf;
+        }
+        if (options.audio_sample_rate > 0) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), ",rate=%d", options.audio_sample_rate);
+            desc += buf;
+        }
+    }
+
+    GError *err = nullptr;
+    m_pipeline = m_gst.gst_parse_launch(desc.c_str(), &err);
+    if (!m_pipeline) {
+        set_error("Failed to build custom GStreamer pipeline: %s",
+                  err && err->message ? err->message : "unknown");
+        m_gst.g_clear_error(&err);
+        return AVB_ERROR_OPEN_FAILED;
+    }
+
+    m_video_sink = m_gst.gst_bin_get_by_name((GstBin *)m_pipeline, "avb_vsink");
+    if (m_video_sink) m_gst.gst_app_sink_set_drop((GstAppSink *)m_video_sink, FALSE);
+    if (options.enable_audio) {
+        m_audio_sink = m_gst.gst_bin_get_by_name((GstBin *)m_pipeline, "avb_asink");
+        if (m_audio_sink) m_gst.gst_app_sink_set_drop((GstAppSink *)m_audio_sink, FALSE);
+    }
+    if (!m_video_sink) {
+        set_error("Custom GStreamer pipeline did not create a video appsink.");
+        return AVB_ERROR_OPEN_FAILED;
+    }
+
+    m_gst.gst_element_set_state(m_pipeline, GST_STATE_PAUSED);
+    GstState st_cur, st_pend;
+    GstStateChangeReturn sret =
+        m_gst.gst_element_get_state(m_pipeline, &st_cur, &st_pend, 10 * GST_SECOND);
+    if (sret == GST_STATE_CHANGE_FAILURE) {
+        set_error("Custom GStreamer pipeline failed to reach PAUSED.");
+        return AVB_ERROR_STREAM_NOT_FOUND;
+    }
+
+    gint64 dur_ns = 0;
+    if (m_gst.gst_element_query_duration(m_pipeline, GST_FORMAT_TIME, &dur_ns) && dur_ns > 0)
+        m_duration = (double)dur_ns / GST_SECOND;
+
+    m_video_preroll_sample = m_gst.gst_app_sink_try_pull_preroll(
+        (GstAppSink *)m_video_sink, 3 * GST_SECOND);
+    if (!m_video_preroll_sample) {
+        set_error("Custom GStreamer pipeline did not preroll a video packet.");
+        return AVB_ERROR_STREAM_NOT_FOUND;
+    }
+
+    GstCaps *vcaps = m_gst.gst_sample_get_caps(m_video_preroll_sample);
+    avb_video_stream_info stream{};
+    stream.stream_index = 0;
+    stream.duration_sec = m_duration;
+    stream.time_base_num = 1;
+    stream.time_base_den = (int)GST_SECOND;
+    m_video_codec_name = caps_to_codec_name(m_gst, vcaps);
+    stream.codec_name = m_video_codec_name.empty() ? nullptr : m_video_codec_name.c_str();
+    if (vcaps) {
+        GstStructure *str = m_gst.gst_caps_get_structure(vcaps, 0);
+        if (str) {
+            m_gst.gst_structure_get_int(str, "width", &m_width);
+            m_gst.gst_structure_get_int(str, "height", &m_height);
+            int fn = 0, fd = 0;
+            if (m_gst.gst_structure_get_fraction(str, "framerate", &fn, &fd) && fd != 0)
+                m_frame_rate = (double)fn / fd;
+        }
+    }
+    stream.width = m_width;
+    stream.height = m_height;
+    stream.frame_rate = m_frame_rate;
+
+    const avb_video_decoder_plugin *plugin =
+        avb_find_video_decoder_plugin(stream, options);
+    if (!plugin) return AVB_ERROR_STREAM_NOT_FOUND;
+
+    void *ctx = nullptr;
+    avb_result res = plugin->open(&ctx, &stream, &options);
+    if (res != AVB_OK) {
+        set_error("Custom video decoder '%s' failed to open.",
+                  plugin->name ? plugin->name : "(unnamed)");
+        return res;
+    }
+    m_custom_video_decoder = plugin;
+    m_custom_video_ctx = ctx;
+    m_custom_pipeline = true;
+    m_video_format = options.video_format;
+
+    if (m_audio_sink) {
+        GstSample *as = m_gst.gst_app_sink_try_pull_preroll(
+            (GstAppSink *)m_audio_sink, 3 * GST_SECOND);
+        if (as) {
+            GstCaps *acaps = m_gst.gst_sample_get_caps(as);
+            if (acaps) {
+                GstStructure *str = m_gst.gst_caps_get_structure(acaps, 0);
+                if (str) {
+                    m_gst.gst_structure_get_int(str, "rate", &m_out_sample_rate);
+                    m_gst.gst_structure_get_int(str, "channels", &m_out_channels);
+                }
+            }
+            m_gst.gst_mini_object_unref((GstMiniObject *)as);
+        } else {
+            m_gst.gst_object_unref(m_audio_sink);
+            m_audio_sink = nullptr;
+        }
+        m_req_sample_rate = options.audio_sample_rate;
+        m_req_channels = options.audio_channels;
+        m_audio_track = 0;
+        m_audio_track_count = m_audio_sink ? 1 : 0;
+    }
+
+    GError *uri_err = nullptr;
+    gchar *uri = m_gst.gst_filename_to_uri(path, &uri_err);
+    if (uri) {
+        std::string custom_video_codec = m_video_codec_name;
+        discover_codec_names(uri);
+        m_video_codec_name = custom_video_codec;
+        m_gst.g_free(uri);
+    } else {
+        m_gst.g_clear_error(&uri_err);
+    }
+
+    m_gst.gst_element_set_state(m_pipeline, GST_STATE_PLAYING);
+    return AVB_OK;
+}
+
 avb_result AvbBackendGStreamer::open_file(const char *path, const avb_decode_options &options) {
     if (!m_libs_loaded) return AVB_ERROR_BACKEND_NOT_AVAILABLE;
 
@@ -171,6 +346,14 @@ avb_result AvbBackendGStreamer::open_file(const char *path, const avb_decode_opt
     if (!options.enable_audio && !options.enable_video) {
         set_error("Neither audio nor video requested.");
         return AVB_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (options.enable_video && options.enable_custom_video_decoders &&
+        avb_is_compressed_format(options.video_format)) {
+        avb_result custom_res = open_custom_file(path, options);
+        if (custom_res == AVB_OK) return AVB_OK;
+        if (custom_res != AVB_ERROR_STREAM_NOT_FOUND) return custom_res;
+        close_internal();
     }
 
     GError *err = nullptr;
@@ -197,7 +380,11 @@ avb_result AvbBackendGStreamer::open_file(const char *path, const avb_decode_opt
         case AVB_PIXEL_FORMAT_I420:  m_video_format = AVB_PIXEL_FORMAT_I420;  vfmt = "I420"; break;
         case AVB_PIXEL_FORMAT_BGRA8:
         case AVB_PIXEL_FORMAT_UNKNOWN:
-        default:                     m_video_format = AVB_PIXEL_FORMAT_BGRA8; vfmt = "BGRA"; break;
+                                      m_video_format = AVB_PIXEL_FORMAT_BGRA8; vfmt = "BGRA"; break;
+        default:
+            set_error("Requested video pixel format is not supported by GStreamer conversion.");
+            m_gst.g_free(uri);
+            return AVB_ERROR_INVALID_ARGUMENT;
     }
 
     int flags = 0;
@@ -411,6 +598,12 @@ avb_result AvbBackendGStreamer::seek(double seconds) {
     m_audio_buf_pts = -1.0;
     m_audio_eof = false;
     m_seek_target = seconds;
+    if (m_custom_video_decoder && m_custom_video_decoder->flush)
+        m_custom_video_decoder->flush(m_custom_video_ctx);
+    if (m_video_preroll_sample) {
+        m_gst.gst_mini_object_unref((GstMiniObject *)m_video_preroll_sample);
+        m_video_preroll_sample = nullptr;
+    }
     return AVB_OK;
 }
 
@@ -495,7 +688,69 @@ double AvbBackendGStreamer::audio_next_pts() {
     return m_audio_buf_pts;
 }
 
+avb_result AvbBackendGStreamer::read_custom_video_frame(avb_video_frame &out_frame) {
+    if (!m_custom_video_decoder || !m_custom_video_ctx || !m_video_sink)
+        return AVB_ERROR_STREAM_NOT_FOUND;
+
+    while (true) {
+        GstSample *sample = m_video_preroll_sample;
+        m_video_preroll_sample = nullptr;
+        if (!sample)
+            sample = m_gst.gst_app_sink_pull_sample((GstAppSink *)m_video_sink);
+        if (!sample) return AVB_ERROR_EOF;
+
+        GstBuffer *buf = m_gst.gst_sample_get_buffer(sample);
+        if (!buf) {
+            m_gst.gst_mini_object_unref((GstMiniObject *)sample);
+            return AVB_ERROR_DECODE_FAILED;
+        }
+
+        double pts_sec = GST_BUFFER_PTS_IS_VALID(buf)
+            ? (double)GST_BUFFER_PTS(buf) / GST_SECOND : -1.0;
+        if (m_seek_target >= 0.0 && pts_sec >= 0.0 &&
+            pts_sec < m_seek_target - 1e-3) {
+            m_gst.gst_mini_object_unref((GstMiniObject *)sample);
+            continue;
+        }
+        m_seek_target = -1.0;
+
+        GstMapInfo map;
+        memset(&map, 0, sizeof(map));
+        if (!m_gst.gst_buffer_map(buf, &map, GST_MAP_READ)) {
+            m_gst.gst_mini_object_unref((GstMiniObject *)sample);
+            return AVB_ERROR_DECODE_FAILED;
+        }
+
+        avb_encoded_packet packet{};
+        packet.data = map.data;
+        packet.size = (int)map.size;
+        packet.pts_sec = pts_sec;
+        packet.duration_sec = GST_BUFFER_DURATION_IS_VALID(buf)
+            ? (double)GST_BUFFER_DURATION(buf) / GST_SECOND : -1.0;
+        packet.keyframe = !GST_BUFFER_FLAG_IS_SET(buf, GST_BUFFER_FLAG_DELTA_UNIT);
+        packet.stream_index = 0;
+        packet.pts = GST_BUFFER_PTS_IS_VALID(buf) ? (int64_t)GST_BUFFER_PTS(buf) : -1;
+        packet.dts = GST_BUFFER_DTS_IS_VALID(buf) ? (int64_t)GST_BUFFER_DTS(buf) : -1;
+        packet.duration = GST_BUFFER_DURATION_IS_VALID(buf) ? (int64_t)GST_BUFFER_DURATION(buf) : -1;
+        packet.time_base_num = 1;
+        packet.time_base_den = (int)GST_SECOND;
+
+        avb_result res = m_custom_video_decoder->decode_packet(
+            m_custom_video_ctx, &packet, &out_frame);
+        m_gst.gst_buffer_unmap(buf, &map);
+        m_gst.gst_mini_object_unref((GstMiniObject *)sample);
+
+        if (res == AVB_OK) {
+            if (out_frame.pts_sec < 0.0) out_frame.pts_sec = pts_sec;
+            return AVB_OK;
+        }
+        if (res == AVB_ERROR_AGAIN) continue;
+        return res;
+    }
+}
+
 avb_result AvbBackendGStreamer::read_video_frame(avb_video_frame &out_frame) {
+    if (m_custom_pipeline) return read_custom_video_frame(out_frame);
     if (!m_video_sink) return AVB_ERROR_STREAM_NOT_FOUND;
 
     while (true) {
@@ -588,6 +843,12 @@ avb_result AvbBackendGStreamer::read_video_frame(avb_video_frame &out_frame) {
 }
 
 void AvbBackendGStreamer::release_video_frame(avb_video_frame &frame) {
+    if (m_custom_pipeline) {
+        if (m_custom_video_decoder && m_custom_video_decoder->release_frame)
+            m_custom_video_decoder->release_frame(m_custom_video_ctx, &frame);
+        memset(&frame, 0, sizeof(frame));
+        return;
+    }
     // Output buffer is backend-owned and reused on the next read; just zero the
     // caller's struct so stale pointers can't be used by accident.
     memset(&frame, 0, sizeof(frame));

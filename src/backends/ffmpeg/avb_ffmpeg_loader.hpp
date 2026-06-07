@@ -39,6 +39,7 @@ struct AvbFFmpegFuncs {
     void (*avcodec_flush_buffers)(AVCodecContext *);
     void (*avcodec_free_context)(AVCodecContext **);
     AVPacket *(*av_packet_alloc)();
+    int (*av_new_packet)(AVPacket *, int);
     void (*av_packet_free)(AVPacket **);
     void (*av_packet_unref)(AVPacket *);
     void (*av_packet_move_ref)(AVPacket *, AVPacket *);

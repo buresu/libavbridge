@@ -63,6 +63,7 @@ avb_decode_options avb_decode_options_default(void) {
     o.video_format       = AVB_PIXEL_FORMAT_UNKNOWN;
     o.audio_sample_rate  = 0;
     o.audio_channels     = 0;
+    o.enable_custom_video_decoders = 1;
     return o;
 }
 

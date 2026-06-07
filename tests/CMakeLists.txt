@@ -26,6 +26,18 @@ if(AVB_BUILD_SHARED)
     target_compile_definitions(avb_io PRIVATE AVB_USING_SHARED)
 endif()
 
+add_executable(avb_custom_decoder custom_decoder.cpp)
+target_link_libraries(avb_custom_decoder PRIVATE avbridge)
+if(AVB_BUILD_SHARED)
+    target_compile_definitions(avb_custom_decoder PRIVATE AVB_USING_SHARED)
+endif()
+
+add_executable(avb_custom_encoder custom_encoder.cpp)
+target_link_libraries(avb_custom_encoder PRIVATE avbridge)
+if(AVB_BUILD_SHARED)
+    target_compile_definitions(avb_custom_encoder PRIVATE AVB_USING_SHARED)
+endif()
+
 find_program(FFMPEG_EXECUTABLE ffmpeg)
 
 if(FFMPEG_EXECUTABLE)
@@ -48,6 +60,8 @@ if(FFMPEG_EXECUTABLE)
     add_dependencies(avb_roundtrip avb_conformance_fixture)
     add_dependencies(avb_codecs avb_conformance_fixture)
     add_dependencies(avb_io avb_conformance_fixture)
+    add_dependencies(avb_custom_decoder avb_conformance_fixture)
+    add_dependencies(avb_custom_encoder avb_conformance_fixture)
 
     # The conformance contract is backend-agnostic, so run it against every
     # backend compiled into this build (each skips itself if not present). A
@@ -71,6 +85,20 @@ if(FFMPEG_EXECUTABLE)
     # Wide codec/pixel-format coverage via the FFmpeg backend (skips if absent).
     add_test(NAME codecs COMMAND avb_codecs "${AVB_FIXTURE}" "${AVB_OUT}/codec")
     set_tests_properties(codecs PROPERTIES SKIP_RETURN_CODE 77)
+    add_test(NAME custom_decoder_ffmpeg
+             COMMAND avb_custom_decoder "${AVB_FIXTURE}" ffmpeg)
+    set_tests_properties(custom_decoder_ffmpeg PROPERTIES SKIP_RETURN_CODE 77)
+    add_test(NAME custom_encoder_ffmpeg
+             COMMAND avb_custom_encoder "${AVB_OUT}/custom_encoder_ffmpeg.mov" ffmpeg)
+    set_tests_properties(custom_encoder_ffmpeg PROPERTIES SKIP_RETURN_CODE 77)
+    if(AVB_ENABLE_GSTREAMER)
+        add_test(NAME custom_decoder_gstreamer
+                 COMMAND avb_custom_decoder "${AVB_FIXTURE}" gstreamer)
+        set_tests_properties(custom_decoder_gstreamer PROPERTIES SKIP_RETURN_CODE 77)
+        add_test(NAME custom_encoder_gstreamer
+                 COMMAND avb_custom_encoder "${AVB_OUT}/custom_encoder_gstreamer.mkv" gstreamer)
+        set_tests_properties(custom_encoder_gstreamer PROPERTIES SKIP_RETURN_CODE 77)
+    endif()
 else()
     message(WARNING
         "ffmpeg not found; the conformance test fixture cannot be generated. "

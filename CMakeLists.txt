@@ -40,6 +40,7 @@ set(AVB_SOURCES
     src/avb_error.cpp
     src/avb_backend.cpp
     src/avb_encoder.cpp
+    src/avb_video_codec_registry.cpp
 )
 
 if(AVB_ENABLE_MEDIAFOUNDATION)
