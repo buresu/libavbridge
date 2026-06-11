@@ -27,6 +27,14 @@ private:
     avb_result encode_and_mux(AVCodecContext *enc, AVStream *stream, AVFrame *frame);
     avb_result encode_audio_frame(int nb_samples); // consumes from m_audio_fifo
     avb_result write_custom_video_packet(avb_encoded_packet &packet);
+    avb_result setup_hardware_video_encoder(const avb_encode_options &options,
+                                            const AVCodec **out_codec);
+    avb_result prepare_software_video_frame(const avb_video_frame &frame, double pts_sec,
+                                            AVFrame **out_frame);
+    avb_result prepare_hardware_video_frame(const avb_video_frame &frame, double pts_sec,
+                                            AVFrame **out_frame);
+    avb_result prepare_dmabuf_video_frame(const avb_video_frame &frame, double pts_sec,
+                                          AVFrame **out_frame);
 
     AvbFFmpegFuncs m_ff{};
     bool m_libs_loaded = false;
@@ -41,6 +49,10 @@ private:
     avb_encoded_video_stream m_custom_video_stream{};
     SwsContext     *m_sws         = nullptr;
     AVFrame        *m_vframe      = nullptr; // YUV420P, reused
+    AVFrame        *m_hw_vframe   = nullptr;
+    AVFrame        *m_drm_import_frame = nullptr;
+    AVBufferRef    *m_hw_device_ctx = nullptr;
+    AVBufferRef    *m_hw_frames_ctx = nullptr;
     AVPacket       *m_packet      = nullptr;
     AVPixelFormat    m_src_av_fmt   = AV_PIX_FMT_BGRA;
     avb_pixel_format m_input_format = AVB_PIXEL_FORMAT_BGRA8;
@@ -51,6 +63,9 @@ private:
     long            m_video_index = 0;  // for derived PTS
     bool            m_has_video   = false;
     bool            m_custom_video = false;
+    bool            m_hw_video     = false;
+    avb_hardware_device m_hw_device = AVB_HW_DEVICE_AUTO;
+    AVPixelFormat   m_hw_pix_fmt   = AV_PIX_FMT_NONE;
 
     // Audio
     AVCodecContext *m_aenc          = nullptr;

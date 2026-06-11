@@ -25,6 +25,8 @@ private:
     void close_internal();
     avb_result check_bus_error(); // poll the bus, surface any ERROR message
     avb_result write_custom_video_packet(avb_encoded_packet &packet, double fallback_pts);
+    avb_result update_dmabuf_caps(const avb_video_frame &frame);
+    GstBuffer *build_dmabuf_buffer(const avb_video_frame &frame);
 
     AvbGstFuncs m_gst{};
     bool m_libs_loaded = false;
@@ -43,6 +45,10 @@ private:
     double m_frame_rate = 30.0;
     int    m_fps_n = 30; // framerate numerator (denominator fixed at 1)
     avb_pixel_format m_input_format = AVB_PIXEL_FORMAT_BGRA8;
+    avb_video_memory_type m_input_memory = AVB_VIDEO_MEMORY_CPU;
+    bool   m_hw_video = false;
+    uint32_t m_dmabuf_caps_format = 0;
+    uint64_t m_dmabuf_caps_modifier = UINT64_MAX;
 
     int     m_sample_rate = 0;
     int     m_channels    = 0;

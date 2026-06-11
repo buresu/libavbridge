@@ -145,7 +145,8 @@ if(AVB_ENABLE_GSTREAMER)
     # at runtime via dlopen (see avb_gstreamer_loader.cpp); we never link them.
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(GST REQUIRED gstreamer-1.0 gstreamer-app-1.0
-                                   gstreamer-pbutils-1.0 gobject-2.0 glib-2.0)
+                                   gstreamer-pbutils-1.0 gstreamer-video-1.0
+                                   gstreamer-allocators-1.0 gobject-2.0 glib-2.0)
     target_include_directories(avbridge PRIVATE ${GST_INCLUDE_DIRS})
 
     # Link only dl for runtime loading — no GStreamer libraries at build time.

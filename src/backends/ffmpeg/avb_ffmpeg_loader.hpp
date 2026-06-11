@@ -6,6 +6,8 @@ extern "C" {
 #include <libavutil/avutil.h>
 #include <libavutil/opt.h>
 #include <libavutil/channel_layout.h>
+#include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_drm.h>
 #include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
 }
@@ -31,6 +33,7 @@ struct AvbFFmpegFuncs {
 
     // avcodec
     const AVCodec *(*avcodec_find_decoder)(enum AVCodecID);
+    const AVCodecHWConfig *(*avcodec_get_hw_config)(const AVCodec *, int);
     AVCodecContext *(*avcodec_alloc_context3)(const AVCodec *);
     int (*avcodec_parameters_to_context)(AVCodecContext *, const AVCodecParameters *);
     int (*avcodec_open2)(AVCodecContext *, const AVCodec *, AVDictionary **);
@@ -48,6 +51,7 @@ struct AvbFFmpegFuncs {
     AVFrame *(*av_frame_alloc)();
     void (*av_frame_free)(AVFrame **);
     void (*av_frame_unref)(AVFrame *);
+    int (*av_frame_ref)(AVFrame *, const AVFrame *);
     int (*av_frame_get_buffer)(AVFrame *, int);
     int (*av_samples_get_buffer_size)(int *, int, int, enum AVSampleFormat, int);
     void *(*av_malloc)(size_t);
@@ -87,12 +91,24 @@ struct AvbFFmpegFuncs {
     int (*avio_closep)(AVIOContext **);
     // avcodec
     const AVCodec *(*avcodec_find_encoder)(enum AVCodecID);
+    const AVCodec *(*avcodec_find_encoder_by_name)(const char *);
     int (*avcodec_send_frame)(AVCodecContext *, const AVFrame *);
     int (*avcodec_receive_packet)(AVCodecContext *, AVPacket *);
     int (*avcodec_parameters_from_context)(AVCodecParameters *, const AVCodecContext *);
     void (*av_packet_rescale_ts)(AVPacket *, AVRational, AVRational);
     // avutil
     int (*av_frame_make_writable)(AVFrame *);
+    int (*av_hwdevice_ctx_create)(AVBufferRef **, enum AVHWDeviceType, const char *,
+                                  AVDictionary *, int);
+    AVBufferRef *(*av_hwframe_ctx_alloc)(AVBufferRef *);
+    int (*av_hwframe_ctx_init)(AVBufferRef *);
+    int (*av_hwframe_get_buffer)(AVBufferRef *, AVFrame *, int);
+    int (*av_hwframe_map)(AVFrame *, const AVFrame *, int);
+    int (*av_hwframe_transfer_data)(AVFrame *, const AVFrame *, int);
+    AVBufferRef *(*av_buffer_create)(uint8_t *, size_t,
+                                     void (*)(void *, uint8_t *), void *, int);
+    AVBufferRef *(*av_buffer_ref)(const AVBufferRef *);
+    void (*av_buffer_unref)(AVBufferRef **);
     int (*av_dict_set)(AVDictionary **, const char *, const char *, int);
     void (*av_dict_free)(AVDictionary **);
     AVRational (*av_d2q)(double, int);

@@ -6,6 +6,8 @@
 static void *g_handle_gst     = nullptr;
 static void *g_handle_gstapp  = nullptr;
 static void *g_handle_pbutils = nullptr;
+static void *g_handle_gstvideo = nullptr;
+static void *g_handle_gstallocators = nullptr;
 static void *g_handle_gobject = nullptr;
 static void *g_handle_glib    = nullptr;
 
@@ -30,20 +32,26 @@ bool avb_gst_load(AvbGstFuncs &out_funcs, char *err_buf, int err_buf_size) {
     const char *gst_names[]     = { "libgstreamer-1.0.so.0", "libgstreamer-1.0.so" };
     const char *gstapp_names[]  = { "libgstapp-1.0.so.0",    "libgstapp-1.0.so" };
     const char *pbutils_names[] = { "libgstpbutils-1.0.so.0","libgstpbutils-1.0.so" };
+    const char *gstvideo_names[] = { "libgstvideo-1.0.so.0", "libgstvideo-1.0.so" };
+    const char *gstallocators_names[] = { "libgstallocators-1.0.so.0", "libgstallocators-1.0.so" };
     const char *gobject_names[] = { "libgobject-2.0.so.0",   "libgobject-2.0.so" };
     const char *glib_names[]    = { "libglib-2.0.so.0",      "libglib-2.0.so" };
 
     g_handle_gst     = try_open(gst_names,     2);
     g_handle_gstapp  = try_open(gstapp_names,  2);
     g_handle_pbutils = try_open(pbutils_names, 2);
+    g_handle_gstvideo = try_open(gstvideo_names, 2);
+    g_handle_gstallocators = try_open(gstallocators_names, 2);
     g_handle_gobject = try_open(gobject_names, 2);
     g_handle_glib    = try_open(glib_names,    2);
 
     if (!g_handle_gst || !g_handle_gstapp || !g_handle_pbutils ||
+        !g_handle_gstvideo || !g_handle_gstallocators ||
         !g_handle_gobject || !g_handle_glib) {
         snprintf(err_buf, err_buf_size,
             "GStreamer backend unavailable: libgstreamer-1.0/libgstapp-1.0/"
-            "libgstpbutils-1.0/libgobject-2.0/libglib-2.0 could not be loaded. "
+            "libgstpbutils-1.0/libgstvideo-1.0/libgstallocators-1.0/"
+            "libgobject-2.0/libglib-2.0 could not be loaded. "
             "Install GStreamer runtime libraries and try again.");
         avb_gst_unload();
         return false;
@@ -59,6 +67,7 @@ bool avb_gst_load(AvbGstFuncs &out_funcs, char *err_buf, int err_buf_size) {
     LOAD_SYM(g_handle_gst, out_funcs, gst_bin_get_by_name);
     LOAD_SYM(g_handle_gst, out_funcs, gst_caps_get_structure);
     LOAD_SYM(g_handle_gst, out_funcs, gst_structure_get_name);
+    LOAD_SYM(g_handle_gst, out_funcs, gst_structure_get_string);
     LOAD_SYM(g_handle_gst, out_funcs, gst_structure_get_int);
     LOAD_SYM(g_handle_gst, out_funcs, gst_structure_get_fraction);
     LOAD_SYM(g_handle_gst, out_funcs, gst_sample_get_buffer);
@@ -66,21 +75,28 @@ bool avb_gst_load(AvbGstFuncs &out_funcs, char *err_buf, int err_buf_size) {
     LOAD_SYM(g_handle_gst, out_funcs, gst_buffer_map);
     LOAD_SYM(g_handle_gst, out_funcs, gst_buffer_unmap);
     LOAD_SYM(g_handle_gst, out_funcs, gst_buffer_get_size);
+    LOAD_SYM(g_handle_gst, out_funcs, gst_buffer_n_memory);
+    LOAD_SYM(g_handle_gst, out_funcs, gst_buffer_peek_memory);
+    LOAD_SYM(g_handle_gst, out_funcs, gst_mini_object_ref);
     LOAD_SYM(g_handle_gst, out_funcs, gst_mini_object_unref);
     LOAD_SYM(g_handle_gst, out_funcs, gst_object_unref);
     LOAD_SYM(g_handle_gst, out_funcs, gst_filename_to_uri);
     LOAD_SYM(g_handle_gst, out_funcs, gst_parse_launch);
     LOAD_SYM(g_handle_gst, out_funcs, gst_caps_from_string);
     LOAD_SYM(g_handle_gst, out_funcs, gst_buffer_new_allocate);
+    LOAD_SYM(g_handle_gst, out_funcs, gst_buffer_new);
+    LOAD_SYM(g_handle_gst, out_funcs, gst_buffer_append_memory);
     LOAD_SYM(g_handle_gst, out_funcs, gst_buffer_fill);
     LOAD_SYM(g_handle_gst, out_funcs, gst_element_get_bus);
     LOAD_SYM(g_handle_gst, out_funcs, gst_bus_timed_pop_filtered);
     LOAD_SYM(g_handle_gst, out_funcs, gst_message_parse_error);
+    LOAD_SYM(g_handle_gst, out_funcs, gst_query_add_allocation_meta);
 
     LOAD_SYM(g_handle_gstapp, out_funcs, gst_app_sink_pull_sample);
     LOAD_SYM(g_handle_gstapp, out_funcs, gst_app_sink_try_pull_preroll);
     LOAD_SYM(g_handle_gstapp, out_funcs, gst_app_sink_set_max_buffers);
     LOAD_SYM(g_handle_gstapp, out_funcs, gst_app_sink_set_drop);
+    LOAD_SYM(g_handle_gstapp, out_funcs, gst_app_sink_set_callbacks);
     LOAD_SYM(g_handle_gstapp, out_funcs, gst_app_src_push_buffer);
     LOAD_SYM(g_handle_gstapp, out_funcs, gst_app_src_end_of_stream);
 
@@ -90,6 +106,15 @@ bool avb_gst_load(AvbGstFuncs &out_funcs, char *err_buf, int err_buf_size) {
     LOAD_SYM(g_handle_pbutils, out_funcs, gst_discoverer_info_get_video_streams);
     LOAD_SYM(g_handle_pbutils, out_funcs, gst_discoverer_stream_info_get_caps);
     LOAD_SYM(g_handle_pbutils, out_funcs, gst_discoverer_stream_info_list_free);
+
+    LOAD_SYM(g_handle_gstvideo, out_funcs, gst_buffer_get_video_meta);
+    LOAD_SYM(g_handle_gstvideo, out_funcs, gst_buffer_add_video_meta_full);
+    LOAD_SYM(g_handle_gstvideo, out_funcs, gst_video_meta_api_get_type);
+
+    LOAD_SYM(g_handle_gstallocators, out_funcs, gst_dmabuf_allocator_new);
+    LOAD_SYM(g_handle_gstallocators, out_funcs, gst_dmabuf_allocator_alloc);
+    LOAD_SYM(g_handle_gstallocators, out_funcs, gst_is_dmabuf_memory);
+    LOAD_SYM(g_handle_gstallocators, out_funcs, gst_dmabuf_memory_get_fd);
 
     LOAD_SYM(g_handle_gobject, out_funcs, g_object_set);
     LOAD_SYM(g_handle_gobject, out_funcs, g_object_get);
@@ -105,6 +130,8 @@ bool avb_gst_load(AvbGstFuncs &out_funcs, char *err_buf, int err_buf_size) {
 void avb_gst_unload() {
     // Note: gst_init is not paired with gst_deinit here; the process may keep
     // GStreamer initialised for its lifetime, which is the common pattern.
+    if (g_handle_gstallocators) { dlclose(g_handle_gstallocators); g_handle_gstallocators = nullptr; }
+    if (g_handle_gstvideo) { dlclose(g_handle_gstvideo); g_handle_gstvideo = nullptr; }
     if (g_handle_pbutils) { dlclose(g_handle_pbutils); g_handle_pbutils = nullptr; }
     if (g_handle_gstapp)  { dlclose(g_handle_gstapp);  g_handle_gstapp  = nullptr; }
     if (g_handle_gst)     { dlclose(g_handle_gst);     g_handle_gst     = nullptr; }

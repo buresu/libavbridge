@@ -144,6 +144,12 @@ static FourCharCode avb_normalize_fourcc(uint32_t tag) {
 
 avb_result AvbEncoderAVFoundation::open(const char *path, const avb_encode_options &options) {
     @autoreleasepool {
+        if (options.video.enable &&
+            (options.video.input_memory != AVB_VIDEO_MEMORY_CPU ||
+             options.video.hardware_policy == AVB_HARDWARE_REQUIRE)) {
+            m_last_error = "AVFoundation native hardware video input is not implemented yet.";
+            return AVB_ERROR_OPEN_FAILED;
+        }
         NSString *ns_path = [NSString stringWithUTF8String:path];
         NSURL *url = [NSURL fileURLWithPath:ns_path];
 
@@ -176,6 +182,7 @@ avb_result AvbEncoderAVFoundation::open(const char *path, const avb_encode_optio
             custom_info.height = m_impl->height;
             custom_info.frame_rate = m_impl->frame_rate;
             custom_info.input_format = m_impl->input_format;
+            custom_info.input_memory = options.video.input_memory;
             custom_info.codec = options.video.codec;
             custom_info.bitrate = options.video.bitrate;
             const avb_video_encoder_plugin *plugin =

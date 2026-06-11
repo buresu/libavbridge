@@ -45,6 +45,16 @@ private:
     avb_result open_custom_video_decoder(AVStream *st,
                                          const avb_decode_options &options);
     avb_result read_custom_video_frame(avb_video_frame &out_frame);
+    avb_result setup_hardware_decoder(const AVCodec *codec,
+                                      const avb_decode_options &options);
+    avb_result fill_cpu_video_frame(AVFrame *frame, double pts_sec,
+                                    avb_video_frame &out_frame);
+    avb_result fill_native_video_frame(AVFrame *frame, double pts_sec,
+                                       avb_video_frame &out_frame);
+    avb_result fill_dmabuf_video_frame(AVFrame *frame, double pts_sec,
+                                       avb_video_frame &out_frame);
+    static AVPixelFormat get_hw_format(AVCodecContext *ctx,
+                                       const AVPixelFormat *pix_fmts);
 
     AvbFFmpegFuncs m_ff{};
     bool m_libs_loaded = false;
@@ -57,6 +67,10 @@ private:
     AVPacket        *m_packet          = nullptr;
     AVFrame         *m_audio_frame     = nullptr;
     AVFrame         *m_video_frame     = nullptr; // raw decoded video frame
+    AVFrame         *m_hw_transfer_frame = nullptr;
+    AVFrame         *m_native_video_frame = nullptr;
+    AVFrame         *m_drm_video_frame = nullptr;
+    AVBufferRef     *m_hw_device_ctx   = nullptr;
     SwrContext      *m_swr             = nullptr;
     SwsContext      *m_sws             = nullptr; // pixel format conversion
 
@@ -75,6 +89,9 @@ private:
     // Requested output pixel format and its libav equivalent.
     avb_pixel_format m_video_format   = AVB_PIXEL_FORMAT_BGRA8;
     AVPixelFormat    m_dst_av_fmt     = AV_PIX_FMT_BGRA;
+    avb_video_memory_type m_video_memory = AVB_VIDEO_MEMORY_CPU;
+    avb_hardware_device m_hw_device = AVB_HW_DEVICE_AUTO;
+    AVPixelFormat    m_hw_pix_fmt      = AV_PIX_FMT_NONE;
 
     // Demuxed-but-not-yet-decoded packets, separated per stream. Filled lazily
     // by demux_next() when a packet for the other stream is encountered.

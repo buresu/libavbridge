@@ -27,11 +27,40 @@ build time — the relevant runtime libraries must be installed on the target
 system. If the selected backend's libraries are missing, decoding is
 unavailable and opening fails with a clear backend-unavailable error.
 
+## Hardware video frames
+
+`avb_video_frame` can describe either CPU-readable planes or backend-native
+hardware frames. Use `avb_decode_options::video_memory` and
+`hardware_policy`/`hardware_device` to request native decode output, and use
+`avb_video_encode_params::input_memory` plus the same hardware options to feed
+native frames into encoders.
+
+Implemented native paths:
+
+- FFmpeg decode returns backend-owned `AVFrame*` handles for hardware frames;
+  VAAPI also exposes the `VASurfaceID` through `native_handle_id`.
+- FFmpeg encode supports VAAPI hardware encoding, including CPU-frame upload and
+  direct `AVFrame*` native input when it matches the encoder device.
+- GStreamer decode can request `video/x-raw(memory:VASurface)` and returns a
+  `GstBuffer*` native handle.
+- GStreamer encode can push native `GstBuffer*` input into VA encoders, or upload
+  CPU input through `vapostproc`.
+- FFmpeg decode can export hardware frames as DRM PRIME / DMABUF descriptors,
+  filling `dmabuf_fd[]`, `plane_offset[]`, `plane_stride[]`,
+  `dmabuf_modifier[]`, and `drm_format`.
+- GStreamer decode can request `video/x-raw(memory:DMABuf)` and fill the same
+  DMABUF fields from the returned buffer.
+- GStreamer encode can import DMABUF input either by reusing a `GstBuffer*`
+  native handle or by wrapping the `dmabuf_fd[]` planes into a new buffer.
+- FFmpeg encode can import DMABUF input into the VAAPI hardware encoder path by
+  wrapping the plane descriptors as a DRM PRIME `AVFrame`.
+
 ### Runtime libraries
 
 GStreamer backend (Linux default):
 
 - `libgstreamer-1.0`, `libgstapp-1.0`, `libgstpbutils-1.0`
+- `libgstvideo-1.0`, `libgstallocators-1.0`
 - `libglib-2.0`, `libgobject-2.0`
 - GStreamer plugins: `base`, `good` (plus others for additional codecs)
 

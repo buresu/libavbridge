@@ -6,6 +6,8 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <sys/stat.h>
+#include <unistd.h>
 
 static AVCodecID avb_ff_video_codec_id(avb_codec codec) {
     switch (codec) {
@@ -15,6 +17,82 @@ static AVCodecID avb_ff_video_codec_id(avb_codec codec) {
         case AVB_CODEC_HAP:  return AV_CODEC_ID_HAP;
         default:             return AV_CODEC_ID_NONE;
     }
+}
+
+static AVHWDeviceType avb_ff_encode_hw_type(avb_hardware_device device) {
+    switch (device) {
+        case AVB_HW_DEVICE_VAAPI:        return AV_HWDEVICE_TYPE_VAAPI;
+        case AVB_HW_DEVICE_CUDA:         return AV_HWDEVICE_TYPE_CUDA;
+        case AVB_HW_DEVICE_QSV:          return AV_HWDEVICE_TYPE_QSV;
+        case AVB_HW_DEVICE_D3D11VA:      return AV_HWDEVICE_TYPE_D3D11VA;
+        case AVB_HW_DEVICE_VIDEOTOOLBOX: return AV_HWDEVICE_TYPE_VIDEOTOOLBOX;
+        default:                         return AV_HWDEVICE_TYPE_NONE;
+    }
+}
+
+static const char *const *avb_ff_hw_encoder_names(avb_codec codec,
+                                                  avb_hardware_device device) {
+    static const char *h264_vaapi[] = {"h264_vaapi", nullptr};
+    static const char *hevc_vaapi[] = {"hevc_vaapi", nullptr};
+    static const char *h264_cuda[] = {"h264_nvenc", nullptr};
+    static const char *hevc_cuda[] = {"hevc_nvenc", nullptr};
+    static const char *h264_qsv[] = {"h264_qsv", nullptr};
+    static const char *hevc_qsv[] = {"hevc_qsv", nullptr};
+    static const char *h264_d3d11[] = {"h264_amf", nullptr};
+    static const char *hevc_d3d11[] = {"hevc_amf", nullptr};
+    static const char *h264_vt[] = {"h264_videotoolbox", nullptr};
+    static const char *hevc_vt[] = {"hevc_videotoolbox", nullptr};
+    static const char *none[] = {nullptr};
+
+    avb_codec c = codec == AVB_CODEC_AUTO ? AVB_CODEC_H264 : codec;
+    switch (device) {
+        case AVB_HW_DEVICE_VAAPI:
+            return c == AVB_CODEC_HEVC ? hevc_vaapi : c == AVB_CODEC_H264 ? h264_vaapi : none;
+        case AVB_HW_DEVICE_CUDA:
+            return c == AVB_CODEC_HEVC ? hevc_cuda : c == AVB_CODEC_H264 ? h264_cuda : none;
+        case AVB_HW_DEVICE_QSV:
+            return c == AVB_CODEC_HEVC ? hevc_qsv : c == AVB_CODEC_H264 ? h264_qsv : none;
+        case AVB_HW_DEVICE_D3D11VA:
+        case AVB_HW_DEVICE_AMF:
+            return c == AVB_CODEC_HEVC ? hevc_d3d11 : c == AVB_CODEC_H264 ? h264_d3d11 : none;
+        case AVB_HW_DEVICE_VIDEOTOOLBOX:
+            return c == AVB_CODEC_HEVC ? hevc_vt : c == AVB_CODEC_H264 ? h264_vt : none;
+        default:
+#if defined(__linux__)
+            return c == AVB_CODEC_HEVC ? hevc_vaapi : c == AVB_CODEC_H264 ? h264_vaapi : none;
+#elif defined(_WIN32)
+            return c == AVB_CODEC_HEVC ? hevc_d3d11 : c == AVB_CODEC_H264 ? h264_d3d11 : none;
+#elif defined(__APPLE__)
+            return c == AVB_CODEC_HEVC ? hevc_vt : c == AVB_CODEC_H264 ? h264_vt : none;
+#else
+            return none;
+#endif
+    }
+}
+
+static void avb_free_drm_descriptor(void *, uint8_t *data) {
+    auto *drm = reinterpret_cast<AVDRMFrameDescriptor *>(data);
+    if (!drm) return;
+    for (int i = 0; i < drm->nb_objects && i < AV_DRM_MAX_PLANES; ++i) {
+        if (drm->objects[i].fd >= 0) close(drm->objects[i].fd);
+    }
+    delete drm;
+}
+
+static size_t avb_dmabuf_plane_size(const avb_video_frame &frame, int plane) {
+    int rows = frame.height;
+    if (frame.plane_count == 2 && plane == 1) rows = frame.height / 2;
+    if (frame.plane_count == 3 && plane > 0) rows = frame.height / 2;
+    if (rows <= 0 || frame.plane_stride[plane] <= 0) return 0;
+    return (size_t)frame.plane_offset[plane] +
+           (size_t)frame.plane_stride[plane] * (size_t)rows;
+}
+
+static size_t avb_dmabuf_object_size(int fd, size_t fallback) {
+    struct stat st {};
+    if (fd >= 0 && fstat(fd, &st) == 0 && st.st_size > 0)
+        return std::max((size_t)st.st_size, fallback);
+    return fallback;
 }
 
 AvbEncoderFFmpeg::AvbEncoderFFmpeg() {
@@ -46,11 +124,80 @@ void AvbEncoderFFmpeg::set_ff_error(const char *prefix, int errnum) {
     set_error("%s: %s", prefix, errbuf);
 }
 
+avb_result AvbEncoderFFmpeg::setup_hardware_video_encoder(
+    const avb_encode_options &options,
+    const AVCodec **out_codec
+) {
+    if (options.video.hardware_policy == AVB_HARDWARE_DISABLED &&
+        options.video.input_memory != AVB_VIDEO_MEMORY_DMABUF)
+        return AVB_ERROR_STREAM_NOT_FOUND;
+
+    avb_hardware_device requested = options.video.hardware_device;
+    const char *const *names = avb_ff_hw_encoder_names(options.video.codec, requested);
+    const AVCodec *codec = nullptr;
+    const char *codec_name = nullptr;
+    for (int i = 0; names[i]; ++i) {
+        codec = m_ff.avcodec_find_encoder_by_name(names[i]);
+        if (codec) { codec_name = names[i]; break; }
+    }
+    if (!codec) return AVB_ERROR_STREAM_NOT_FOUND;
+
+    avb_hardware_device device = requested;
+    if (device == AVB_HW_DEVICE_AUTO) {
+        if (strstr(codec_name, "vaapi")) device = AVB_HW_DEVICE_VAAPI;
+        else if (strstr(codec_name, "nvenc")) device = AVB_HW_DEVICE_CUDA;
+        else if (strstr(codec_name, "qsv")) device = AVB_HW_DEVICE_QSV;
+        else if (strstr(codec_name, "videotoolbox")) device = AVB_HW_DEVICE_VIDEOTOOLBOX;
+        else if (strstr(codec_name, "amf")) device = AVB_HW_DEVICE_AMF;
+    }
+
+    AVHWDeviceType hw_type = avb_ff_encode_hw_type(device);
+    if (hw_type == AV_HWDEVICE_TYPE_NONE && device == AVB_HW_DEVICE_AMF)
+        hw_type = AV_HWDEVICE_TYPE_D3D11VA;
+    if (hw_type == AV_HWDEVICE_TYPE_NONE)
+        return AVB_ERROR_STREAM_NOT_FOUND;
+    if (device != AVB_HW_DEVICE_VAAPI)
+        return AVB_ERROR_STREAM_NOT_FOUND;
+
+    AVBufferRef *device_ctx = nullptr;
+    int ret = m_ff.av_hwdevice_ctx_create(&device_ctx, hw_type, nullptr, nullptr, 0);
+    if (ret < 0) return AVB_ERROR_STREAM_NOT_FOUND;
+
+    m_hw_device_ctx = device_ctx;
+    m_hw_device = device;
+
+    if (device == AVB_HW_DEVICE_VAAPI) {
+        m_hw_pix_fmt = AV_PIX_FMT_VAAPI;
+        m_hw_frames_ctx = m_ff.av_hwframe_ctx_alloc(m_hw_device_ctx);
+        if (!m_hw_frames_ctx) {
+            set_error("av_hwframe_ctx_alloc (video encode) failed.");
+            return AVB_ERROR_OPEN_FAILED;
+        }
+        auto *frames = (AVHWFramesContext *)m_hw_frames_ctx->data;
+        frames->format = m_hw_pix_fmt;
+        frames->sw_format = AV_PIX_FMT_YUV420P;
+        frames->width = m_width;
+        frames->height = m_height;
+        frames->initial_pool_size = 8;
+        ret = m_ff.av_hwframe_ctx_init(m_hw_frames_ctx);
+        if (ret < 0) {
+            set_ff_error("av_hwframe_ctx_init (video encode)", ret);
+            return AVB_ERROR_OPEN_FAILED;
+        }
+    }
+
+    *out_codec = codec;
+    m_hw_video = true;
+    return AVB_OK;
+}
+
 void AvbEncoderFFmpeg::close_internal() {
     if (!m_libs_loaded) return;
 
     if (m_sws)    { m_ff.sws_freeContext(m_sws); m_sws = nullptr; }
     if (m_swr)    { m_ff.swr_free(&m_swr); m_swr = nullptr; }
+    if (m_drm_import_frame) { m_ff.av_frame_free(&m_drm_import_frame); m_drm_import_frame = nullptr; }
+    if (m_hw_vframe) { m_ff.av_frame_free(&m_hw_vframe); m_hw_vframe = nullptr; }
     if (m_vframe) { m_ff.av_frame_free(&m_vframe); m_vframe = nullptr; }
     if (m_aframe) { m_ff.av_frame_free(&m_aframe); m_aframe = nullptr; }
     if (m_packet) { m_ff.av_packet_free(&m_packet); m_packet = nullptr; }
@@ -62,6 +209,8 @@ void AvbEncoderFFmpeg::close_internal() {
         m_custom_video_stream = {};
     }
     if (m_venc)   { m_ff.avcodec_free_context(&m_venc); m_venc = nullptr; }
+    if (m_hw_frames_ctx) { m_ff.av_buffer_unref(&m_hw_frames_ctx); m_hw_frames_ctx = nullptr; }
+    if (m_hw_device_ctx) { m_ff.av_buffer_unref(&m_hw_device_ctx); m_hw_device_ctx = nullptr; }
     if (m_aenc)   { m_ff.avcodec_free_context(&m_aenc); m_aenc = nullptr; }
     if (m_fmt_ctx) {
         if (m_fmt_ctx->pb && !(m_fmt_ctx->oformat->flags & AVFMT_NOFILE))
@@ -70,6 +219,9 @@ void AvbEncoderFFmpeg::close_internal() {
         m_fmt_ctx = nullptr;
     }
     m_audio_fifo.clear();
+    m_hw_video = false;
+    m_hw_device = AVB_HW_DEVICE_AUTO;
+    m_hw_pix_fmt = AV_PIX_FMT_NONE;
 }
 
 avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &options) {
@@ -119,6 +271,7 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
         custom_info.height = m_height;
         custom_info.frame_rate = m_frame_rate;
         custom_info.input_format = m_input_format;
+        custom_info.input_memory = options.video.input_memory;
         custom_info.codec = options.video.codec;
         custom_info.bitrate = options.video.bitrate;
         const avb_video_encoder_plugin *plugin =
@@ -174,8 +327,18 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
                 set_error("Invalid video codec (use AUTO/H264/HEVC/VP9).");
                 return AVB_ERROR_INVALID_ARGUMENT;
         }
-        const AVCodec *vcodec = m_ff.avcodec_find_encoder(vid);
-        if (!vcodec) { set_error("No %s encoder available in this FFmpeg build.", vname); return AVB_ERROR_OPEN_FAILED; }
+        const AVCodec *vcodec = nullptr;
+        avb_result hw_res = setup_hardware_video_encoder(options, &vcodec);
+        if (hw_res != AVB_OK &&
+            (options.video.hardware_policy == AVB_HARDWARE_REQUIRE ||
+             options.video.input_memory == AVB_VIDEO_MEMORY_DMABUF)) {
+            set_error("Required FFmpeg hardware %s encoder is not available.", vname);
+            return hw_res == AVB_ERROR_OPEN_FAILED ? hw_res : AVB_ERROR_OPEN_FAILED;
+        }
+        if (!vcodec) {
+            vcodec = m_ff.avcodec_find_encoder(vid);
+            if (!vcodec) { set_error("No %s encoder available in this FFmpeg build.", vname); return AVB_ERROR_OPEN_FAILED; }
+        }
 
         m_vstream = m_ff.avformat_new_stream(m_fmt_ctx, nullptr);
         if (!m_vstream) { set_error("avformat_new_stream (video) failed."); return AVB_ERROR_OPEN_FAILED; }
@@ -184,11 +347,15 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
         if (!m_venc) { set_error("avcodec_alloc_context3 (video) failed."); return AVB_ERROR_OPEN_FAILED; }
         m_venc->width     = m_width;
         m_venc->height    = m_height;
-        m_venc->pix_fmt   = AV_PIX_FMT_YUV420P;
+        m_venc->pix_fmt   = m_hw_video ? m_hw_pix_fmt : AV_PIX_FMT_YUV420P;
         m_venc->time_base = AVRational{1, m_fps_den};
         m_venc->framerate = AVRational{m_fps_den, 1};
         if (options.video.bitrate > 0) m_venc->bit_rate = options.video.bitrate;
         if (global_header) m_venc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+        if (m_hw_video) {
+            m_venc->hw_device_ctx = m_ff.av_buffer_ref(m_hw_device_ctx);
+            if (m_hw_frames_ctx) m_venc->hw_frames_ctx = m_ff.av_buffer_ref(m_hw_frames_ctx);
+        }
 
         // Speed knobs for the common encoders. avcodec_open2 silently ignores
         // options a given encoder doesn't recognise, so it is safe to set the
@@ -212,6 +379,14 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
         m_vframe->height = m_height;
         ret = m_ff.av_frame_get_buffer(m_vframe, 0);
         if (ret < 0) { set_ff_error("av_frame_get_buffer (video)", ret); return AVB_ERROR_OPEN_FAILED; }
+        if (m_hw_video) {
+            m_hw_vframe = m_ff.av_frame_alloc();
+            m_drm_import_frame = m_ff.av_frame_alloc();
+            if (!m_hw_vframe || !m_drm_import_frame) {
+                set_error("av_frame_alloc (hardware video) failed.");
+                return AVB_ERROR_OPEN_FAILED;
+            }
+        }
 
         m_has_video = true;
         }
@@ -335,19 +510,11 @@ avb_result AvbEncoderFFmpeg::encode_and_mux(AVCodecContext *enc, AVStream *strea
     return AVB_OK;
 }
 
-avb_result AvbEncoderFFmpeg::write_video(const avb_video_frame &frame, double pts_sec) {
-    if (!m_has_video) return AVB_ERROR_INVALID_ARGUMENT;
-    if (m_custom_video) {
-        avb_encoded_packet packet{};
-        avb_result res = m_custom_video_encoder->encode_frame(
-            m_custom_video_ctx, &frame, pts_sec, &packet);
-        if (res != AVB_OK) return res;
-        res = write_custom_video_packet(packet);
-        if (m_custom_video_encoder->release_packet)
-            m_custom_video_encoder->release_packet(m_custom_video_ctx, &packet);
-        if (res == AVB_OK) m_video_index++;
-        return res;
-    }
+avb_result AvbEncoderFFmpeg::prepare_software_video_frame(
+    const avb_video_frame &frame,
+    double pts_sec,
+    AVFrame **out_frame
+) {
     if (frame.format != m_input_format) {
         set_error("Frame pixel format does not match configured input_format.");
         return AVB_ERROR_INVALID_ARGUMENT;
@@ -377,9 +544,174 @@ avb_result AvbEncoderFFmpeg::write_video(const avb_video_frame &frame, double pt
                    m_vframe->data, m_vframe->linesize);
 
     m_vframe->pts = std::llround(pts * m_fps_den);
-    m_video_index++;
+    *out_frame = m_vframe;
+    return AVB_OK;
+}
 
-    return encode_and_mux(m_venc, m_vstream, m_vframe);
+avb_result AvbEncoderFFmpeg::prepare_hardware_video_frame(
+    const avb_video_frame &frame,
+    double pts_sec,
+    AVFrame **out_frame
+) {
+    if (frame.memory_type == AVB_VIDEO_MEMORY_DMABUF) {
+        return prepare_dmabuf_video_frame(frame, pts_sec, out_frame);
+    }
+
+    double pts = pts_sec >= 0.0        ? pts_sec
+               : frame.pts_sec >= 0.0 ? frame.pts_sec
+                                       : (double)m_video_index / m_frame_rate;
+
+    if (frame.memory_type == AVB_VIDEO_MEMORY_NATIVE && frame.native_handle) {
+        auto *native = static_cast<AVFrame *>(frame.native_handle);
+        if ((AVPixelFormat)native->format == m_hw_pix_fmt) {
+            native->pts = std::llround(pts * m_fps_den);
+            *out_frame = native;
+            return AVB_OK;
+        }
+    }
+
+    AVFrame *sw_frame = nullptr;
+    avb_result res = prepare_software_video_frame(frame, pts, &sw_frame);
+    if (res != AVB_OK) return res;
+
+    m_ff.av_frame_unref(m_hw_vframe);
+    int ret = m_ff.av_hwframe_get_buffer(m_hw_frames_ctx, m_hw_vframe, 0);
+    if (ret < 0) {
+        set_ff_error("av_hwframe_get_buffer (video encode)", ret);
+        return AVB_ERROR_ENCODE_FAILED;
+    }
+    ret = m_ff.av_hwframe_transfer_data(m_hw_vframe, sw_frame, 0);
+    if (ret < 0) {
+        set_ff_error("av_hwframe_transfer_data (video encode)", ret);
+        return AVB_ERROR_ENCODE_FAILED;
+    }
+    m_hw_vframe->pts = sw_frame->pts;
+    *out_frame = m_hw_vframe;
+    return AVB_OK;
+}
+
+avb_result AvbEncoderFFmpeg::prepare_dmabuf_video_frame(
+    const avb_video_frame &frame,
+    double pts_sec,
+    AVFrame **out_frame
+) {
+    if (!m_hw_video || m_hw_device != AVB_HW_DEVICE_VAAPI || !m_drm_import_frame) {
+        set_error("FFmpeg DMABUF import currently requires the VAAPI hardware encoder path.");
+        return AVB_ERROR_INVALID_ARGUMENT;
+    }
+    if (frame.plane_count <= 0 || frame.plane_count > AVB_MAX_PLANES ||
+        frame.drm_format == 0) {
+        set_error("DMABUF frame is missing drm_format or planes.");
+        return AVB_ERROR_INVALID_ARGUMENT;
+    }
+
+    auto *drm = new AVDRMFrameDescriptor();
+    memset(drm, 0, sizeof(*drm));
+    drm->nb_objects = 0;
+    drm->nb_layers = 1;
+    drm->layers[0].format = frame.drm_format;
+    drm->layers[0].nb_planes = frame.plane_count;
+
+    for (int p = 0; p < frame.plane_count; ++p) {
+        if (frame.dmabuf_fd[p] < 0 || frame.plane_stride[p] <= 0) {
+            avb_free_drm_descriptor(nullptr, (uint8_t *)drm);
+            set_error("DMABUF frame has invalid fd or stride.");
+            return AVB_ERROR_INVALID_ARGUMENT;
+        }
+        int object_index = -1;
+        for (int prev = 0; prev < p; ++prev) {
+            if (frame.dmabuf_fd[prev] == frame.dmabuf_fd[p]) {
+                object_index = drm->layers[0].planes[prev].object_index;
+                break;
+            }
+        }
+        if (object_index < 0) {
+            if (drm->nb_objects >= AV_DRM_MAX_PLANES) {
+                avb_free_drm_descriptor(nullptr, (uint8_t *)drm);
+                set_error("DMABUF frame has too many unique fd objects.");
+                return AVB_ERROR_INVALID_ARGUMENT;
+            }
+            int owned_fd = dup(frame.dmabuf_fd[p]);
+            if (owned_fd < 0) {
+                avb_free_drm_descriptor(nullptr, (uint8_t *)drm);
+                set_error("dup(DMABUF fd) failed.");
+                return AVB_ERROR_ENCODE_FAILED;
+            }
+            object_index = drm->nb_objects++;
+            drm->objects[object_index].fd = owned_fd;
+            drm->objects[object_index].size = avb_dmabuf_object_size(
+                frame.dmabuf_fd[p], avb_dmabuf_plane_size(frame, p));
+            drm->objects[object_index].format_modifier = frame.dmabuf_modifier[p];
+        }
+        drm->layers[0].planes[p].object_index = object_index;
+        drm->layers[0].planes[p].offset = frame.plane_offset[p];
+        drm->layers[0].planes[p].pitch = frame.plane_stride[p];
+    }
+
+    m_ff.av_frame_unref(m_drm_import_frame);
+    m_drm_import_frame->format = AV_PIX_FMT_DRM_PRIME;
+    m_drm_import_frame->width = frame.width;
+    m_drm_import_frame->height = frame.height;
+    m_drm_import_frame->data[0] = (uint8_t *)drm;
+    m_drm_import_frame->buf[0] = m_ff.av_buffer_create(
+        (uint8_t *)drm, sizeof(*drm), &avb_free_drm_descriptor, nullptr, 0);
+    if (!m_drm_import_frame->buf[0]) {
+        avb_free_drm_descriptor(nullptr, (uint8_t *)drm);
+        set_error("av_buffer_create (DRM PRIME frame) failed.");
+        return AVB_ERROR_ENCODE_FAILED;
+    }
+
+    m_ff.av_frame_unref(m_hw_vframe);
+    m_hw_vframe->format = m_hw_pix_fmt;
+    m_hw_vframe->width = frame.width;
+    m_hw_vframe->height = frame.height;
+    m_hw_vframe->hw_frames_ctx = m_ff.av_buffer_ref(m_hw_frames_ctx);
+    if (!m_hw_vframe->hw_frames_ctx) {
+        m_ff.av_frame_unref(m_drm_import_frame);
+        set_error("av_buffer_ref (DMABUF import frames ctx) failed.");
+        return AVB_ERROR_ENCODE_FAILED;
+    }
+    int ret = m_ff.av_hwframe_map(m_hw_vframe, m_drm_import_frame, AV_HWFRAME_MAP_READ);
+    if (ret < 0) {
+        m_ff.av_frame_unref(m_drm_import_frame);
+        set_ff_error("av_hwframe_map (DMABUF import)", ret);
+        return AVB_ERROR_ENCODE_FAILED;
+    }
+
+    double pts = pts_sec >= 0.0        ? pts_sec
+               : frame.pts_sec >= 0.0 ? frame.pts_sec
+                                       : (double)m_video_index / m_frame_rate;
+    m_hw_vframe->pts = std::llround(pts * m_fps_den);
+    *out_frame = m_hw_vframe;
+    return AVB_OK;
+}
+
+avb_result AvbEncoderFFmpeg::write_video(const avb_video_frame &frame, double pts_sec) {
+    if (!m_has_video) return AVB_ERROR_INVALID_ARGUMENT;
+    if (m_custom_video) {
+        avb_encoded_packet packet{};
+        avb_result res = m_custom_video_encoder->encode_frame(
+            m_custom_video_ctx, &frame, pts_sec, &packet);
+        if (res != AVB_OK) return res;
+        res = write_custom_video_packet(packet);
+        if (m_custom_video_encoder->release_packet)
+            m_custom_video_encoder->release_packet(m_custom_video_ctx, &packet);
+        if (res == AVB_OK) m_video_index++;
+        return res;
+    }
+
+    AVFrame *enc_frame = nullptr;
+    avb_result prep = m_hw_video
+        ? prepare_hardware_video_frame(frame, pts_sec, &enc_frame)
+        : prepare_software_video_frame(frame, pts_sec, &enc_frame);
+    if (prep != AVB_OK) return prep;
+
+    avb_result res = encode_and_mux(m_venc, m_vstream, enc_frame);
+    if (m_hw_vframe && enc_frame == m_hw_vframe) m_ff.av_frame_unref(m_hw_vframe);
+    if (m_drm_import_frame && frame.memory_type == AVB_VIDEO_MEMORY_DMABUF)
+        m_ff.av_frame_unref(m_drm_import_frame);
+    if (res == AVB_OK) m_video_index++;
+    return res;
 }
 
 avb_result AvbEncoderFFmpeg::write_custom_video_packet(avb_encoded_packet &packet) {

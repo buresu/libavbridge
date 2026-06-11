@@ -38,6 +38,12 @@ if(AVB_BUILD_SHARED)
     target_compile_definitions(avb_custom_encoder PRIVATE AVB_USING_SHARED)
 endif()
 
+add_executable(avb_dmabuf_roundtrip dmabuf_roundtrip.cpp)
+target_link_libraries(avb_dmabuf_roundtrip PRIVATE avbridge)
+if(AVB_BUILD_SHARED)
+    target_compile_definitions(avb_dmabuf_roundtrip PRIVATE AVB_USING_SHARED)
+endif()
+
 find_program(FFMPEG_EXECUTABLE ffmpeg)
 
 if(FFMPEG_EXECUTABLE)
@@ -62,6 +68,7 @@ if(FFMPEG_EXECUTABLE)
     add_dependencies(avb_io avb_conformance_fixture)
     add_dependencies(avb_custom_decoder avb_conformance_fixture)
     add_dependencies(avb_custom_encoder avb_conformance_fixture)
+    add_dependencies(avb_dmabuf_roundtrip avb_conformance_fixture)
 
     # The conformance contract is backend-agnostic, so run it against every
     # backend compiled into this build (each skips itself if not present). A
@@ -96,6 +103,12 @@ if(FFMPEG_EXECUTABLE)
     add_test(NAME custom_encoder_ffmpeg
              COMMAND avb_custom_encoder "${AVB_OUT}/custom_encoder_ffmpeg.mov" ffmpeg)
     set_tests_properties(custom_encoder_ffmpeg PROPERTIES SKIP_RETURN_CODE 77)
+    if(AVB_ENABLE_FFMPEG)
+        add_test(NAME dmabuf_roundtrip_ffmpeg
+                 COMMAND avb_dmabuf_roundtrip "${AVB_FIXTURE}"
+                         "${AVB_OUT}/dmabuf_roundtrip_ffmpeg.mp4" ffmpeg ffmpeg)
+        set_tests_properties(dmabuf_roundtrip_ffmpeg PROPERTIES SKIP_RETURN_CODE 77)
+    endif()
     if(AVB_ENABLE_GSTREAMER)
         add_test(NAME custom_decoder_gstreamer
                  COMMAND avb_custom_decoder "${AVB_FIXTURE}" gstreamer)
@@ -103,6 +116,20 @@ if(FFMPEG_EXECUTABLE)
         add_test(NAME custom_encoder_gstreamer
                  COMMAND avb_custom_encoder "${AVB_OUT}/custom_encoder_gstreamer.mkv" gstreamer)
         set_tests_properties(custom_encoder_gstreamer PROPERTIES SKIP_RETURN_CODE 77)
+        add_test(NAME dmabuf_roundtrip_gstreamer
+                 COMMAND avb_dmabuf_roundtrip "${AVB_FIXTURE}"
+                         "${AVB_OUT}/dmabuf_roundtrip_gstreamer.mp4" gstreamer gstreamer)
+        set_tests_properties(dmabuf_roundtrip_gstreamer PROPERTIES SKIP_RETURN_CODE 77)
+        if(AVB_ENABLE_FFMPEG)
+            add_test(NAME dmabuf_roundtrip_ffmpeg_to_gstreamer
+                     COMMAND avb_dmabuf_roundtrip "${AVB_FIXTURE}"
+                             "${AVB_OUT}/dmabuf_roundtrip_ffmpeg_to_gstreamer.mp4" ffmpeg gstreamer)
+            set_tests_properties(dmabuf_roundtrip_ffmpeg_to_gstreamer PROPERTIES SKIP_RETURN_CODE 77)
+            add_test(NAME dmabuf_roundtrip_gstreamer_to_ffmpeg
+                     COMMAND avb_dmabuf_roundtrip "${AVB_FIXTURE}"
+                             "${AVB_OUT}/dmabuf_roundtrip_gstreamer_to_ffmpeg.mp4" gstreamer ffmpeg)
+            set_tests_properties(dmabuf_roundtrip_gstreamer_to_ffmpeg PROPERTIES SKIP_RETURN_CODE 77)
+        endif()
     endif()
     if(AVB_ENABLE_AVFOUNDATION)
         add_test(NAME custom_decoder_avfoundation

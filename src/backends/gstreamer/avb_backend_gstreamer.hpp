@@ -32,6 +32,9 @@ private:
     void discover_codec_names(const char *uri);
     avb_result open_custom_file(const char *path, const avb_decode_options &options);
     avb_result read_custom_video_frame(avb_video_frame &out_frame);
+    avb_result fill_dmabuf_video_frame(GstSample *sample, GstBuffer *buf,
+                                       GstCaps *caps, int w, int h,
+                                       double pts_sec, avb_video_frame &out_frame);
 
     AvbGstFuncs m_gst{};
     bool m_libs_loaded = false;
@@ -40,6 +43,7 @@ private:
     GstElement *m_audio_sink = nullptr; // appsink (owned ref)
     GstElement *m_video_sink = nullptr; // appsink (owned ref)
     GstSample  *m_video_preroll_sample = nullptr; // custom encoded-video path
+    GstSample  *m_native_video_sample = nullptr; // held until release_video_frame
 
     // Effective audio output format (after convert/resample).
     int m_out_sample_rate = 0;
@@ -57,6 +61,8 @@ private:
     double m_duration   = 0.0;
 
     avb_pixel_format m_video_format = AVB_PIXEL_FORMAT_BGRA8;
+    avb_video_memory_type m_video_memory = AVB_VIDEO_MEMORY_CPU;
+    avb_hardware_device m_hw_device = AVB_HW_DEVICE_AUTO;
     bool m_custom_pipeline = false;
     const avb_video_decoder_plugin *m_custom_video_decoder = nullptr;
     void *m_custom_video_ctx = nullptr;

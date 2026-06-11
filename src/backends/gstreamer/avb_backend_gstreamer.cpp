@@ -2,7 +2,9 @@
 #include "../../avb_video_codec_registry.hpp"
 
 #include <cstdarg>
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 // playbin "flags" bits (from playbin's GstPlayFlags; values are stable ABI).
@@ -13,6 +15,28 @@ enum {
 };
 
 static inline int round_up_4(int x) { return (x + 3) & ~3; }
+
+static constexpr uint32_t avb_drm_fourcc(char a, char b, char c, char d) {
+    return (uint32_t)(uint8_t)a |
+           ((uint32_t)(uint8_t)b << 8) |
+           ((uint32_t)(uint8_t)c << 16) |
+           ((uint32_t)(uint8_t)d << 24);
+}
+
+static gboolean avb_gst_dmabuf_propose_allocation(
+    GstAppSink *,
+    GstQuery *query,
+    gpointer user_data
+) {
+    auto *gst = static_cast<AvbGstFuncs *>(user_data);
+    if (!gst || !gst->gst_query_add_allocation_meta ||
+        !gst->gst_video_meta_api_get_type) {
+        return FALSE;
+    }
+    gst->gst_query_add_allocation_meta(
+        query, gst->gst_video_meta_api_get_type(), nullptr);
+    return TRUE;
+}
 
 static bool avb_is_compressed_format(avb_pixel_format fmt) {
     return fmt == AVB_PIXEL_FORMAT_BC1_RGBA ||
@@ -30,6 +54,19 @@ static std::string gst_launch_quote(const char *s) {
     }
     out.push_back('"');
     return out;
+}
+
+static bool parse_gst_drm_format(const char *text, uint32_t &fourcc, uint64_t &modifier) {
+    if (!text || strlen(text) < 4) return false;
+    fourcc = avb_drm_fourcc(text[0], text[1], text[2], text[3]);
+    modifier = UINT64_MAX;
+    const char *colon = strchr(text, ':');
+    if (colon && colon[1]) {
+        char *end = nullptr;
+        modifier = (uint64_t)strtoull(colon + 1, &end, 0);
+        if (end == colon + 1) modifier = UINT64_MAX;
+    }
+    return true;
 }
 
 // Map a GStreamer source-stream caps name to the same short codec name the
@@ -128,6 +165,10 @@ void AvbBackendGStreamer::close_internal() {
         m_gst.gst_mini_object_unref((GstMiniObject *)m_video_preroll_sample);
         m_video_preroll_sample = nullptr;
     }
+    if (m_native_video_sample) {
+        m_gst.gst_mini_object_unref((GstMiniObject *)m_native_video_sample);
+        m_native_video_sample = nullptr;
+    }
     if (m_custom_video_decoder) {
         if (m_custom_video_decoder->close && m_custom_video_ctx)
             m_custom_video_decoder->close(m_custom_video_ctx);
@@ -158,6 +199,8 @@ void AvbBackendGStreamer::close_internal() {
     m_custom_pipeline = false;
     m_audio_codec_name.clear();
     m_video_codec_name.clear();
+    m_video_memory = AVB_VIDEO_MEMORY_CPU;
+    m_hw_device = AVB_HW_DEVICE_AUTO;
 }
 
 void AvbBackendGStreamer::discover_codec_names(const char *uri) {
@@ -356,6 +399,19 @@ avb_result AvbBackendGStreamer::open_file(const char *path, const avb_decode_opt
         close_internal();
     }
 
+    m_video_memory = options.video_memory;
+    m_hw_device = options.hardware_device == AVB_HW_DEVICE_AUTO
+        ? AVB_HW_DEVICE_VAAPI : options.hardware_device;
+    if (m_video_memory == AVB_VIDEO_MEMORY_NATIVE &&
+        options.hardware_policy == AVB_HARDWARE_DISABLED) {
+        set_error("Native video output requires hardware_policy PREFER or REQUIRE.");
+        return AVB_ERROR_INVALID_ARGUMENT;
+    }
+    if (m_video_memory == AVB_VIDEO_MEMORY_DMABUF &&
+        options.hardware_policy == AVB_HARDWARE_DISABLED) {
+        m_hw_device = AVB_HW_DEVICE_VAAPI;
+    }
+
     GError *err = nullptr;
     gchar *uri = m_gst.gst_filename_to_uri(path, &err);
     if (!uri) {
@@ -433,9 +489,19 @@ avb_result AvbBackendGStreamer::open_file(const char *path, const avb_decode_opt
         // backs up the demuxer and starves audio. For bulk per-stream decoding,
         // open a decoder with only that stream enabled.
         char desc[256];
-        snprintf(desc, sizeof(desc),
-            "videoconvert ! appsink name=avb_vsink sync=false max-buffers=16 "
-            "caps=video/x-raw,format=%s", vfmt);
+        if (m_video_memory == AVB_VIDEO_MEMORY_NATIVE) {
+            snprintf(desc, sizeof(desc),
+                "appsink name=avb_vsink sync=false max-buffers=16 "
+                "caps=video/x-raw(memory:VASurface)");
+        } else if (m_video_memory == AVB_VIDEO_MEMORY_DMABUF) {
+            snprintf(desc, sizeof(desc),
+                "appsink name=avb_vsink sync=false max-buffers=16 "
+                "caps=video/x-raw(memory:DMABuf)");
+        } else {
+            snprintf(desc, sizeof(desc),
+                "videoconvert ! appsink name=avb_vsink sync=false max-buffers=16 "
+                "caps=video/x-raw,format=%s", vfmt);
+        }
 
         GstElement *vbin = m_gst.gst_parse_bin_from_description(desc, TRUE, &err);
         if (!vbin) {
@@ -447,7 +513,15 @@ avb_result AvbBackendGStreamer::open_file(const char *path, const avb_decode_opt
         }
         m_gst.g_object_set(m_pipeline, "video-sink", vbin, nullptr);
         m_video_sink = m_gst.gst_bin_get_by_name((GstBin *)vbin, "avb_vsink");
-        if (m_video_sink) m_gst.gst_app_sink_set_drop((GstAppSink *)m_video_sink, FALSE);
+        if (m_video_sink) {
+            m_gst.gst_app_sink_set_drop((GstAppSink *)m_video_sink, FALSE);
+            if (m_video_memory == AVB_VIDEO_MEMORY_DMABUF) {
+                GstAppSinkCallbacks callbacks{};
+                callbacks.propose_allocation = avb_gst_dmabuf_propose_allocation;
+                m_gst.gst_app_sink_set_callbacks(
+                    (GstAppSink *)m_video_sink, &callbacks, &m_gst, nullptr);
+            }
+        }
         flags |= AVB_GST_PLAY_FLAG_VIDEO;
     }
 
@@ -749,6 +823,75 @@ avb_result AvbBackendGStreamer::read_custom_video_frame(avb_video_frame &out_fra
     }
 }
 
+avb_result AvbBackendGStreamer::fill_dmabuf_video_frame(
+    GstSample *sample,
+    GstBuffer *buf,
+    GstCaps *caps,
+    int w,
+    int h,
+    double pts_sec,
+    avb_video_frame &out_frame
+) {
+    GstVideoMeta *meta = m_gst.gst_buffer_get_video_meta(buf);
+    uint32_t drm_format = 0;
+    uint64_t drm_modifier = UINT64_MAX;
+    if (caps) {
+        const GstStructure *s = m_gst.gst_caps_get_structure(caps, 0);
+        if (s) {
+            parse_gst_drm_format(
+                m_gst.gst_structure_get_string(s, "drm-format"),
+                drm_format, drm_modifier);
+        }
+    }
+    guint memories = m_gst.gst_buffer_n_memory(buf);
+    int want_planes = meta ? (int)meta->n_planes : (int)memories;
+    if (want_planes <= 0) {
+        set_error("GStreamer DMABUF frame has no planes.");
+        return AVB_ERROR_DECODE_FAILED;
+    }
+
+    if (m_native_video_sample) {
+        m_gst.gst_mini_object_unref((GstMiniObject *)m_native_video_sample);
+        m_native_video_sample = nullptr;
+    }
+
+    out_frame = {};
+    out_frame.width = w;
+    out_frame.height = h;
+    out_frame.format = AVB_PIXEL_FORMAT_UNKNOWN;
+    out_frame.pts_sec = pts_sec;
+    out_frame.memory_type = AVB_VIDEO_MEMORY_DMABUF;
+    out_frame.hardware_device = m_hw_device;
+    out_frame.native_handle = buf;
+    out_frame.native_owner = this;
+    out_frame.drm_format = drm_format;
+    out_frame.native_handle_id = drm_format;
+    for (int p = 0; p < AVB_MAX_PLANES; ++p) out_frame.dmabuf_fd[p] = -1;
+
+    int planes = 0;
+    for (int p = 0; p < want_planes && p < AVB_MAX_PLANES; ++p) {
+        guint mem_index = memories == 1 ? 0 : (guint)p;
+        GstMemory *mem = mem_index < memories
+            ? m_gst.gst_buffer_peek_memory(buf, mem_index)
+            : nullptr;
+        if (!mem || !m_gst.gst_is_dmabuf_memory(mem)) {
+            set_error("GStreamer video buffer memory is not DMABUF.");
+            return AVB_ERROR_DECODE_FAILED;
+        }
+        out_frame.dmabuf_fd[p] = m_gst.gst_dmabuf_memory_get_fd(mem);
+        if (meta) {
+            out_frame.plane_offset[p] = (int)meta->offset[p];
+            out_frame.plane_stride[p] = meta->stride[p];
+        }
+        out_frame.dmabuf_modifier[p] = drm_modifier;
+        ++planes;
+    }
+    out_frame.plane_count = planes;
+    out_frame.stride = planes > 0 ? out_frame.plane_stride[0] : 0;
+    m_native_video_sample = sample;
+    return AVB_OK;
+}
+
 avb_result AvbBackendGStreamer::read_video_frame(avb_video_frame &out_frame) {
     if (m_custom_pipeline) return read_custom_video_frame(out_frame);
     if (!m_video_sink) return AVB_ERROR_STREAM_NOT_FOUND;
@@ -781,6 +924,32 @@ avb_result AvbBackendGStreamer::read_video_frame(avb_video_frame &out_frame) {
             continue;
         }
         m_seek_target = -1.0;
+
+        if (m_video_memory == AVB_VIDEO_MEMORY_NATIVE) {
+            if (m_native_video_sample) {
+                m_gst.gst_mini_object_unref((GstMiniObject *)m_native_video_sample);
+                m_native_video_sample = nullptr;
+            }
+            m_native_video_sample = sample;
+            out_frame = {};
+            out_frame.width = w;
+            out_frame.height = h;
+            out_frame.format = m_video_format;
+            out_frame.pts_sec = pts_sec;
+            out_frame.memory_type = AVB_VIDEO_MEMORY_NATIVE;
+            out_frame.hardware_device = m_hw_device;
+            out_frame.native_handle = buf;
+            out_frame.native_owner = this;
+            for (int p = 0; p < AVB_MAX_PLANES; ++p) out_frame.dmabuf_fd[p] = -1;
+            return AVB_OK;
+        }
+        if (m_video_memory == AVB_VIDEO_MEMORY_DMABUF) {
+            avb_result res = fill_dmabuf_video_frame(
+                sample, buf, caps, w, h, pts_sec, out_frame);
+            if (res != AVB_OK)
+                m_gst.gst_mini_object_unref((GstMiniObject *)sample);
+            return res;
+        }
 
         GstMapInfo map;
         memset(&map, 0, sizeof(map));
@@ -827,10 +996,14 @@ avb_result AvbBackendGStreamer::read_video_frame(avb_video_frame &out_frame) {
         out_frame.height      = h;
         out_frame.format      = m_video_format;
         out_frame.pts_sec     = pts_sec;
+        out_frame.memory_type = AVB_VIDEO_MEMORY_CPU;
+        out_frame.hardware_device = AVB_HW_DEVICE_AUTO;
         out_frame.plane_count = plane_count;
+        for (int p = 0; p < AVB_MAX_PLANES; ++p) out_frame.dmabuf_fd[p] = -1;
         for (int p = 0; p < plane_count; ++p) {
             out_frame.plane_data[p]   = m_video_out_buf.data() + off[p];
             out_frame.plane_stride[p] = stride[p];
+            out_frame.plane_offset[p] = (int)off[p];
         }
         out_frame.data      = out_frame.plane_data[0];
         out_frame.stride    = out_frame.plane_stride[0];
@@ -848,6 +1021,12 @@ void AvbBackendGStreamer::release_video_frame(avb_video_frame &frame) {
             m_custom_video_decoder->release_frame(m_custom_video_ctx, &frame);
         memset(&frame, 0, sizeof(frame));
         return;
+    }
+    if ((frame.memory_type == AVB_VIDEO_MEMORY_NATIVE ||
+         frame.memory_type == AVB_VIDEO_MEMORY_DMABUF) &&
+        frame.native_owner == this && m_native_video_sample) {
+        m_gst.gst_mini_object_unref((GstMiniObject *)m_native_video_sample);
+        m_native_video_sample = nullptr;
     }
     // Output buffer is backend-owned and reused on the next read; just zero the
     // caller's struct so stale pointers can't be used by accident.

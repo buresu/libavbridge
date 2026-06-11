@@ -26,7 +26,7 @@ extern "C" {
 #endif
 
 #define AVB_VERSION_MAJOR 0
-#define AVB_VERSION_MINOR 3
+#define AVB_VERSION_MINOR 4
 #define AVB_VERSION_PATCH 0
 
 #ifdef _WIN32
@@ -90,6 +90,38 @@ typedef enum avb_codec {
     AVB_CODEC_HAP  = 6,
 } avb_codec;
 
+typedef enum avb_hardware_policy {
+    /* Always use CPU/system-memory codec paths. */
+    AVB_HARDWARE_DISABLED = 0,
+    /* Prefer hardware acceleration, but keep the selected backend usable when
+     * the requested device is unavailable. */
+    AVB_HARDWARE_PREFER = 1,
+    /* Opening fails unless the selected backend can use hardware acceleration. */
+    AVB_HARDWARE_REQUIRE = 2,
+} avb_hardware_policy;
+
+typedef enum avb_hardware_device {
+    AVB_HW_DEVICE_AUTO = 0,
+    AVB_HW_DEVICE_VAAPI,
+    AVB_HW_DEVICE_CUDA,
+    AVB_HW_DEVICE_QSV,
+    AVB_HW_DEVICE_D3D11VA,
+    AVB_HW_DEVICE_VIDEOTOOLBOX,
+    AVB_HW_DEVICE_AMF,
+} avb_hardware_device;
+
+typedef enum avb_video_memory_type {
+    /* plane_data/data point to CPU-readable memory. */
+    AVB_VIDEO_MEMORY_CPU = 0,
+    /* native_handle/native_handle_id describes a backend-native frame/surface.
+     * The exact object type is selected by hardware_device and backend_name:
+     * VAAPI -> VASurfaceID in native_handle_id, D3D11VA -> ID3D11Texture2D*,
+     * VideoToolbox/AVFoundation -> CVPixelBufferRef, GStreamer -> GstBuffer*. */
+    AVB_VIDEO_MEMORY_NATIVE = 1,
+    /* dmabuf_fd/plane_stride/plane_offset describe exported DMABUF planes. */
+    AVB_VIDEO_MEMORY_DMABUF = 2,
+} avb_video_memory_type;
+
 /* ------------------------------------------------------------------------- *
  * Shared media types
  * ------------------------------------------------------------------------- */
@@ -110,18 +142,32 @@ typedef struct avb_video_frame {
     int height;
     avb_pixel_format format;
     double pts_sec;
+    avb_video_memory_type memory_type;
+    avb_hardware_device hardware_device;
 
     /* Valid planes: 1 for packed (RGBA8/BGRA8), 2 for NV12 (Y, CbCr),
      * 3 for I420 (Y, Cb, Cr). */
     int plane_count;
     unsigned char *plane_data[AVB_MAX_PLANES];
     int plane_stride[AVB_MAX_PLANES];
+    int plane_offset[AVB_MAX_PLANES];
 
     /* Aliases for plane 0 (packed-format convenience). data_size is the total
      * size in bytes of the backing buffer across all planes. */
     unsigned char *data;
     int stride;
     int data_size;
+
+    /* Native/GPU frame ownership stays with libavbridge until the frame is
+     * released. Callers may inspect/use the handle before release, but must not
+     * destroy it. DMABUF fds are likewise owned by libavbridge unless explicitly
+     * documented otherwise by a backend-specific integration. */
+    void *native_handle;
+    uint64_t native_handle_id;
+    void *native_owner;
+    uint32_t drm_format;
+    int dmabuf_fd[AVB_MAX_PLANES];
+    uint64_t dmabuf_modifier[AVB_MAX_PLANES];
 } avb_video_frame;
 
 typedef struct avb_audio_info {
@@ -192,6 +238,12 @@ typedef struct avb_decode_options {
     /* Desired decoded video pixel format. AVB_PIXEL_FORMAT_UNKNOWN (0) selects
      * the backend default (BGRA8). */
     avb_pixel_format video_format;
+    /* Desired decoded video memory. CPU keeps the historical plane_data output.
+     * NATIVE returns backend-owned hardware surfaces when available. DMABUF asks
+     * capable Linux backends to export frame planes as DMABUF descriptors. */
+    avb_video_memory_type video_memory;
+    avb_hardware_policy hardware_policy;
+    avb_hardware_device hardware_device;
     /* Desired decoded audio output format. 0 = keep the source value.
      * avb_decoder_read_audio_f32 produces interleaved float at this
      * rate/channel count, and avb_audio_info reports the effective values. */
@@ -316,6 +368,7 @@ typedef struct avb_video_encode_info {
     int height;
     double frame_rate;
     avb_pixel_format input_format;
+    avb_video_memory_type input_memory;
     avb_codec codec;
     int bitrate;
 } avb_video_encode_info;
@@ -442,6 +495,9 @@ typedef struct avb_video_encode_params {
     avb_codec codec;               /* AUTO -> H.264; or H264/HEVC/VP9 */
     int bitrate;                   /* bits/sec, 0 = backend default */
     avb_pixel_format input_format; /* format of frames passed to write_video */
+    avb_video_memory_type input_memory;
+    avb_hardware_policy hardware_policy;
+    avb_hardware_device hardware_device;
 } avb_video_encode_params;
 
 typedef struct avb_audio_encode_params {

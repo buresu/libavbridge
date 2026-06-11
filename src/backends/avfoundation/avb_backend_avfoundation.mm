@@ -221,6 +221,11 @@ avb_result AvbBackendAVFoundation::open_custom_video_decoder(
 
 avb_result AvbBackendAVFoundation::open_file(const char *path, const avb_decode_options &options) {
     @autoreleasepool {
+        if (options.video_memory != AVB_VIDEO_MEMORY_CPU ||
+            options.hardware_policy == AVB_HARDWARE_REQUIRE) {
+            m_last_error = "AVFoundation native hardware video frames are not implemented yet.";
+            return AVB_ERROR_OPEN_FAILED;
+        }
         NSString *ns_path = [NSString stringWithUTF8String:path];
         NSURL *url = [NSURL fileURLWithPath:ns_path];
 
@@ -632,8 +637,11 @@ avb_result AvbBackendAVFoundation::read_video_frame(avb_video_frame &out_frame) 
         out_frame.height      = (int)height;
         out_frame.format      = m_impl->video_avb_fmt;
         out_frame.pts_sec     = CMTimeGetSeconds(pts);
+        out_frame.memory_type = AVB_VIDEO_MEMORY_CPU;
+        out_frame.hardware_device = AVB_HW_DEVICE_AUTO;
         out_frame.plane_count = (int)plane_count;
         out_frame.data_size   = (int)total;
+        for (int p = 0; p < AVB_MAX_PLANES; ++p) out_frame.dmabuf_fd[p] = -1;
 
         size_t offset = 0;
         for (size_t p = 0; p < plane_count; ++p) {

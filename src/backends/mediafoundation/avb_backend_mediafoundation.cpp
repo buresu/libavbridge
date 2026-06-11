@@ -266,6 +266,11 @@ avb_result AvbBackendMediaFoundation::open_file(const char *path, const avb_deco
 
     m_impl->close_streams();
     m_last_error.clear();
+    if (options.video_memory != AVB_VIDEO_MEMORY_CPU ||
+        options.hardware_policy == AVB_HARDWARE_REQUIRE) {
+        m_last_error = "Media Foundation native hardware video frames are not implemented yet.";
+        return AVB_ERROR_OPEN_FAILED;
+    }
 
     int wlen = MultiByteToWideChar(CP_UTF8, 0, path, -1, nullptr, 0);
     if (wlen <= 0) {
@@ -851,7 +856,10 @@ avb_result AvbBackendMediaFoundation::read_video_frame(avb_video_frame &out_fram
     out_frame.height      = h;
     out_frame.format      = m_impl->video_avb_fmt;
     out_frame.pts_sec     = (double)ts / 1e7;
+    out_frame.memory_type = AVB_VIDEO_MEMORY_CPU;
+    out_frame.hardware_device = AVB_HW_DEVICE_AUTO;
     out_frame.plane_count = 1;
+    for (int p = 0; p < AVB_MAX_PLANES; ++p) out_frame.dmabuf_fd[p] = -1;
     out_frame.plane_data[0]   = m_impl->video_frame_buf.data();
     out_frame.plane_stride[0] = row_bytes;
     out_frame.data      = out_frame.plane_data[0];

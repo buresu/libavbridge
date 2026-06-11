@@ -5,6 +5,8 @@ extern "C" {
 #include <gst/app/gstappsink.h>
 #include <gst/app/gstappsrc.h>
 #include <gst/pbutils/pbutils.h>
+#include <gst/video/video.h>
+#include <gst/allocators/gstdmabuf.h>
 }
 
 #include <stdbool.h>
@@ -33,6 +35,7 @@ struct AvbGstFuncs {
     GstElement *(*gst_bin_get_by_name)(GstBin *, const gchar *);
     GstStructure *(*gst_caps_get_structure)(const GstCaps *, guint);
     const gchar *(*gst_structure_get_name)(const GstStructure *);
+    const gchar *(*gst_structure_get_string)(const GstStructure *, const gchar *);
     gboolean (*gst_structure_get_int)(const GstStructure *, const gchar *, gint *);
     gboolean (*gst_structure_get_fraction)(const GstStructure *, const gchar *, gint *, gint *);
     GstBuffer *(*gst_sample_get_buffer)(GstSample *);
@@ -40,6 +43,9 @@ struct AvbGstFuncs {
     gboolean (*gst_buffer_map)(GstBuffer *, GstMapInfo *, GstMapFlags);
     void (*gst_buffer_unmap)(GstBuffer *, GstMapInfo *);
     gsize (*gst_buffer_get_size)(GstBuffer *);
+    guint (*gst_buffer_n_memory)(GstBuffer *);
+    GstMemory *(*gst_buffer_peek_memory)(GstBuffer *, guint);
+    GstMiniObject *(*gst_mini_object_ref)(GstMiniObject *);
     void (*gst_mini_object_unref)(GstMiniObject *);
     void (*gst_object_unref)(gpointer);
     gchar *(*gst_filename_to_uri)(const gchar *, GError **);
@@ -48,16 +54,21 @@ struct AvbGstFuncs {
     GstElement *(*gst_parse_launch)(const gchar *, GError **);
     GstCaps *(*gst_caps_from_string)(const gchar *);
     GstBuffer *(*gst_buffer_new_allocate)(GstAllocator *, gsize, GstAllocationParams *);
+    GstBuffer *(*gst_buffer_new)(void);
+    void (*gst_buffer_append_memory)(GstBuffer *, GstMemory *);
     gsize (*gst_buffer_fill)(GstBuffer *, gsize, gconstpointer, gsize);
     GstBus *(*gst_element_get_bus)(GstElement *);
     GstMessage *(*gst_bus_timed_pop_filtered)(GstBus *, GstClockTime, GstMessageType);
     void (*gst_message_parse_error)(GstMessage *, GError **, gchar **);
+    void (*gst_query_add_allocation_meta)(GstQuery *, GType, const GstStructure *);
 
     // libgstapp-1.0
     GstSample *(*gst_app_sink_pull_sample)(GstAppSink *);
     GstSample *(*gst_app_sink_try_pull_preroll)(GstAppSink *, GstClockTime);
     void (*gst_app_sink_set_max_buffers)(GstAppSink *, guint);
     void (*gst_app_sink_set_drop)(GstAppSink *, gboolean);
+    void (*gst_app_sink_set_callbacks)(GstAppSink *, GstAppSinkCallbacks *,
+                                       gpointer, GDestroyNotify);
     GstFlowReturn (*gst_app_src_push_buffer)(GstAppSrc *, GstBuffer *);
     GstFlowReturn (*gst_app_src_end_of_stream)(GstAppSrc *);
 
@@ -68,6 +79,19 @@ struct AvbGstFuncs {
     GList *(*gst_discoverer_info_get_video_streams)(GstDiscovererInfo *);
     GstCaps *(*gst_discoverer_stream_info_get_caps)(GstDiscovererStreamInfo *);
     void (*gst_discoverer_stream_info_list_free)(GList *);
+
+    // libgstvideo-1.0
+    GstVideoMeta *(*gst_buffer_get_video_meta)(GstBuffer *);
+    GstVideoMeta *(*gst_buffer_add_video_meta_full)(GstBuffer *, GstVideoFrameFlags,
+                                                    GstVideoFormat, gint, gint, guint,
+                                                    gsize *, gint *);
+    GType (*gst_video_meta_api_get_type)(void);
+
+    // libgstallocators-1.0
+    GstAllocator *(*gst_dmabuf_allocator_new)(void);
+    GstMemory *(*gst_dmabuf_allocator_alloc)(GstAllocator *, gint, gsize);
+    gboolean (*gst_is_dmabuf_memory)(GstMemory *);
+    gint (*gst_dmabuf_memory_get_fd)(GstMemory *);
 
     // libgobject-2.0 (variadic property setter/getter)
     void (*g_object_set)(gpointer, const gchar *, ...);

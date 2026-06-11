@@ -3,7 +3,25 @@
 
 #include <cstdio>
 #include <cstdarg>
+#include <cstdint>
 #include <cstring>
+
+static constexpr uint32_t avb_drm_fourcc(char a, char b, char c, char d) {
+    return (uint32_t)(uint8_t)a |
+           ((uint32_t)(uint8_t)b << 8) |
+           ((uint32_t)(uint8_t)c << 16) |
+           ((uint32_t)(uint8_t)d << 24);
+}
+
+static uint32_t avb_infer_drm_frame_format(const AVDRMFrameDescriptor *drm) {
+    if (!drm || drm->nb_layers <= 0) return 0;
+    if (drm->nb_layers >= 2 &&
+        drm->layers[0].format == avb_drm_fourcc('R', '8', ' ', ' ') &&
+        drm->layers[1].format == avb_drm_fourcc('G', 'R', '8', '8')) {
+        return avb_drm_fourcc('N', 'V', '1', '2');
+    }
+    return drm->layers[0].format;
+}
 
 AvbBackendFFmpeg::AvbBackendFFmpeg() {
     char err_buf[512];
@@ -97,6 +115,18 @@ void AvbBackendFFmpeg::close_internal() {
         m_ff.av_frame_free(&m_video_frame);
         m_video_frame = nullptr;
     }
+    if (m_hw_transfer_frame) {
+        m_ff.av_frame_free(&m_hw_transfer_frame);
+        m_hw_transfer_frame = nullptr;
+    }
+    if (m_native_video_frame) {
+        m_ff.av_frame_free(&m_native_video_frame);
+        m_native_video_frame = nullptr;
+    }
+    if (m_drm_video_frame) {
+        m_ff.av_frame_free(&m_drm_video_frame);
+        m_drm_video_frame = nullptr;
+    }
     clear_packet_queues();
     if (m_packet) {
         m_ff.av_packet_free(&m_packet);
@@ -109,6 +139,10 @@ void AvbBackendFFmpeg::close_internal() {
     if (m_video_codec_ctx) {
         m_ff.avcodec_free_context(&m_video_codec_ctx);
         m_video_codec_ctx = nullptr;
+    }
+    if (m_hw_device_ctx) {
+        m_ff.av_buffer_unref(&m_hw_device_ctx);
+        m_hw_device_ctx = nullptr;
     }
     if (m_custom_video_decoder) {
         if (m_custom_video_decoder->close && m_custom_video_ctx)
@@ -135,6 +169,9 @@ void AvbBackendFFmpeg::close_internal() {
     m_sws_src_w   = 0;
     m_sws_src_h   = 0;
     m_sws_src_fmt = AV_PIX_FMT_NONE;
+    m_hw_pix_fmt = AV_PIX_FMT_NONE;
+    m_video_memory = AVB_VIDEO_MEMORY_CPU;
+    m_hw_device = AVB_HW_DEVICE_AUTO;
     m_eof = false;
     m_seek_target = -1.0;
     m_audio_seek_target = -1.0;
@@ -224,6 +261,99 @@ static std::string avb_ff_codec_tag_name(uint32_t tag) {
         if ((unsigned char)s[i] < 32 || (unsigned char)s[i] > 126) return "";
     }
     return s;
+}
+
+static AVHWDeviceType avb_ff_hw_type(avb_hardware_device device) {
+    switch (device) {
+        case AVB_HW_DEVICE_VAAPI:        return AV_HWDEVICE_TYPE_VAAPI;
+        case AVB_HW_DEVICE_CUDA:         return AV_HWDEVICE_TYPE_CUDA;
+        case AVB_HW_DEVICE_QSV:          return AV_HWDEVICE_TYPE_QSV;
+        case AVB_HW_DEVICE_D3D11VA:      return AV_HWDEVICE_TYPE_D3D11VA;
+        case AVB_HW_DEVICE_VIDEOTOOLBOX: return AV_HWDEVICE_TYPE_VIDEOTOOLBOX;
+        default:                         return AV_HWDEVICE_TYPE_NONE;
+    }
+}
+
+static avb_hardware_device avb_ff_hw_device(AVHWDeviceType type) {
+    switch (type) {
+        case AV_HWDEVICE_TYPE_VAAPI:        return AVB_HW_DEVICE_VAAPI;
+        case AV_HWDEVICE_TYPE_CUDA:         return AVB_HW_DEVICE_CUDA;
+        case AV_HWDEVICE_TYPE_QSV:          return AVB_HW_DEVICE_QSV;
+        case AV_HWDEVICE_TYPE_D3D11VA:      return AVB_HW_DEVICE_D3D11VA;
+        case AV_HWDEVICE_TYPE_VIDEOTOOLBOX: return AVB_HW_DEVICE_VIDEOTOOLBOX;
+        default:                            return AVB_HW_DEVICE_AUTO;
+    }
+}
+
+static const AVHWDeviceType *avb_ff_auto_hw_types() {
+    static const AVHWDeviceType types[] = {
+#if defined(__linux__)
+        AV_HWDEVICE_TYPE_VAAPI,
+        AV_HWDEVICE_TYPE_CUDA,
+        AV_HWDEVICE_TYPE_QSV,
+#elif defined(_WIN32)
+        AV_HWDEVICE_TYPE_D3D11VA,
+        AV_HWDEVICE_TYPE_CUDA,
+        AV_HWDEVICE_TYPE_QSV,
+#elif defined(__APPLE__)
+        AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+#endif
+        AV_HWDEVICE_TYPE_NONE
+    };
+    return types;
+}
+
+AVPixelFormat AvbBackendFFmpeg::get_hw_format(AVCodecContext *ctx,
+                                              const AVPixelFormat *pix_fmts) {
+    auto *self = static_cast<AvbBackendFFmpeg *>(ctx->opaque);
+    if (!self) return pix_fmts[0];
+    for (const AVPixelFormat *p = pix_fmts; *p != AV_PIX_FMT_NONE; ++p) {
+        if (*p == self->m_hw_pix_fmt) return *p;
+    }
+    return pix_fmts[0];
+}
+
+avb_result AvbBackendFFmpeg::setup_hardware_decoder(
+    const AVCodec *codec,
+    const avb_decode_options &options
+) {
+    if (options.hardware_policy == AVB_HARDWARE_DISABLED &&
+        options.video_memory == AVB_VIDEO_MEMORY_CPU) {
+        return AVB_ERROR_STREAM_NOT_FOUND;
+    }
+
+    AVHWDeviceType requested = avb_ff_hw_type(options.hardware_device);
+    const AVHWDeviceType *auto_types = avb_ff_auto_hw_types();
+
+    for (int i = 0;; ++i) {
+        const AVCodecHWConfig *cfg = m_ff.avcodec_get_hw_config(codec, i);
+        if (!cfg) break;
+        if (!(cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)) continue;
+
+        bool type_ok = false;
+        if (requested != AV_HWDEVICE_TYPE_NONE) {
+            type_ok = cfg->device_type == requested;
+        } else {
+            for (const AVHWDeviceType *t = auto_types; *t != AV_HWDEVICE_TYPE_NONE; ++t) {
+                if (cfg->device_type == *t) { type_ok = true; break; }
+            }
+        }
+        if (!type_ok) continue;
+
+        AVBufferRef *device = nullptr;
+        int ret = m_ff.av_hwdevice_ctx_create(&device, cfg->device_type, nullptr, nullptr, 0);
+        if (ret < 0) continue;
+
+        m_hw_pix_fmt = cfg->pix_fmt;
+        m_hw_device = avb_ff_hw_device(cfg->device_type);
+        m_hw_device_ctx = device;
+        m_video_codec_ctx->hw_device_ctx = m_ff.av_buffer_ref(m_hw_device_ctx);
+        m_video_codec_ctx->get_format = &AvbBackendFFmpeg::get_hw_format;
+        m_video_codec_ctx->opaque = this;
+        return AVB_OK;
+    }
+
+    return AVB_ERROR_STREAM_NOT_FOUND;
 }
 
 avb_result AvbBackendFFmpeg::open_custom_video_decoder(
@@ -364,6 +494,15 @@ avb_result AvbBackendFFmpeg::setup_after_open(const avb_decode_options &options)
                 return AVB_ERROR_OPEN_FAILED;
             }
 
+            m_video_memory = options.video_memory;
+            avb_result hw_res = setup_hardware_decoder(codec, options);
+            if (hw_res != AVB_OK &&
+                (options.hardware_policy == AVB_HARDWARE_REQUIRE ||
+                 options.video_memory == AVB_VIDEO_MEMORY_DMABUF)) {
+                set_error("Required FFmpeg hardware decoder is not available for this stream.");
+                return AVB_ERROR_OPEN_FAILED;
+            }
+
             ret = m_ff.avcodec_open2(m_video_codec_ctx, codec, nullptr);
             if (ret < 0) {
                 set_ff_error("avcodec_open2 (video)", ret);
@@ -391,7 +530,11 @@ avb_result AvbBackendFFmpeg::setup_after_open(const avb_decode_options &options)
     m_packet      = m_ff.av_packet_alloc();
     m_audio_frame = m_ff.av_frame_alloc();
     m_video_frame = m_ff.av_frame_alloc();
-    if (!m_packet || !m_audio_frame || !m_video_frame) {
+    m_hw_transfer_frame = m_ff.av_frame_alloc();
+    m_native_video_frame = m_ff.av_frame_alloc();
+    m_drm_video_frame = m_ff.av_frame_alloc();
+    if (!m_packet || !m_audio_frame || !m_video_frame ||
+        !m_hw_transfer_frame || !m_native_video_frame || !m_drm_video_frame) {
         set_error("Memory allocation failed.");
         return AVB_ERROR_OPEN_FAILED;
     }
@@ -637,6 +780,179 @@ avb_result AvbBackendFFmpeg::read_custom_video_frame(avb_video_frame &out_frame)
     }
 }
 
+avb_result AvbBackendFFmpeg::fill_native_video_frame(
+    AVFrame *frame,
+    double pts_sec,
+    avb_video_frame &out_frame
+) {
+    m_ff.av_frame_unref(m_native_video_frame);
+    int ret = m_ff.av_frame_ref(m_native_video_frame, frame);
+    if (ret < 0) {
+        set_ff_error("av_frame_ref (hardware video)", ret);
+        return AVB_ERROR_DECODE_FAILED;
+    }
+
+    out_frame = {};
+    out_frame.width = frame->width;
+    out_frame.height = frame->height;
+    out_frame.format = m_video_format;
+    out_frame.pts_sec = pts_sec;
+    out_frame.memory_type = AVB_VIDEO_MEMORY_NATIVE;
+    out_frame.hardware_device = m_hw_device;
+    out_frame.plane_count = 0;
+    out_frame.native_handle = m_native_video_frame;
+    out_frame.native_owner = this;
+    if ((AVPixelFormat)frame->format == AV_PIX_FMT_VAAPI) {
+        out_frame.native_handle_id = (uint64_t)(uintptr_t)frame->data[3];
+    }
+    for (int p = 0; p < AVB_MAX_PLANES; ++p) out_frame.dmabuf_fd[p] = -1;
+    return AVB_OK;
+}
+
+avb_result AvbBackendFFmpeg::fill_dmabuf_video_frame(
+    AVFrame *frame,
+    double pts_sec,
+    avb_video_frame &out_frame
+) {
+    m_ff.av_frame_unref(m_drm_video_frame);
+    m_drm_video_frame->format = AV_PIX_FMT_DRM_PRIME;
+    int ret = m_ff.av_hwframe_map(m_drm_video_frame, frame, AV_HWFRAME_MAP_READ);
+    if (ret < 0) {
+        set_ff_error("av_hwframe_map (DRM PRIME video)", ret);
+        return AVB_ERROR_DECODE_FAILED;
+    }
+    if ((AVPixelFormat)m_drm_video_frame->format != AV_PIX_FMT_DRM_PRIME ||
+        !m_drm_video_frame->data[0]) {
+        set_error("FFmpeg hardware frame did not map to DRM PRIME.");
+        m_ff.av_frame_unref(m_drm_video_frame);
+        return AVB_ERROR_DECODE_FAILED;
+    }
+
+    const AVDRMFrameDescriptor *drm =
+        (const AVDRMFrameDescriptor *)m_drm_video_frame->data[0];
+    if (drm->nb_layers <= 0 || drm->layers[0].nb_planes <= 0) {
+        set_error("FFmpeg DRM PRIME frame has no planes.");
+        m_ff.av_frame_unref(m_drm_video_frame);
+        return AVB_ERROR_DECODE_FAILED;
+    }
+
+    out_frame = {};
+    out_frame.width = frame->width;
+    out_frame.height = frame->height;
+    out_frame.format = AVB_PIXEL_FORMAT_UNKNOWN;
+    out_frame.pts_sec = pts_sec;
+    out_frame.memory_type = AVB_VIDEO_MEMORY_DMABUF;
+    out_frame.hardware_device = m_hw_device;
+    out_frame.native_handle = m_drm_video_frame;
+    out_frame.native_owner = this;
+    out_frame.drm_format = avb_infer_drm_frame_format(drm);
+    out_frame.native_handle_id = out_frame.drm_format;
+    for (int p = 0; p < AVB_MAX_PLANES; ++p) out_frame.dmabuf_fd[p] = -1;
+
+    int plane_count = 0;
+    for (int layer = 0; layer < drm->nb_layers && plane_count < AVB_MAX_PLANES; ++layer) {
+        const AVDRMLayerDescriptor &dl = drm->layers[layer];
+        for (int p = 0; p < dl.nb_planes && plane_count < AVB_MAX_PLANES; ++p) {
+            const AVDRMPlaneDescriptor &dp = dl.planes[p];
+            if (dp.object_index < 0 || dp.object_index >= drm->nb_objects) continue;
+            const AVDRMObjectDescriptor &obj = drm->objects[dp.object_index];
+            out_frame.dmabuf_fd[plane_count] = obj.fd;
+            out_frame.plane_offset[plane_count] = (int)dp.offset;
+            out_frame.plane_stride[plane_count] = (int)dp.pitch;
+            out_frame.dmabuf_modifier[plane_count] = obj.format_modifier;
+            ++plane_count;
+        }
+    }
+    out_frame.plane_count = plane_count;
+    out_frame.stride = plane_count > 0 ? out_frame.plane_stride[0] : 0;
+    return plane_count > 0 ? AVB_OK : AVB_ERROR_DECODE_FAILED;
+}
+
+avb_result AvbBackendFFmpeg::fill_cpu_video_frame(
+    AVFrame *frame,
+    double pts_sec,
+    avb_video_frame &out_frame
+) {
+    int w = frame->width;
+    int h = frame->height;
+    AVPixelFormat src_fmt = (AVPixelFormat)frame->format;
+
+    // Rebuild swscale context if source properties changed
+    if (!m_sws || m_sws_src_w != w || m_sws_src_h != h || m_sws_src_fmt != src_fmt) {
+        if (m_sws) m_ff.sws_freeContext(m_sws);
+        m_sws = m_ff.sws_getContext(
+            w, h, src_fmt,
+            w, h, m_dst_av_fmt,
+            SWS_BILINEAR, nullptr, nullptr, nullptr);
+        if (!m_sws) {
+            set_error("sws_getContext failed (unsupported pixel format?).");
+            return AVB_ERROR_DECODE_FAILED;
+        }
+        m_sws_src_w   = w;
+        m_sws_src_h   = h;
+        m_sws_src_fmt = src_fmt;
+    }
+
+    // Lay out the destination buffer per output format:
+    //   RGBA/BGRA: 1 packed plane (stride w*4)
+    //   NV12:      2 planes — Y (w), interleaved CbCr (w) at half height
+    //   I420:      3 planes — Y (w), Cb (w/2), Cr (w/2) at half height
+    int      plane_count = 1;
+    int      dst_stride[AVB_MAX_PLANES] = {0, 0, 0};
+    int      plane_rows[AVB_MAX_PLANES] = {0, 0, 0};
+    switch (m_video_format) {
+        case AVB_PIXEL_FORMAT_NV12:
+            plane_count = 2;
+            dst_stride[0] = w;     plane_rows[0] = h;
+            dst_stride[1] = w;     plane_rows[1] = h / 2;
+            break;
+        case AVB_PIXEL_FORMAT_I420:
+            plane_count = 3;
+            dst_stride[0] = w;     plane_rows[0] = h;
+            dst_stride[1] = w / 2; plane_rows[1] = h / 2;
+            dst_stride[2] = w / 2; plane_rows[2] = h / 2;
+            break;
+        default: // RGBA8 / BGRA8
+            plane_count = 1;
+            dst_stride[0] = w * 4; plane_rows[0] = h;
+            break;
+    }
+
+    size_t plane_off[AVB_MAX_PLANES] = {0, 0, 0};
+    size_t total = 0;
+    for (int p = 0; p < plane_count; ++p) {
+        plane_off[p] = total;
+        total += (size_t)dst_stride[p] * plane_rows[p];
+    }
+    m_video_out_buf.resize(total);
+
+    uint8_t *dst_data[AVB_MAX_PLANES] = {nullptr, nullptr, nullptr};
+    for (int p = 0; p < plane_count; ++p)
+        dst_data[p] = m_video_out_buf.data() + plane_off[p];
+    m_ff.sws_scale(m_sws,
+        (const uint8_t *const *)frame->data, frame->linesize,
+        0, h, dst_data, dst_stride);
+
+    out_frame = {};
+    out_frame.width       = w;
+    out_frame.height      = h;
+    out_frame.format      = m_video_format;
+    out_frame.pts_sec     = pts_sec;
+    out_frame.memory_type = AVB_VIDEO_MEMORY_CPU;
+    out_frame.hardware_device = AVB_HW_DEVICE_AUTO;
+    out_frame.plane_count = plane_count;
+    for (int p = 0; p < AVB_MAX_PLANES; ++p) out_frame.dmabuf_fd[p] = -1;
+    for (int p = 0; p < plane_count; ++p) {
+        out_frame.plane_data[p]   = dst_data[p];
+        out_frame.plane_stride[p] = dst_stride[p];
+        out_frame.plane_offset[p] = (int)plane_off[p];
+    }
+    out_frame.data      = out_frame.plane_data[0];
+    out_frame.stride    = out_frame.plane_stride[0];
+    out_frame.data_size = (int)m_video_out_buf.size();
+    return AVB_OK;
+}
+
 avb_result AvbBackendFFmpeg::read_video_frame(avb_video_frame &out_frame) {
     if (m_custom_video_decoder) return read_custom_video_frame(out_frame);
     if (!m_video_codec_ctx) return AVB_ERROR_STREAM_NOT_FOUND;
@@ -660,83 +976,34 @@ avb_result AvbBackendFFmpeg::read_video_frame(avb_video_frame &out_frame) {
             }
             m_seek_target = -1.0;
 
-            int w = m_video_frame->width;
-            int h = m_video_frame->height;
-            AVPixelFormat src_fmt = (AVPixelFormat)m_video_frame->format;
+            AVFrame *output_frame = m_video_frame;
+            bool is_hw_frame = m_hw_pix_fmt != AV_PIX_FMT_NONE &&
+                (AVPixelFormat)m_video_frame->format == m_hw_pix_fmt;
 
-            // Rebuild swscale context if source properties changed
-            if (!m_sws || m_sws_src_w != w || m_sws_src_h != h || m_sws_src_fmt != src_fmt) {
-                if (m_sws) m_ff.sws_freeContext(m_sws);
-                m_sws = m_ff.sws_getContext(
-                    w, h, src_fmt,
-                    w, h, m_dst_av_fmt,
-                    SWS_BILINEAR, nullptr, nullptr, nullptr);
-                if (!m_sws) {
-                    m_ff.av_frame_unref(m_video_frame);
-                    set_error("sws_getContext failed (unsupported pixel format?).");
-                    return AVB_ERROR_DECODE_FAILED;
+            avb_result frame_res = AVB_OK;
+            if (is_hw_frame && m_video_memory == AVB_VIDEO_MEMORY_NATIVE) {
+                frame_res = fill_native_video_frame(m_video_frame, frame_pts, out_frame);
+            } else if (is_hw_frame && m_video_memory == AVB_VIDEO_MEMORY_DMABUF) {
+                frame_res = fill_dmabuf_video_frame(m_video_frame, frame_pts, out_frame);
+            } else {
+                if (is_hw_frame) {
+                    m_ff.av_frame_unref(m_hw_transfer_frame);
+                    int transfer_res = m_ff.av_hwframe_transfer_data(
+                        m_hw_transfer_frame, m_video_frame, 0);
+                    if (transfer_res < 0) {
+                        m_ff.av_frame_unref(m_video_frame);
+                        set_ff_error("av_hwframe_transfer_data (video)", transfer_res);
+                        return AVB_ERROR_DECODE_FAILED;
+                    }
+                    m_hw_transfer_frame->pts = m_video_frame->pts;
+                    output_frame = m_hw_transfer_frame;
                 }
-                m_sws_src_w   = w;
-                m_sws_src_h   = h;
-                m_sws_src_fmt = src_fmt;
+                frame_res = fill_cpu_video_frame(output_frame, frame_pts, out_frame);
             }
-
-            // Lay out the destination buffer per output format:
-            //   RGBA/BGRA: 1 packed plane (stride w*4)
-            //   NV12:      2 planes — Y (w), interleaved CbCr (w) at half height
-            //   I420:      3 planes — Y (w), Cb (w/2), Cr (w/2) at half height
-            int      plane_count = 1;
-            int      dst_stride[AVB_MAX_PLANES] = {0, 0, 0};
-            int      plane_rows[AVB_MAX_PLANES] = {0, 0, 0};
-            switch (m_video_format) {
-                case AVB_PIXEL_FORMAT_NV12:
-                    plane_count = 2;
-                    dst_stride[0] = w;     plane_rows[0] = h;
-                    dst_stride[1] = w;     plane_rows[1] = h / 2;
-                    break;
-                case AVB_PIXEL_FORMAT_I420:
-                    plane_count = 3;
-                    dst_stride[0] = w;     plane_rows[0] = h;
-                    dst_stride[1] = w / 2; plane_rows[1] = h / 2;
-                    dst_stride[2] = w / 2; plane_rows[2] = h / 2;
-                    break;
-                default: // RGBA8 / BGRA8
-                    plane_count = 1;
-                    dst_stride[0] = w * 4; plane_rows[0] = h;
-                    break;
-            }
-
-            size_t plane_off[AVB_MAX_PLANES] = {0, 0, 0};
-            size_t total = 0;
-            for (int p = 0; p < plane_count; ++p) {
-                plane_off[p] = total;
-                total += (size_t)dst_stride[p] * plane_rows[p];
-            }
-            m_video_out_buf.resize(total);
-
-            uint8_t *dst_data[AVB_MAX_PLANES] = {nullptr, nullptr, nullptr};
-            for (int p = 0; p < plane_count; ++p)
-                dst_data[p] = m_video_out_buf.data() + plane_off[p];
-            m_ff.sws_scale(m_sws,
-                (const uint8_t *const *)m_video_frame->data, m_video_frame->linesize,
-                0, h, dst_data, dst_stride);
 
             m_ff.av_frame_unref(m_video_frame);
-
-            out_frame = {};
-            out_frame.width       = w;
-            out_frame.height      = h;
-            out_frame.format      = m_video_format;
-            out_frame.pts_sec     = frame_pts;
-            out_frame.plane_count = plane_count;
-            for (int p = 0; p < plane_count; ++p) {
-                out_frame.plane_data[p]   = dst_data[p];
-                out_frame.plane_stride[p] = dst_stride[p];
-            }
-            out_frame.data      = out_frame.plane_data[0];
-            out_frame.stride    = out_frame.plane_stride[0];
-            out_frame.data_size = (int)m_video_out_buf.size();
-            return AVB_OK;
+            if (output_frame == m_hw_transfer_frame) m_ff.av_frame_unref(m_hw_transfer_frame);
+            return frame_res;
         }
 
         if (ret != AVERROR(EAGAIN)) {
@@ -769,6 +1036,14 @@ void AvbBackendFFmpeg::release_video_frame(avb_video_frame &frame) {
             m_custom_video_decoder->release_frame(m_custom_video_ctx, &frame);
         memset(&frame, 0, sizeof(frame));
         return;
+    }
+    if (frame.memory_type == AVB_VIDEO_MEMORY_NATIVE &&
+        frame.native_owner == this && m_native_video_frame) {
+        m_ff.av_frame_unref(m_native_video_frame);
+    }
+    if (frame.memory_type == AVB_VIDEO_MEMORY_DMABUF &&
+        frame.native_owner == this && m_drm_video_frame) {
+        m_ff.av_frame_unref(m_drm_video_frame);
     }
     // Output buffer is owned by the backend and reused on the next read_video_frame call.
     // Just zero the caller's frame struct so they can't accidentally use stale pointers.

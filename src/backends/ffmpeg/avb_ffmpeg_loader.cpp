@@ -169,6 +169,7 @@ bool avb_ffmpeg_load(AvbFFmpegFuncs &out_funcs, char *err_buf, int err_buf_size)
     LOAD_SYM(g_handle_avformat, out_funcs, avformat_free_context);
 
     LOAD_SYM(g_handle_avcodec, out_funcs, avcodec_find_decoder);
+    LOAD_SYM(g_handle_avcodec, out_funcs, avcodec_get_hw_config);
     LOAD_SYM(g_handle_avcodec, out_funcs, avcodec_alloc_context3);
     LOAD_SYM(g_handle_avcodec, out_funcs, avcodec_parameters_to_context);
     LOAD_SYM(g_handle_avcodec, out_funcs, avcodec_open2);
@@ -185,6 +186,7 @@ bool avb_ffmpeg_load(AvbFFmpegFuncs &out_funcs, char *err_buf, int err_buf_size)
     LOAD_SYM(g_handle_avutil, out_funcs, av_frame_alloc);
     LOAD_SYM(g_handle_avutil, out_funcs, av_frame_free);
     LOAD_SYM(g_handle_avutil, out_funcs, av_frame_unref);
+    LOAD_SYM(g_handle_avutil, out_funcs, av_frame_ref);
     LOAD_SYM(g_handle_avutil, out_funcs, av_frame_get_buffer);
     LOAD_SYM(g_handle_avutil, out_funcs, av_samples_get_buffer_size);
     LOAD_SYM(g_handle_avutil, out_funcs, av_malloc);
@@ -216,12 +218,22 @@ bool avb_ffmpeg_load(AvbFFmpegFuncs &out_funcs, char *err_buf, int err_buf_size)
     LOAD_SYM(g_handle_avformat, out_funcs, avio_closep);
 
     LOAD_SYM(g_handle_avcodec, out_funcs, avcodec_find_encoder);
+    LOAD_SYM(g_handle_avcodec, out_funcs, avcodec_find_encoder_by_name);
     LOAD_SYM(g_handle_avcodec, out_funcs, avcodec_send_frame);
     LOAD_SYM(g_handle_avcodec, out_funcs, avcodec_receive_packet);
     LOAD_SYM(g_handle_avcodec, out_funcs, avcodec_parameters_from_context);
     LOAD_SYM(g_handle_avcodec, out_funcs, av_packet_rescale_ts);
 
     LOAD_SYM(g_handle_avutil, out_funcs, av_frame_make_writable);
+    LOAD_SYM(g_handle_avutil, out_funcs, av_hwdevice_ctx_create);
+    LOAD_SYM(g_handle_avutil, out_funcs, av_hwframe_ctx_alloc);
+    LOAD_SYM(g_handle_avutil, out_funcs, av_hwframe_ctx_init);
+    LOAD_SYM(g_handle_avutil, out_funcs, av_hwframe_get_buffer);
+    LOAD_SYM(g_handle_avutil, out_funcs, av_hwframe_map);
+    LOAD_SYM(g_handle_avutil, out_funcs, av_hwframe_transfer_data);
+    LOAD_SYM(g_handle_avutil, out_funcs, av_buffer_create);
+    LOAD_SYM(g_handle_avutil, out_funcs, av_buffer_ref);
+    LOAD_SYM(g_handle_avutil, out_funcs, av_buffer_unref);
     LOAD_SYM(g_handle_avutil, out_funcs, av_dict_set);
     LOAD_SYM(g_handle_avutil, out_funcs, av_dict_free);
     LOAD_SYM(g_handle_avutil, out_funcs, av_d2q);

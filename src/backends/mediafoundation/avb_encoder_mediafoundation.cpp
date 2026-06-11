@@ -172,6 +172,12 @@ avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_op
         m_last_error = "Encoder requires at least one of video/audio enabled.";
         return AVB_ERROR_INVALID_ARGUMENT;
     }
+    if (options.video.enable &&
+        (options.video.input_memory != AVB_VIDEO_MEMORY_CPU ||
+         options.video.hardware_policy == AVB_HARDWARE_REQUIRE)) {
+        m_last_error = "Media Foundation native hardware video input is not implemented yet.";
+        return AVB_ERROR_OPEN_FAILED;
+    }
 
     int wlen = MultiByteToWideChar(CP_UTF8, 0, path, -1, nullptr, 0);
     if (wlen <= 0) {
@@ -230,6 +236,7 @@ avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_op
         custom_info.height = m_impl->height;
         custom_info.frame_rate = m_impl->frame_rate;
         custom_info.input_format = m_impl->input_format;
+        custom_info.input_memory = options.video.input_memory;
         custom_info.codec = options.video.codec;
         custom_info.bitrate = options.video.bitrate;
         const avb_video_encoder_plugin *plugin =
