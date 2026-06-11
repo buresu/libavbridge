@@ -35,6 +35,25 @@ hardware frames. Use `avb_decode_options::video_memory` and
 `avb_video_encode_params::input_memory` plus the same hardware options to feed
 native frames into encoders.
 
+Memory modes:
+
+- `AVB_VIDEO_MEMORY_CPU` is the portable default. Frames use `plane_data[]`,
+  `plane_stride[]`, `data`, and `stride`.
+- `AVB_VIDEO_MEMORY_NATIVE` keeps the backend's native object alive until the
+  frame is released. FFmpeg uses `AVFrame*`; GStreamer uses `GstBuffer*`;
+  platform backends should use their reference-counted surface object.
+- `AVB_VIDEO_MEMORY_DMABUF` is the Linux zero-copy interchange mode. Frames
+  carry DRM PRIME / DMABUF fd, offset, stride, modifier, and `drm_format`
+  metadata. Multiple planes may point at the same fd.
+
+Hardware policy:
+
+- `AVB_HARDWARE_DISABLED` keeps the request on CPU/system-memory paths.
+- `AVB_HARDWARE_PREFER` enables hardware when the backend can do so and keeps a
+  CPU fallback only where such a fallback preserves the requested memory type.
+- `AVB_HARDWARE_REQUIRE` makes `open` fail unless the backend can satisfy the
+  requested codec, device, and memory type in hardware.
+
 Implemented native paths:
 
 - FFmpeg decode returns backend-owned `AVFrame*` handles for hardware frames;
@@ -55,6 +74,17 @@ Implemented native paths:
 - FFmpeg encode can import DMABUF input into the VAAPI hardware encoder path by
   wrapping the plane descriptors as a DRM PRIME `AVFrame`.
 
+The optional `avb_dmabuf_roundtrip` CTest smoke validates all Linux VAAPI
+interchange paths when the runtime stack supports them:
+
+- FFmpeg decode -> FFmpeg encode
+- FFmpeg decode -> GStreamer encode
+- GStreamer decode -> GStreamer encode
+- GStreamer decode -> FFmpeg encode
+
+On systems without VAAPI, DMABUF support, or the relevant plugins/codecs, those
+tests skip rather than fail.
+
 ### Runtime libraries
 
 GStreamer backend (Linux default):
@@ -63,10 +93,15 @@ GStreamer backend (Linux default):
 - `libgstvideo-1.0`, `libgstallocators-1.0`
 - `libglib-2.0`, `libgobject-2.0`
 - GStreamer plugins: `base`, `good` (plus others for additional codecs)
+- For VAAPI native/DMABUF paths: the GStreamer `va` plugin (for example
+  `gst-plugin-va` on Arch Linux), a working VA driver, and `vainfo` reporting
+  the required decode/encode entrypoints.
 
 FFmpeg backend (optional):
 
 - `libavformat`, `libavcodec`, `libavutil`, `libswresample`, `libswscale`
+- For VAAPI native/DMABUF paths: an FFmpeg build with VAAPI and DRM PRIME
+  hwcontext support, plus a working VA driver.
 
 > Users and distributors are responsible for ensuring that their installed
 > GStreamer / FFmpeg builds and codec usage comply with applicable licenses and

@@ -93,10 +93,12 @@ typedef enum avb_codec {
 typedef enum avb_hardware_policy {
     /* Always use CPU/system-memory codec paths. */
     AVB_HARDWARE_DISABLED = 0,
-    /* Prefer hardware acceleration, but keep the selected backend usable when
-     * the requested device is unavailable. */
+    /* Prefer hardware acceleration, but keep the selected backend usable when a
+     * CPU fallback exists. Requests for NATIVE/DMABUF memory may still fail
+     * when the selected backend cannot produce or consume that memory type. */
     AVB_HARDWARE_PREFER = 1,
-    /* Opening fails unless the selected backend can use hardware acceleration. */
+    /* Opening fails unless the selected backend can use hardware acceleration
+     * for the requested codec, device, and memory type. */
     AVB_HARDWARE_REQUIRE = 2,
 } avb_hardware_policy;
 
@@ -111,14 +113,19 @@ typedef enum avb_hardware_device {
 } avb_hardware_device;
 
 typedef enum avb_video_memory_type {
-    /* plane_data/data point to CPU-readable memory. */
+    /* CPU-readable planes. Decoders fill plane_data/data; encoders read them. */
     AVB_VIDEO_MEMORY_CPU = 0,
-    /* native_handle/native_handle_id describes a backend-native frame/surface.
-     * The exact object type is selected by hardware_device and backend_name:
-     * VAAPI -> VASurfaceID in native_handle_id, D3D11VA -> ID3D11Texture2D*,
-     * VideoToolbox/AVFoundation -> CVPixelBufferRef, GStreamer -> GstBuffer*. */
+    /* Backend-native frame or surface. The handle type is backend-specific:
+     * FFmpeg returns/accepts AVFrame* in native_handle and, for VAAPI frames,
+     * also reports VASurfaceID in native_handle_id. GStreamer returns/accepts
+     * GstBuffer*. Future platform backends should use native_handle for the
+     * reference-counted object (CVPixelBufferRef, ID3D11Texture2D*, etc.) and
+     * native_handle_id for small numeric surface IDs when useful. */
     AVB_VIDEO_MEMORY_NATIVE = 1,
-    /* dmabuf_fd/plane_stride/plane_offset describe exported DMABUF planes. */
+    /* Linux DRM PRIME / DMABUF frame. drm_format is the DRM fourcc for the full
+     * image (for example NV12), while dmabuf_fd/plane_offset/plane_stride and
+     * dmabuf_modifier describe each plane. Multiple planes may reference the
+     * same fd with different offsets. */
     AVB_VIDEO_MEMORY_DMABUF = 2,
 } avb_video_memory_type;
 
@@ -128,11 +135,21 @@ typedef enum avb_video_memory_type {
 
 #define AVB_MAX_PLANES 3
 
-/* A video frame. Used both as decoder output and encoder input. As decoder
- * output the decoder owns the backing memory until avb_decoder_release_video_frame.
- * As encoder input the caller fills width/height/format and plane_data/plane_stride
- * for plane_count planes (data/stride alias plane 0); pts_sec may carry a
- * timestamp (see avb_encoder_write_video).
+/* A video frame. Used both as decoder output and encoder input.
+ *
+ * Decoder output:
+ * - The decoder owns all backing memory, native handles, and DMABUF fds until
+ *   avb_decoder_release_video_frame().
+ * - Applications may inspect or pass those handles to another avbridge encoder
+ *   before release, but must not close/destroy them.
+ *
+ * Encoder input:
+ * - For CPU memory, the caller fills width/height/format and plane_data/
+ *   plane_stride for plane_count planes (data/stride alias plane 0).
+ * - For NATIVE/DMABUF input, the caller owns the handles/fds it supplies.
+ *   Backends retain or duplicate what they need during avb_encoder_write_video();
+ *   the caller must keep the frame valid until that call returns.
+ * - pts_sec may carry a timestamp (see avb_encoder_write_video).
  *
  * For compressed block formats (BC1/BC3/BC4/BC5/BC7), plane_count is 1,
  * plane_data[0]/data points to the compressed block payload, data_size is the
@@ -158,13 +175,13 @@ typedef struct avb_video_frame {
     int stride;
     int data_size;
 
-    /* Native/GPU frame ownership stays with libavbridge until the frame is
-     * released. Callers may inspect/use the handle before release, but must not
-     * destroy it. DMABUF fds are likewise owned by libavbridge unless explicitly
-     * documented otherwise by a backend-specific integration. */
+    /* Native/GPU handles. native_owner is for libavbridge's decoder-side
+     * lifetime tracking; applications should leave it NULL for encoder input. */
     void *native_handle;
     uint64_t native_handle_id;
     void *native_owner;
+    /* DRM PRIME / DMABUF metadata. drm_format is a DRM fourcc for the full
+     * image; modifier values are per plane/fd object. */
     uint32_t drm_format;
     int dmabuf_fd[AVB_MAX_PLANES];
     uint64_t dmabuf_modifier[AVB_MAX_PLANES];
@@ -238,9 +255,15 @@ typedef struct avb_decode_options {
     /* Desired decoded video pixel format. AVB_PIXEL_FORMAT_UNKNOWN (0) selects
      * the backend default (BGRA8). */
     avb_pixel_format video_format;
-    /* Desired decoded video memory. CPU keeps the historical plane_data output.
-     * NATIVE returns backend-owned hardware surfaces when available. DMABUF asks
-     * capable Linux backends to export frame planes as DMABUF descriptors. */
+    /* Desired decoded video memory.
+     *
+     * CPU: backend returns CPU-readable plane_data.
+     * NATIVE: backend returns hardware/native handles when available.
+     * DMABUF: Linux backends export DRM PRIME / DMABUF descriptors.
+     *
+     * Requesting NATIVE or DMABUF implies a hardware-capable decode path.
+     * Use hardware_policy=REQUIRE when fallback would be a bug for the caller.
+     * DMABUF is not synthesized from CPU frames. */
     avb_video_memory_type video_memory;
     avb_hardware_policy hardware_policy;
     avb_hardware_device hardware_device;
@@ -495,6 +518,12 @@ typedef struct avb_video_encode_params {
     avb_codec codec;               /* AUTO -> H.264; or H264/HEVC/VP9 */
     int bitrate;                   /* bits/sec, 0 = backend default */
     avb_pixel_format input_format; /* format of frames passed to write_video */
+    /* Expected memory for frames passed to avb_encoder_write_video.
+     *
+     * CPU input can be encoded by software or uploaded to a hardware encoder
+     * when hardware_policy requests one. NATIVE and DMABUF input require a
+     * compatible hardware encoder path; backend/device mismatches are reported
+     * as open/write failures rather than hidden CPU readbacks. */
     avb_video_memory_type input_memory;
     avb_hardware_policy hardware_policy;
     avb_hardware_device hardware_device;
