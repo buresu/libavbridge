@@ -591,6 +591,20 @@ AVB_API avb_result avb_decoder_query_capabilities(
     avb_decoder_capabilities *out
 );
 
+/* Query decoder capabilities backed by the current runtime environment.
+ * This has the same shape as avb_decoder_query_capabilities(), but filters the
+ * lists to codecs/devices that can be found in the loaded runtime backend
+ * (FFmpeg libraries, GStreamer elements/plugins, or platform runtime).
+ *
+ * It still does not inspect a concrete media stream; use avb_probe_media for
+ * source-specific stream information. Returns AVB_OK when the probe itself ran
+ * and fills `out`; inspect out->result before using the lists. */
+AVB_API avb_result avb_decoder_probe_runtime_capabilities(
+    avb_backend backend,
+    const char *path,
+    avb_decoder_capabilities *out
+);
+
 /* Open `path` for decoding. options may be NULL (uses the defaults above).
  * On failure a non-NULL *out_dec is still returned so the caller can read
  * avb_decoder_get_last_error(); it must still be released with
@@ -737,6 +751,21 @@ AVB_API avb_result avb_encoder_validate_options(
  * Returns AVB_OK when the query itself ran and fills `out`; inspect out->result
  * before using the lists. */
 AVB_API avb_result avb_encoder_query_capabilities(
+    avb_backend backend,
+    const char *path,
+    avb_encoder_capabilities *out
+);
+
+/* Query encoder capabilities backed by the current runtime environment.
+ * This has the same shape as avb_encoder_query_capabilities(), but filters the
+ * lists to codecs/devices that can be found in the loaded runtime backend
+ * (FFmpeg libraries, GStreamer elements/plugins, or platform runtime).
+ *
+ * It does not prove that a specific resolution, bitrate, or device accepts a
+ * full encode session; avb_encoder_open remains the final authority. Returns
+ * AVB_OK when the probe itself ran and fills `out`; inspect out->result before
+ * using the lists. */
+AVB_API avb_result avb_encoder_probe_runtime_capabilities(
     avb_backend backend,
     const char *path,
     avb_encoder_capabilities *out

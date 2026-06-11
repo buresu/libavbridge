@@ -258,6 +258,24 @@ int main(int argc, char *argv[]) {
         check(avb_decoder_query_capabilities(backend, path, nullptr) ==
               AVB_ERROR_INVALID_ARGUMENT,
               "decoder_query_capabilities rejects null output");
+
+        check(avb_decoder_probe_runtime_capabilities(backend, path, &caps) == AVB_OK,
+              "decoder_probe_runtime_capabilities runs");
+        check(caps.result == AVB_OK,
+              "decoder runtime capabilities reports usable backend");
+        check(caps.backend_name && caps.container_name && caps.message,
+              "decoder runtime capabilities reports names/message");
+        check(caps.can_decode_video && has_video_codec(caps, AVB_VIDEO_CODEC_H264),
+              "decoder runtime capabilities includes h264 for fixture");
+        check(caps.can_decode_audio && has_audio_codec(caps, AVB_AUDIO_CODEC_AAC),
+              "decoder runtime capabilities includes aac for fixture");
+        check(has_pixel_format(caps, AVB_PIXEL_FORMAT_BGRA8),
+              "decoder runtime capabilities includes BGRA8 output");
+        check(has_video_memory(caps, AVB_VIDEO_MEMORY_CPU),
+              "decoder runtime capabilities includes CPU video memory");
+        check(avb_decoder_probe_runtime_capabilities(backend, path, nullptr) ==
+              AVB_ERROR_INVALID_ARGUMENT,
+              "decoder_probe_runtime_capabilities rejects null output");
     }
     {
         avb_encode_options e = avb_encode_options_default();
@@ -324,6 +342,22 @@ int main(int argc, char *argv[]) {
         check(avb_encoder_query_capabilities(backend, path, nullptr) ==
               AVB_ERROR_INVALID_ARGUMENT,
               "encoder_query_capabilities rejects null output");
+
+        check(avb_encoder_probe_runtime_capabilities(backend, path, &caps) == AVB_OK,
+              "encoder_probe_runtime_capabilities runs");
+        check(caps.result == AVB_OK,
+              "encoder runtime capabilities reports usable backend");
+        check(caps.backend_name && caps.container_name && caps.message,
+              "encoder runtime capabilities reports names/message");
+        check(caps.can_encode_video && has_video_codec(caps, AVB_VIDEO_CODEC_H264),
+              "encoder runtime capabilities includes h264 for fixture");
+        check(caps.can_encode_audio && has_audio_codec(caps, AVB_AUDIO_CODEC_AAC),
+              "encoder runtime capabilities includes aac for fixture");
+        check(has_video_memory(caps, AVB_VIDEO_MEMORY_CPU),
+              "encoder runtime capabilities includes CPU video memory");
+        check(avb_encoder_probe_runtime_capabilities(backend, path, nullptr) ==
+              AVB_ERROR_INVALID_ARGUMENT,
+              "encoder_probe_runtime_capabilities rejects null output");
     }
 
     avb_decode_options opts{};
