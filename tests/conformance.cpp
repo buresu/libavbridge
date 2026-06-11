@@ -62,6 +62,14 @@ static avb_result dummy_decode_packet(void *, const avb_encoded_packet *,
     return AVB_ERROR_AGAIN;
 }
 
+static bool has_video_codec(const avb_decoder_capabilities &caps,
+                            avb_video_codec codec) {
+    for (int i = 0; i < caps.video_codec_count; ++i) {
+        if (caps.video_codecs[i] == codec) return true;
+    }
+    return false;
+}
+
 static bool has_video_codec(const avb_encoder_capabilities &caps,
                             avb_video_codec codec) {
     for (int i = 0; i < caps.video_codec_count; ++i) {
@@ -70,10 +78,34 @@ static bool has_video_codec(const avb_encoder_capabilities &caps,
     return false;
 }
 
+static bool has_audio_codec(const avb_decoder_capabilities &caps,
+                            avb_audio_codec codec) {
+    for (int i = 0; i < caps.audio_codec_count; ++i) {
+        if (caps.audio_codecs[i] == codec) return true;
+    }
+    return false;
+}
+
 static bool has_audio_codec(const avb_encoder_capabilities &caps,
                             avb_audio_codec codec) {
     for (int i = 0; i < caps.audio_codec_count; ++i) {
         if (caps.audio_codecs[i] == codec) return true;
+    }
+    return false;
+}
+
+static bool has_pixel_format(const avb_decoder_capabilities &caps,
+                             avb_pixel_format format) {
+    for (int i = 0; i < caps.pixel_format_count; ++i) {
+        if (caps.pixel_formats[i] == format) return true;
+    }
+    return false;
+}
+
+static bool has_video_memory(const avb_decoder_capabilities &caps,
+                             avb_video_memory_type memory) {
+    for (int i = 0; i < caps.video_memory_count; ++i) {
+        if (caps.video_memory[i] == memory) return true;
     }
     return false;
 }
@@ -184,6 +216,48 @@ int main(int argc, char *argv[]) {
         check(avb_decoder_validate_options(&d, &v) == AVB_OK &&
               !v.ok && v.result == AVB_ERROR_INVALID_ARGUMENT,
               "decoder_validate_options rejects native output with hardware disabled");
+    }
+    {
+        avb_decoder_capabilities caps{};
+        check(avb_decoder_query_capabilities(backend, path, &caps) == AVB_OK,
+              "decoder_query_capabilities runs");
+        check(caps.result == AVB_OK,
+              "decoder_query_capabilities reports usable backend");
+        check(caps.backend_name && caps.container_name && caps.message,
+              "decoder capabilities reports names/message");
+        check(caps.can_decode_video && has_video_codec(caps, AVB_VIDEO_CODEC_H264),
+              "decoder capabilities includes h264 for mp4");
+        check(caps.can_decode_audio && has_audio_codec(caps, AVB_AUDIO_CODEC_AAC),
+              "decoder capabilities includes aac for mp4");
+        check(has_pixel_format(caps, AVB_PIXEL_FORMAT_BGRA8),
+              "decoder capabilities includes BGRA8 output");
+        check(has_video_memory(caps, AVB_VIDEO_MEMORY_CPU),
+              "decoder capabilities includes CPU video memory");
+
+        check(avb_decoder_query_capabilities(backend, "input.ogg", &caps) == AVB_OK &&
+              caps.result == AVB_OK,
+              "decoder capabilities filters ogg container");
+        check(caps.can_decode_video == 0 &&
+              !has_video_codec(caps, AVB_VIDEO_CODEC_H264),
+              "decoder capabilities excludes video for ogg");
+        check(!has_audio_codec(caps, AVB_AUDIO_CODEC_AAC),
+              "decoder capabilities excludes aac for ogg");
+        if (caps.backend == AVB_BACKEND_FFMPEG ||
+            caps.backend == AVB_BACKEND_GSTREAMER) {
+            check(caps.can_decode_audio &&
+                  has_audio_codec(caps, AVB_AUDIO_CODEC_OPUS) &&
+                  has_audio_codec(caps, AVB_AUDIO_CODEC_VORBIS),
+                  "decoder capabilities includes opus/vorbis for ogg");
+        }
+
+        check(avb_decoder_query_capabilities(backend, nullptr, &caps) == AVB_OK &&
+              caps.result == AVB_OK &&
+              has_video_codec(caps, AVB_VIDEO_CODEC_H264) &&
+              has_audio_codec(caps, AVB_AUDIO_CODEC_AAC),
+              "decoder capabilities supports broad query without path");
+        check(avb_decoder_query_capabilities(backend, path, nullptr) ==
+              AVB_ERROR_INVALID_ARGUMENT,
+              "decoder_query_capabilities rejects null output");
     }
     {
         avb_encode_options e = avb_encode_options_default();

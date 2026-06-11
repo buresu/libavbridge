@@ -1,84 +1,17 @@
 #include "avbridge.h"
+#include "avb_capability_common.hpp"
 #include "avb_video_codec_registry.hpp"
-
-#include <cctype>
-#include <cstring>
 
 namespace {
 
-enum class Container {
-    mp4,
-    mov,
-    m4a,
-    webm,
-    mkv,
-    ogg,
-    wav,
-    flac,
-    mp3,
-    unknown,
-};
-
-static bool ends_with_ci(const char *path, const char *suffix) {
-    size_t plen = std::strlen(path);
-    size_t slen = std::strlen(suffix);
-    if (plen < slen) return false;
-    path += plen - slen;
-    for (size_t i = 0; i < slen; ++i) {
-        unsigned char a = (unsigned char)path[i];
-        unsigned char b = (unsigned char)suffix[i];
-        if ((char)std::tolower(a) != (char)std::tolower(b)) return false;
-    }
-    return true;
-}
-
-static Container container_from_path(const char *path) {
-    if (ends_with_ci(path, ".mov"))  return Container::mov;
-    if (ends_with_ci(path, ".m4a"))  return Container::m4a;
-    if (ends_with_ci(path, ".webm")) return Container::webm;
-    if (ends_with_ci(path, ".mkv"))  return Container::mkv;
-    if (ends_with_ci(path, ".ogg"))  return Container::ogg;
-    if (ends_with_ci(path, ".wav"))  return Container::wav;
-    if (ends_with_ci(path, ".flac")) return Container::flac;
-    if (ends_with_ci(path, ".mp3"))  return Container::mp3;
-    if (ends_with_ci(path, ".mp4"))  return Container::mp4;
-    return Container::unknown;
-}
-
-static const char *container_name(Container c) {
-    switch (c) {
-        case Container::mp4:     return "mp4";
-        case Container::mov:     return "mov";
-        case Container::m4a:     return "m4a";
-        case Container::webm:    return "webm";
-        case Container::mkv:     return "mkv";
-        case Container::ogg:     return "ogg";
-        case Container::wav:     return "wav";
-        case Container::flac:    return "flac";
-        case Container::mp3:     return "mp3";
-        case Container::unknown: return "unknown";
-    }
-    return "unknown";
-}
-
-static avb_backend resolve_backend(avb_backend backend) {
-    if (backend != AVB_BACKEND_AUTO) return backend;
-#if defined(_WIN32)
-    return AVB_BACKEND_MEDIAFOUNDATION;
-#elif defined(__APPLE__)
-    return AVB_BACKEND_AVFOUNDATION;
-#elif defined(__linux__)
-#  if defined(AVB_ENABLE_GSTREAMER)
-    return AVB_BACKEND_GSTREAMER;
-#  elif defined(AVB_ENABLE_FFMPEG)
-    return AVB_BACKEND_FFMPEG;
-#  else
-    return AVB_BACKEND_AUTO;
-#  endif
-#else
-    return AVB_BACKEND_AUTO;
-#endif
-}
+using avb::detail::Container;
+using avb::detail::audio_only_container;
+using avb::detail::container_accepts_audio;
+using avb::detail::container_accepts_video;
+using avb::detail::container_from_path;
+using avb::detail::container_name;
+using avb::detail::mp4_style_container;
+using avb::detail::resolve_backend;
 
 static avb_video_codec resolve_video_codec(avb_video_codec codec) {
     return codec == AVB_VIDEO_CODEC_AUTO ? AVB_VIDEO_CODEC_H264 : codec;
@@ -107,57 +40,8 @@ static void set_result(avb_encoder_validation &out, avb_result result, const cha
     out.message = message;
 }
 
-static bool is_audio_only_container(Container c) {
-    return c == Container::m4a || c == Container::wav ||
-           c == Container::flac || c == Container::mp3;
-}
-
 static bool ffmpeg_container_accepts_video(Container c, avb_video_codec codec) {
-    switch (c) {
-        case Container::mp4:
-        case Container::mov:
-            return codec == AVB_VIDEO_CODEC_H264 ||
-                   codec == AVB_VIDEO_CODEC_HEVC ||
-                   codec == AVB_VIDEO_CODEC_AV1;
-        case Container::webm:
-            return codec == AVB_VIDEO_CODEC_VP8 ||
-                   codec == AVB_VIDEO_CODEC_VP9 ||
-                   codec == AVB_VIDEO_CODEC_AV1;
-        case Container::mkv:
-            return true;
-        default:
-            return false;
-    }
-}
-
-static bool container_accepts_audio(Container c, avb_audio_codec codec) {
-    switch (c) {
-        case Container::mp4:
-        case Container::mov:
-        case Container::m4a:
-            return codec == AVB_AUDIO_CODEC_AAC ||
-                   codec == AVB_AUDIO_CODEC_MP3 ||
-                   codec == AVB_AUDIO_CODEC_FLAC;
-        case Container::webm:
-            return codec == AVB_AUDIO_CODEC_OPUS ||
-                   codec == AVB_AUDIO_CODEC_VORBIS;
-        case Container::mkv:
-            return true;
-        case Container::ogg:
-            return codec == AVB_AUDIO_CODEC_OPUS ||
-                   codec == AVB_AUDIO_CODEC_VORBIS ||
-                   codec == AVB_AUDIO_CODEC_FLAC;
-        case Container::wav:
-            return codec == AVB_AUDIO_CODEC_PCM_S16 ||
-                   codec == AVB_AUDIO_CODEC_PCM_F32;
-        case Container::flac:
-            return codec == AVB_AUDIO_CODEC_FLAC;
-        case Container::mp3:
-            return codec == AVB_AUDIO_CODEC_MP3;
-        case Container::unknown:
-            return codec == AVB_AUDIO_CODEC_AAC;
-    }
-    return false;
+    return c != Container::any && container_accepts_video(c, codec);
 }
 
 static bool ffmpeg_supports_video_codec(avb_video_codec codec) {
@@ -185,8 +69,7 @@ static bool platform_video_codec(avb_backend backend, avb_video_codec codec) {
 }
 
 static bool platform_container(Container c) {
-    return c == Container::mp4 || c == Container::mov || c == Container::m4a ||
-           c == Container::unknown;
+    return mp4_style_container(c);
 }
 
 static bool has_custom_video_encoder(const avb_encode_options &options) {
@@ -220,7 +103,7 @@ avb_result avb_encoder_validate_options(const char *path,
     if (!path || !options || !out) return AVB_ERROR_INVALID_ARGUMENT;
 
     *out = {};
-    Container container = container_from_path(path);
+    Container container = container_from_path(path, Container::unknown);
     out->container_name = container_name(container);
     out->backend = resolve_backend(options->backend);
     out->backend_name = avb_backend_name(out->backend);
@@ -243,7 +126,7 @@ avb_result avb_encoder_validate_options(const char *path,
                    "Requested encoder backend is not available in this build.");
         return AVB_OK;
     }
-    if (options->video.enable && is_audio_only_container(container)) {
+    if (options->video.enable && audio_only_container(container)) {
         set_result(*out, AVB_ERROR_INVALID_ARGUMENT,
                    "The output container is audio-only and cannot mux video.");
         return AVB_OK;

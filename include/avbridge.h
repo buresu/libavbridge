@@ -32,6 +32,7 @@ extern "C" {
 #define AVB_MAX_NAME 64
 #define AVB_MAX_ERROR 256
 #define AVB_MAX_CODEC_CAPS 16
+#define AVB_MAX_PIXEL_FORMAT_CAPS 16
 #define AVB_MAX_VIDEO_MEMORY_CAPS 4
 #define AVB_MAX_HARDWARE_DEVICE_CAPS 8
 
@@ -312,6 +313,26 @@ typedef struct avb_decoder_validation {
     const char *message;            /* Static human-readable validation result. */
 } avb_decoder_validation;
 
+typedef struct avb_decoder_capabilities {
+    avb_result result;              /* AVB_OK when capabilities are usable. */
+    avb_backend backend;            /* Resolved backend (AUTO expanded when possible). */
+    const char *backend_name;       /* Static string; NULL only for invalid backend values. */
+    const char *container_name;     /* Static string inferred from path, or "any". */
+    int can_decode_video;
+    int can_decode_audio;
+    int video_codec_count;
+    avb_video_codec video_codecs[AVB_MAX_CODEC_CAPS];
+    int audio_codec_count;
+    avb_audio_codec audio_codecs[AVB_MAX_CODEC_CAPS];
+    int pixel_format_count;
+    avb_pixel_format pixel_formats[AVB_MAX_PIXEL_FORMAT_CAPS];
+    int video_memory_count;
+    avb_video_memory_type video_memory[AVB_MAX_VIDEO_MEMORY_CAPS];
+    int hardware_device_count;
+    avb_hardware_device hardware_devices[AVB_MAX_HARDWARE_DEVICE_CAPS];
+    const char *message;            /* Static human-readable capability summary. */
+} avb_decoder_capabilities;
+
 typedef struct avb_io_callbacks {
     /* Read up to `size` bytes into `buf`. Return the number of bytes read,
      * 0 at end of stream, or a negative value on error. Required. */
@@ -554,6 +575,20 @@ AVB_API avb_decode_options avb_decode_options_default(void);
 AVB_API avb_result avb_decoder_validate_options(
     const avb_decode_options *options,
     avb_decoder_validation *out
+);
+
+/* Query static decoder capabilities for a backend and optional input path.
+ * When `path` is non-NULL/non-empty, codec lists are filtered by the inferred
+ * container. When `path` is NULL/empty, the lists describe the backend's broad
+ * static capability surface. This does not inspect media streams, prove runtime
+ * libraries or hardware devices, or enumerate registered custom decoders.
+ *
+ * Returns AVB_OK when the query itself ran and fills `out`; inspect out->result
+ * before using the lists. */
+AVB_API avb_result avb_decoder_query_capabilities(
+    avb_backend backend,
+    const char *path,
+    avb_decoder_capabilities *out
 );
 
 /* Open `path` for decoding. options may be NULL (uses the defaults above).

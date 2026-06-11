@@ -37,6 +37,7 @@ endif()
 
 set(AVB_SOURCES
     src/avb_decoder.cpp
+    src/avb_decoder_capabilities.cpp
     src/avb_decoder_validation.cpp
     src/avb_error.cpp
     src/avb_decoder_impl.cpp
