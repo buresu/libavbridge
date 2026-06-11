@@ -157,7 +157,9 @@ static const char *mf_codec_name(avb_codec codec) {
     switch (codec) {
         case AVB_CODEC_H264: return "H264";
         case AVB_CODEC_HEVC: return "HEVC";
+        case AVB_CODEC_VP8:  return "VP8";
         case AVB_CODEC_VP9:  return "VP9";
+        case AVB_CODEC_AV1:  return "AV1";
         case AVB_CODEC_HAP:  return "HAP";
         default:             return "custom";
     }
@@ -304,7 +306,8 @@ avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_op
 
         // Choose the encoder output (compressed) subtype from the requested
         // codec. Media Foundation ships H.264 and (on Win10+, via the HEVC Video
-        // Extensions) HEVC encoder MFTs; it has no built-in VP9 encoder.
+        // Extensions) HEVC encoder MFTs; VP8/VP9/AV1 are not available as
+        // built-in Sink Writer encoders.
         GUID     out_subtype;
         UINT32   profile = 0;       // MF_MT_MPEG2_PROFILE value, 0 = leave unset
         const char *vname;
@@ -314,8 +317,16 @@ avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_op
                 out_subtype = MFVideoFormat_H264; profile = eAVEncH264VProfile_Main; vname = "H264"; break;
             case AVB_CODEC_HEVC:
                 out_subtype = MFVideoFormat_HEVC; profile = eAVEncH265VProfile_Main_420_8; vname = "HEVC"; break;
+            case AVB_CODEC_VP8:
+                m_last_error = "VP8 encoding is not supported by the Media Foundation "
+                               "backend (use the FFmpeg or GStreamer backend).";
+                return AVB_ERROR_INVALID_ARGUMENT;
             case AVB_CODEC_VP9:
                 m_last_error = "VP9 encoding is not supported by the Media Foundation "
+                               "backend (use the FFmpeg or GStreamer backend).";
+                return AVB_ERROR_INVALID_ARGUMENT;
+            case AVB_CODEC_AV1:
+                m_last_error = "AV1 encoding is not supported by the Media Foundation "
                                "backend (use the FFmpeg or GStreamer backend).";
                 return AVB_ERROR_INVALID_ARGUMENT;
             default:

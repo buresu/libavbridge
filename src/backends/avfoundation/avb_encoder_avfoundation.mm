@@ -118,6 +118,9 @@ static FourCharCode avb_codec_fourcc(avb_codec codec) {
     switch (codec) {
         case AVB_CODEC_H264: return kCMVideoCodecType_H264;
         case AVB_CODEC_HEVC: return kCMVideoCodecType_HEVC;
+        case AVB_CODEC_VP8:  return 'vp08';
+        case AVB_CODEC_VP9:  return 'vp09';
+        case AVB_CODEC_AV1:  return 'av01';
         case AVB_CODEC_HAP:  return 'Hap1';
         default:             return 0;
     }
@@ -244,14 +247,21 @@ avb_result AvbEncoderAVFoundation::open(const char *path, const avb_encode_optio
                     return AVB_ERROR_INVALID_ARGUMENT;
                 }
 
-                // AVAssetWriter encodes H.264 and HEVC; it cannot produce VP9.
+                // AVAssetWriter encodes H.264 and HEVC; it cannot produce
+                // VP8/VP9/AV1 through the built-in writer settings.
                 AVVideoCodecType vcodec;
                 switch (options.video.codec) {
                     case AVB_CODEC_AUTO:
                     case AVB_CODEC_H264: vcodec = AVVideoCodecTypeH264; break;
                     case AVB_CODEC_HEVC: vcodec = AVVideoCodecTypeHEVC; break;
+                    case AVB_CODEC_VP8:
+                        m_last_error = "AVFoundation cannot encode VP8 (use H264, HEVC, FFmpeg, or GStreamer).";
+                        return AVB_ERROR_INVALID_ARGUMENT;
                     case AVB_CODEC_VP9:
-                        m_last_error = "AVFoundation cannot encode VP9 (use H264 or HEVC).";
+                        m_last_error = "AVFoundation cannot encode VP9 (use H264, HEVC, FFmpeg, or GStreamer).";
+                        return AVB_ERROR_INVALID_ARGUMENT;
+                    case AVB_CODEC_AV1:
+                        m_last_error = "AVFoundation cannot encode AV1 (use H264, HEVC, FFmpeg, or GStreamer).";
                         return AVB_ERROR_INVALID_ARGUMENT;
                     default:
                         m_last_error = "Invalid video codec (use AUTO/H264/HEVC/HAP).";

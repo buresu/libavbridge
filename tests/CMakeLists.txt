@@ -90,8 +90,9 @@ if(FFMPEG_EXECUTABLE)
     endforeach()
 
     # Wide codec/pixel-format coverage via the FFmpeg backend (skips if absent).
-    add_test(NAME codecs COMMAND avb_codecs "${AVB_FIXTURE}" "${AVB_OUT}/codec")
-    set_tests_properties(codecs PROPERTIES SKIP_RETURN_CODE 77)
+    add_test(NAME codecs_ffmpeg
+             COMMAND avb_codecs "${AVB_FIXTURE}" "${AVB_OUT}/codec_ffmpeg" ffmpeg)
+    set_tests_properties(codecs_ffmpeg PROPERTIES SKIP_RETURN_CODE 77)
     add_test(NAME custom_decoder_ffmpeg
              COMMAND avb_custom_decoder "${AVB_FIXTURE}" ffmpeg)
     set_tests_properties(custom_decoder_ffmpeg PROPERTIES SKIP_RETURN_CODE 77)
@@ -110,6 +111,9 @@ if(FFMPEG_EXECUTABLE)
         set_tests_properties(dmabuf_roundtrip_ffmpeg PROPERTIES SKIP_RETURN_CODE 77)
     endif()
     if(AVB_ENABLE_GSTREAMER)
+        add_test(NAME codecs_gstreamer
+                 COMMAND avb_codecs "${AVB_FIXTURE}" "${AVB_OUT}/codec_gstreamer" gstreamer video-only)
+        set_tests_properties(codecs_gstreamer PROPERTIES SKIP_RETURN_CODE 77)
         add_test(NAME custom_decoder_gstreamer
                  COMMAND avb_custom_decoder "${AVB_FIXTURE}" gstreamer)
         set_tests_properties(custom_decoder_gstreamer PROPERTIES SKIP_RETURN_CODE 77)

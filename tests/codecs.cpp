@@ -1,10 +1,10 @@
-// Codec / pixel-format coverage for the FFmpeg backend (the one with the widest
-// codec support). Round-trips the fixture through HEVC, VP9 and Opus, and feeds
-// I420 frames into the encoder, then re-opens each output and asserts the codec
-// and decodability survived. Skips cleanly if the FFmpeg backend is not built
-// in or its runtime libraries are unavailable.
+// Codec / pixel-format coverage. FFmpeg runs the broad set because it has the
+// widest codec support; GStreamer runs the web video codecs covered by plugins.
+// Each output is re-opened and checked for the expected codec and decodability.
+// Skips cleanly if the selected backend is not built in or its runtime libraries
+// are unavailable.
 //
-// Usage: avb_codecs <fixture.mp4> <out_prefix>
+// Usage: avb_codecs <fixture.mp4> <out_prefix> [backend] [video-only]
 
 #include <avbridge.h>
 
@@ -22,17 +22,17 @@ static void check(bool cond, const char *what) {
 }
 
 // Transcode the fixture's video track through `vc`, reading frames as `infmt`.
-static bool transcode_video(const char *in, const char *out, avb_codec vc,
+static bool transcode_video(const char *in, const char *out, avb_backend backend, avb_codec vc,
                             avb_pixel_format infmt) {
     avb_decode_options dop = avb_decode_options_default();
-    dop.backend = AVB_BACKEND_FFMPEG;
+    dop.backend = backend;
     dop.enable_audio = 0; dop.enable_video = 1; dop.video_format = infmt;
     avb_decoder *d = nullptr;
     if (avb_decoder_open(&d, in, &dop) != AVB_OK) { avb_decoder_close(d); return false; }
     avb_media_info mi{}; avb_decoder_get_media_info(d, &mi);
 
     avb_encode_options eo = avb_encode_options_default();
-    eo.backend = AVB_BACKEND_FFMPEG;
+    eo.backend = backend;
     eo.video.enable = 1; eo.video.width = mi.video.width; eo.video.height = mi.video.height;
     eo.video.frame_rate = mi.video.frame_rate > 0 ? mi.video.frame_rate : 25.0;
     eo.video.codec = vc; eo.video.input_format = infmt;
@@ -52,9 +52,9 @@ static bool transcode_video(const char *in, const char *out, avb_codec vc,
     return ok;
 }
 
-static bool transcode_audio(const char *in, const char *out, avb_codec ac, int rate) {
+static bool transcode_audio(const char *in, const char *out, avb_backend backend, avb_codec ac, int rate) {
     avb_decode_options dop = avb_decode_options_default();
-    dop.backend = AVB_BACKEND_FFMPEG;
+    dop.backend = backend;
     dop.enable_audio = 1; dop.enable_video = 0;
     dop.audio_sample_rate = rate; dop.audio_channels = 2;
     avb_decoder *d = nullptr;
@@ -62,7 +62,7 @@ static bool transcode_audio(const char *in, const char *out, avb_codec ac, int r
     avb_media_info mi{}; avb_decoder_get_media_info(d, &mi);
 
     avb_encode_options eo = avb_encode_options_default();
-    eo.backend = AVB_BACKEND_FFMPEG;
+    eo.backend = backend;
     eo.audio.enable = 1; eo.audio.sample_rate = mi.audio.sample_rate;
     eo.audio.channels = mi.audio.channels; eo.audio.codec = ac;
     avb_encoder *e = nullptr;
@@ -82,10 +82,10 @@ static bool transcode_audio(const char *in, const char *out, avb_codec ac, int r
     return ok;
 }
 
-// Re-open `path` with FFmpeg and return the audio/video codec name.
-static std::string probe_codec(const char *path, bool video) {
+// Re-open `path` with the selected backend and return the audio/video codec name.
+static std::string probe_codec(const char *path, avb_backend backend, bool video) {
     avb_decode_options o = avb_decode_options_default();
-    o.backend = AVB_BACKEND_FFMPEG;
+    o.backend = backend;
     avb_decoder *d = nullptr;
     std::string r = "(open-failed)";
     if (avb_decoder_open(&d, path, &o) == AVB_OK) {
@@ -99,48 +99,76 @@ static std::string probe_codec(const char *path, bool video) {
 
 int main(int argc, char *argv[]) {
     if (argc < 3) {
-        fprintf(stderr, "Usage: %s <fixture.mp4> <out_prefix>\n", argv[0]);
+        fprintf(stderr, "Usage: %s <fixture.mp4> <out_prefix> [backend] [video-only]\n", argv[0]);
         return 2;
     }
     const char *fix = argv[1];
     std::string pfx = argv[2];
+    avb_backend backend = AVB_BACKEND_FFMPEG;
+    const char *backend_name = "ffmpeg";
+    if (argc >= 4) {
+        backend_name = argv[3];
+        if (avb_backend_from_name(backend_name, &backend) != AVB_OK) {
+            fprintf(stderr, "unknown backend '%s'\n", backend_name);
+            return 2;
+        }
+    }
+    bool video_only = argc >= 5 && std::strcmp(argv[4], "video-only") == 0;
 
-    if (!avb_backend_is_available(AVB_BACKEND_FFMPEG)) {
-        printf("SKIP: FFmpeg backend not built into this library\n");
+    if (!avb_backend_is_available(backend)) {
+        printf("SKIP: backend '%s' not built into this library\n", backend_name);
         return AVB_TEST_SKIP;
     }
     // Confirm the runtime libraries actually load by opening the fixture once.
     {
         avb_decode_options o = avb_decode_options_default();
-        o.backend = AVB_BACKEND_FFMPEG;
+        o.backend = backend;
         avb_decoder *d = nullptr;
         avb_result r = avb_decoder_open(&d, fix, &o);
         avb_decoder_close(d);
         if (r == AVB_ERROR_BACKEND_NOT_AVAILABLE) {
-            printf("SKIP: FFmpeg runtime libraries not available\n");
+            printf("SKIP: backend '%s' runtime libraries not available\n", backend_name);
             return AVB_TEST_SKIP;
         }
     }
 
-    printf("HEVC video round-trip:\n");
-    std::string hevc = pfx + "_hevc.mp4";
-    check(transcode_video(fix, hevc.c_str(), AVB_CODEC_HEVC, AVB_PIXEL_FORMAT_BGRA8), "encode HEVC");
-    check(probe_codec(hevc.c_str(), true) == "hevc", "output codec == hevc");
+    avb_pixel_format web_video_input = video_only
+        ? AVB_PIXEL_FORMAT_I420
+        : AVB_PIXEL_FORMAT_BGRA8;
+
+    if (!video_only) {
+        printf("HEVC video round-trip:\n");
+        std::string hevc = pfx + "_hevc.mp4";
+        check(transcode_video(fix, hevc.c_str(), backend, AVB_CODEC_HEVC, AVB_PIXEL_FORMAT_BGRA8), "encode HEVC");
+        check(probe_codec(hevc.c_str(), backend, true) == "hevc", "output codec == hevc");
+    }
+
+    printf("VP8 video round-trip (webm):\n");
+    std::string vp8 = pfx + "_vp8.webm";
+    check(transcode_video(fix, vp8.c_str(), backend, AVB_CODEC_VP8, web_video_input), "encode VP8");
+    check(probe_codec(vp8.c_str(), backend, true) == "vp8", "output codec == vp8");
 
     printf("VP9 video round-trip (webm):\n");
     std::string vp9 = pfx + "_vp9.webm";
-    check(transcode_video(fix, vp9.c_str(), AVB_CODEC_VP9, AVB_PIXEL_FORMAT_BGRA8), "encode VP9");
-    check(probe_codec(vp9.c_str(), true) == "vp9", "output codec == vp9");
+    check(transcode_video(fix, vp9.c_str(), backend, AVB_CODEC_VP9, web_video_input), "encode VP9");
+    check(probe_codec(vp9.c_str(), backend, true) == "vp9", "output codec == vp9");
 
-    printf("Opus audio round-trip (48k):\n");
-    std::string opus = pfx + "_opus.mp4";
-    check(transcode_audio(fix, opus.c_str(), AVB_CODEC_OPUS, 48000), "encode Opus");
-    check(probe_codec(opus.c_str(), false) == "opus", "output codec == opus");
+    printf("AV1 video round-trip (mkv):\n");
+    std::string av1 = pfx + "_av1.mkv";
+    check(transcode_video(fix, av1.c_str(), backend, AVB_CODEC_AV1, web_video_input), "encode AV1");
+    check(probe_codec(av1.c_str(), backend, true) == "av1", "output codec == av1");
 
-    printf("I420 encoder input round-trip:\n");
-    std::string i420 = pfx + "_i420.mp4";
-    check(transcode_video(fix, i420.c_str(), AVB_CODEC_H264, AVB_PIXEL_FORMAT_I420), "encode from I420 frames");
-    check(probe_codec(i420.c_str(), true) == "h264", "output codec == h264");
+    if (!video_only) {
+        printf("Opus audio round-trip (48k):\n");
+        std::string opus = pfx + "_opus.mp4";
+        check(transcode_audio(fix, opus.c_str(), backend, AVB_CODEC_OPUS, 48000), "encode Opus");
+        check(probe_codec(opus.c_str(), backend, false) == "opus", "output codec == opus");
+
+        printf("I420 encoder input round-trip:\n");
+        std::string i420 = pfx + "_i420.mp4";
+        check(transcode_video(fix, i420.c_str(), backend, AVB_CODEC_H264, AVB_PIXEL_FORMAT_I420), "encode from I420 frames");
+        check(probe_codec(i420.c_str(), backend, true) == "h264", "output codec == h264");
+    }
 
     printf("\n%s (%d failure%s)\n",
            g_failures == 0 ? "CODEC CHECKS PASSED" : "CODEC CHECKS FAILED",

@@ -35,6 +35,7 @@ static const char *gst_hw_video_encoder(avb_codec codec, avb_hardware_device dev
     switch (c) {
         case AVB_CODEC_H264: return "vah264enc";
         case AVB_CODEC_HEVC: return "vah265enc";
+        case AVB_CODEC_VP9:  return "vavp9lpenc";
         default: return nullptr;
     }
 }
@@ -308,25 +309,42 @@ avb_result AvbEncoderGStreamer::open(const char *path, const avb_encode_options 
                 else          snprintf(venc, sizeof(venc), "x265enc speed-preset=veryfast");
                 snprintf(vparse, sizeof(vparse), "h265parse config-interval=-1 !");
                 break;
+            case AVB_CODEC_VP8:
+                if (options.video.bitrate > 0) snprintf(venc, sizeof(venc), "vp8enc deadline=1 target-bitrate=%d", options.video.bitrate);
+                else          snprintf(venc, sizeof(venc), "vp8enc deadline=1");
+                vparse[0] = '\0';
+                break;
             case AVB_CODEC_VP9:
                 if (options.video.bitrate > 0) snprintf(venc, sizeof(venc), "vp9enc deadline=1 target-bitrate=%d", options.video.bitrate);
                 else          snprintf(venc, sizeof(venc), "vp9enc deadline=1");
                 vparse[0] = '\0';
                 break;
+            case AVB_CODEC_AV1:
+                if (kbps > 0) snprintf(venc, sizeof(venc), "av1enc cpu-used=8 target-bitrate=%d", kbps);
+                else          snprintf(venc, sizeof(venc), "av1enc cpu-used=8");
+                snprintf(vparse, sizeof(vparse), "av1parse !");
+                break;
             case AVB_CODEC_HAP:
                 vparse[0] = '\0';
                 break;
             default:
-                m_last_error = "Invalid video codec (use AUTO/H264/HEVC/VP9/HAP).";
+                m_last_error = "Invalid video codec (use AUTO/H264/HEVC/VP8/VP9/AV1/HAP).";
                 return AVB_ERROR_INVALID_ARGUMENT;
         }
         if (options.video.hardware_policy != AVB_HARDWARE_DISABLED) {
             const char *hwenc = gst_hw_video_encoder(options.video.codec,
                                                      options.video.hardware_device);
             if (hwenc) {
-                if (kbps > 0) snprintf(venc, sizeof(venc), "%s bitrate=%d", hwenc, kbps);
-                else          snprintf(venc, sizeof(venc), "%s", hwenc);
-                m_hw_video = true;
+                GstElement *probe = m_gst.gst_element_factory_make(hwenc, nullptr);
+                if (probe) {
+                    m_gst.gst_object_unref(probe);
+                    if (kbps > 0) snprintf(venc, sizeof(venc), "%s bitrate=%d", hwenc, kbps);
+                    else          snprintf(venc, sizeof(venc), "%s", hwenc);
+                    m_hw_video = true;
+                } else if (options.video.hardware_policy == AVB_HARDWARE_REQUIRE) {
+                    m_last_error = "Required GStreamer hardware video encoder element is not available.";
+                    return AVB_ERROR_INVALID_ARGUMENT;
+                }
             } else if (options.video.hardware_policy == AVB_HARDWARE_REQUIRE) {
                 m_last_error = "Required GStreamer hardware video encoder is not available for this codec/device.";
                 return AVB_ERROR_INVALID_ARGUMENT;

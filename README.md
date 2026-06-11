@@ -27,6 +27,19 @@ build time — the relevant runtime libraries must be installed on the target
 system. If the selected backend's libraries are missing, decoding is
 unavailable and opening fails with a clear backend-unavailable error.
 
+## Codec support
+
+The public encoder API can request H.264, HEVC, VP8, VP9, AV1, HAP, AAC, and
+Opus. Exact availability is backend, container, and runtime-install dependent:
+
+- FFmpeg can encode H.264, HEVC, VP8, VP9, AV1, HAP, AAC, and Opus when the
+  installed FFmpeg build provides the corresponding encoder.
+- GStreamer can encode H.264, HEVC, VP8, VP9, AV1, HAP, AAC, and Opus when the
+  required plugins are installed.
+- AVFoundation and Media Foundation built-in encoders are limited to H.264 and
+  HEVC. VP8, VP9, AV1, and HAP can still be produced through registered custom
+  video encoders when the selected container accepts the compressed packets.
+
 ## Hardware video frames
 
 `avb_video_frame` can describe either CPU-readable planes or backend-native
@@ -169,8 +182,21 @@ ctest --test-dir build --output-on-failure
 
 ```bash
 build/examples/avb_probe         sample.mp4
+build/examples/avb_probe         sample.mp4 ffmpeg
 build/examples/avb_decode_audio  sample.mp4 out.f32
 build/examples/avb_decode_video  sample.mp4 frame_%04d.rgba
+build/examples/avb_transcode     sample.mp4 out.mp4
+
+# Select backend/codecs explicitly.
+build/examples/avb_transcode sample.mp4 out.webm \
+  --backend gstreamer --video-codec vp9 --audio-codec opus
+build/examples/avb_transcode sample.mp4 out.mkv \
+  --backend ffmpeg --video-codec av1 --audio-codec opus
+
+# Require a specific hardware encoder path when the runtime stack supports it.
+build/examples/avb_transcode sample.mp4 out.webm \
+  --backend gstreamer --video-codec vp9 --audio-codec opus \
+  --hardware require --hardware-device vaapi
 ```
 
 ## License

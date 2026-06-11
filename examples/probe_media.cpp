@@ -4,12 +4,34 @@
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        fprintf(stderr, "Usage: avb_probe <media_file>\n");
+        fprintf(stderr, "Usage: avb_probe <media_file> [backend]\n"
+                        "       avb_probe <media_file> --backend <backend>\n");
         return 1;
     }
 
+    avb_backend backend = AVB_BACKEND_AUTO;
+    if (argc == 3) {
+        if (std::strcmp(argv[2], "--backend") == 0) {
+            fprintf(stderr, "--backend requires a value\n");
+            return 2;
+        }
+        if (avb_backend_from_name(argv[2], &backend) != AVB_OK) {
+            fprintf(stderr, "unknown backend '%s'\n", argv[2]);
+            return 2;
+        }
+    } else if (argc == 4 && std::strcmp(argv[2], "--backend") == 0) {
+        if (avb_backend_from_name(argv[3], &backend) != AVB_OK) {
+            fprintf(stderr, "unknown backend '%s'\n", argv[3]);
+            return 2;
+        }
+    } else if (argc > 2) {
+        fprintf(stderr, "Usage: avb_probe <media_file> [backend]\n"
+                        "       avb_probe <media_file> --backend <backend>\n");
+        return 2;
+    }
+
     avb_decode_options opts{};
-    opts.backend            = AVB_BACKEND_AUTO;
+    opts.backend            = backend;
     opts.audio_stream_index = -1;
     opts.video_stream_index = -1;
     opts.enable_audio       = 1;

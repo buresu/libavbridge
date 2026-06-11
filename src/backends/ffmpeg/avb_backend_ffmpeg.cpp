@@ -263,6 +263,22 @@ static std::string avb_ff_codec_tag_name(uint32_t tag) {
     return s;
 }
 
+static std::string avb_ff_codec_name(AVCodecID id, const AVCodec *codec, uint32_t tag) {
+    switch (id) {
+        case AV_CODEC_ID_H264: return "h264";
+        case AV_CODEC_ID_HEVC: return "hevc";
+        case AV_CODEC_ID_VP8:  return "vp8";
+        case AV_CODEC_ID_VP9:  return "vp9";
+        case AV_CODEC_ID_AV1:  return "av1";
+        case AV_CODEC_ID_HAP:  return "hap";
+        case AV_CODEC_ID_AAC:  return "aac";
+        case AV_CODEC_ID_OPUS: return "opus";
+        default: break;
+    }
+    if (codec && codec->name) return codec->name;
+    return avb_ff_codec_tag_name(tag);
+}
+
 static AVHWDeviceType avb_ff_hw_type(avb_hardware_device device) {
     switch (device) {
         case AVB_HW_DEVICE_VAAPI:        return AV_HWDEVICE_TYPE_VAAPI;
@@ -374,8 +390,8 @@ avb_result AvbBackendFFmpeg::open_custom_video_decoder(
     stream.duration_sec = avb_ff_seconds(st->duration, st->time_base);
 
     const AVCodec *codec = m_ff.avcodec_find_decoder(st->codecpar->codec_id);
-    std::string tag_name = avb_ff_codec_tag_name(stream.codec_tag);
-    m_custom_video_codec_name = (codec && codec->name) ? codec->name : tag_name;
+    m_custom_video_codec_name = avb_ff_codec_name(
+        st->codecpar->codec_id, codec, stream.codec_tag);
     stream.codec_name = m_custom_video_codec_name.empty()
         ? nullptr : m_custom_video_codec_name.c_str();
 
@@ -427,7 +443,8 @@ avb_result AvbBackendFFmpeg::setup_after_open(const avb_decode_options &options)
             set_error("No audio decoder found for codec id %d.", st->codecpar->codec_id);
             return AVB_ERROR_STREAM_NOT_FOUND;
         }
-        m_audio_codec_name = codec->name ? codec->name : "";
+        m_audio_codec_name = avb_ff_codec_name(
+            st->codecpar->codec_id, codec, (uint32_t)st->codecpar->codec_tag);
 
         m_audio_codec_ctx = m_ff.avcodec_alloc_context3(codec);
         if (!m_audio_codec_ctx) { set_error("avcodec_alloc_context3 failed."); return AVB_ERROR_OPEN_FAILED; }
@@ -480,7 +497,8 @@ avb_result AvbBackendFFmpeg::setup_after_open(const avb_decode_options &options)
                 set_error("No video decoder found for codec id %d.", st->codecpar->codec_id);
                 return AVB_ERROR_STREAM_NOT_FOUND;
             }
-            m_video_codec_name = codec->name ? codec->name : "";
+            m_video_codec_name = avb_ff_codec_name(
+                st->codecpar->codec_id, codec, (uint32_t)st->codecpar->codec_tag);
 
             m_video_codec_ctx = m_ff.avcodec_alloc_context3(codec);
             if (!m_video_codec_ctx) {

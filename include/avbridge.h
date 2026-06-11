@@ -77,9 +77,10 @@ typedef enum avb_pixel_format {
 } avb_pixel_format;
 
 /* Codecs usable for encoding. AUTO selects the backend default (H.264 video,
- * AAC audio). Video codecs: H264, HEVC, VP9, HAP. Audio codecs: AAC, OPUS. Passing a
- * codec of the wrong media kind (e.g. AAC for video) is an invalid argument, as
- * is a codec a particular backend/container cannot produce. */
+ * AAC audio). Video codecs: H264, HEVC, VP8, VP9, AV1, HAP. Audio codecs:
+ * AAC, OPUS. Passing a codec of the wrong media kind (e.g. AAC for video) is
+ * an invalid argument, as is a codec a particular backend/container cannot
+ * produce. */
 typedef enum avb_codec {
     AVB_CODEC_AUTO = 0,
     AVB_CODEC_H264 = 1,
@@ -88,6 +89,8 @@ typedef enum avb_codec {
     AVB_CODEC_VP9  = 4,
     AVB_CODEC_OPUS = 5,
     AVB_CODEC_HAP  = 6,
+    AVB_CODEC_VP8  = 7,
+    AVB_CODEC_AV1  = 8,
 } avb_codec;
 
 typedef enum avb_hardware_policy {
@@ -515,7 +518,7 @@ typedef struct avb_video_encode_params {
     int width;
     int height;
     double frame_rate;             /* used to derive PTS when none is given */
-    avb_codec codec;               /* AUTO -> H.264; or H264/HEVC/VP9 */
+    avb_codec codec;               /* AUTO -> H.264; or H264/HEVC/VP8/VP9/AV1 */
     int bitrate;                   /* bits/sec, 0 = backend default */
     avb_pixel_format input_format; /* format of frames passed to write_video */
     /* Expected memory for frames passed to avb_encoder_write_video.

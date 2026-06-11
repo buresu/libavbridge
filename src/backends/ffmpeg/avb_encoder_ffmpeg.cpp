@@ -13,7 +13,9 @@ static AVCodecID avb_ff_video_codec_id(avb_codec codec) {
     switch (codec) {
         case AVB_CODEC_H264: return AV_CODEC_ID_H264;
         case AVB_CODEC_HEVC: return AV_CODEC_ID_HEVC;
+        case AVB_CODEC_VP8:  return AV_CODEC_ID_VP8;
         case AVB_CODEC_VP9:  return AV_CODEC_ID_VP9;
+        case AVB_CODEC_AV1:  return AV_CODEC_ID_AV1;
         case AVB_CODEC_HAP:  return AV_CODEC_ID_HAP;
         default:             return AV_CODEC_ID_NONE;
     }
@@ -34,12 +36,19 @@ static const char *const *avb_ff_hw_encoder_names(avb_codec codec,
                                                   avb_hardware_device device) {
     static const char *h264_vaapi[] = {"h264_vaapi", nullptr};
     static const char *hevc_vaapi[] = {"hevc_vaapi", nullptr};
+    static const char *vp8_vaapi[] = {"vp8_vaapi", nullptr};
+    static const char *vp9_vaapi[] = {"vp9_vaapi", nullptr};
+    static const char *av1_vaapi[] = {"av1_vaapi", nullptr};
     static const char *h264_cuda[] = {"h264_nvenc", nullptr};
     static const char *hevc_cuda[] = {"hevc_nvenc", nullptr};
+    static const char *av1_cuda[] = {"av1_nvenc", nullptr};
     static const char *h264_qsv[] = {"h264_qsv", nullptr};
     static const char *hevc_qsv[] = {"hevc_qsv", nullptr};
+    static const char *vp9_qsv[] = {"vp9_qsv", nullptr};
+    static const char *av1_qsv[] = {"av1_qsv", nullptr};
     static const char *h264_d3d11[] = {"h264_amf", nullptr};
     static const char *hevc_d3d11[] = {"hevc_amf", nullptr};
+    static const char *av1_d3d11[] = {"av1_amf", nullptr};
     static const char *h264_vt[] = {"h264_videotoolbox", nullptr};
     static const char *hevc_vt[] = {"hevc_videotoolbox", nullptr};
     static const char *none[] = {nullptr};
@@ -47,21 +56,38 @@ static const char *const *avb_ff_hw_encoder_names(avb_codec codec,
     avb_codec c = codec == AVB_CODEC_AUTO ? AVB_CODEC_H264 : codec;
     switch (device) {
         case AVB_HW_DEVICE_VAAPI:
-            return c == AVB_CODEC_HEVC ? hevc_vaapi : c == AVB_CODEC_H264 ? h264_vaapi : none;
+            return c == AVB_CODEC_HEVC ? hevc_vaapi :
+                   c == AVB_CODEC_H264 ? h264_vaapi :
+                   c == AVB_CODEC_VP8  ? vp8_vaapi  :
+                   c == AVB_CODEC_VP9  ? vp9_vaapi  :
+                   c == AVB_CODEC_AV1  ? av1_vaapi  : none;
         case AVB_HW_DEVICE_CUDA:
-            return c == AVB_CODEC_HEVC ? hevc_cuda : c == AVB_CODEC_H264 ? h264_cuda : none;
+            return c == AVB_CODEC_HEVC ? hevc_cuda :
+                   c == AVB_CODEC_H264 ? h264_cuda :
+                   c == AVB_CODEC_AV1  ? av1_cuda  : none;
         case AVB_HW_DEVICE_QSV:
-            return c == AVB_CODEC_HEVC ? hevc_qsv : c == AVB_CODEC_H264 ? h264_qsv : none;
+            return c == AVB_CODEC_HEVC ? hevc_qsv :
+                   c == AVB_CODEC_H264 ? h264_qsv :
+                   c == AVB_CODEC_VP9  ? vp9_qsv  :
+                   c == AVB_CODEC_AV1  ? av1_qsv  : none;
         case AVB_HW_DEVICE_D3D11VA:
         case AVB_HW_DEVICE_AMF:
-            return c == AVB_CODEC_HEVC ? hevc_d3d11 : c == AVB_CODEC_H264 ? h264_d3d11 : none;
+            return c == AVB_CODEC_HEVC ? hevc_d3d11 :
+                   c == AVB_CODEC_H264 ? h264_d3d11 :
+                   c == AVB_CODEC_AV1  ? av1_d3d11  : none;
         case AVB_HW_DEVICE_VIDEOTOOLBOX:
             return c == AVB_CODEC_HEVC ? hevc_vt : c == AVB_CODEC_H264 ? h264_vt : none;
         default:
 #if defined(__linux__)
-            return c == AVB_CODEC_HEVC ? hevc_vaapi : c == AVB_CODEC_H264 ? h264_vaapi : none;
+            return c == AVB_CODEC_HEVC ? hevc_vaapi :
+                   c == AVB_CODEC_H264 ? h264_vaapi :
+                   c == AVB_CODEC_VP8  ? vp8_vaapi  :
+                   c == AVB_CODEC_VP9  ? vp9_vaapi  :
+                   c == AVB_CODEC_AV1  ? av1_vaapi  : none;
 #elif defined(_WIN32)
-            return c == AVB_CODEC_HEVC ? hevc_d3d11 : c == AVB_CODEC_H264 ? h264_d3d11 : none;
+            return c == AVB_CODEC_HEVC ? hevc_d3d11 :
+                   c == AVB_CODEC_H264 ? h264_d3d11 :
+                   c == AVB_CODEC_AV1  ? av1_d3d11  : none;
 #elif defined(__APPLE__)
             return c == AVB_CODEC_HEVC ? hevc_vt : c == AVB_CODEC_H264 ? h264_vt : none;
 #else
@@ -322,9 +348,11 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
             case AVB_CODEC_AUTO:
             case AVB_CODEC_H264: vid = AV_CODEC_ID_H264; vname = "H.264"; break;
             case AVB_CODEC_HEVC: vid = AV_CODEC_ID_HEVC; vname = "HEVC";  break;
+            case AVB_CODEC_VP8:  vid = AV_CODEC_ID_VP8;  vname = "VP8";   break;
             case AVB_CODEC_VP9:  vid = AV_CODEC_ID_VP9;  vname = "VP9";   break;
+            case AVB_CODEC_AV1:  vid = AV_CODEC_ID_AV1;  vname = "AV1";   break;
             default:
-                set_error("Invalid video codec (use AUTO/H264/HEVC/VP9).");
+                set_error("Invalid video codec (use AUTO/H264/HEVC/VP8/VP9/AV1).");
                 return AVB_ERROR_INVALID_ARGUMENT;
         }
         const AVCodec *vcodec = nullptr;
