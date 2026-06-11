@@ -31,6 +31,9 @@ extern "C" {
 
 #define AVB_MAX_NAME 64
 #define AVB_MAX_ERROR 256
+#define AVB_MAX_CODEC_CAPS 16
+#define AVB_MAX_VIDEO_MEMORY_CAPS 4
+#define AVB_MAX_HARDWARE_DEVICE_CAPS 8
 
 #ifdef _WIN32
 #  ifdef AVB_BUILDING_SHARED
@@ -368,6 +371,24 @@ typedef struct avb_encoder_validation {
     const char *message;          /* Static human-readable validation result. */
 } avb_encoder_validation;
 
+typedef struct avb_encoder_capabilities {
+    avb_result result;            /* AVB_OK when capabilities are usable. */
+    avb_backend backend;          /* Resolved backend (AUTO expanded when possible). */
+    const char *backend_name;     /* Static string; NULL only for invalid backend values. */
+    const char *container_name;   /* Static string inferred from path, or "any". */
+    int can_encode_video;
+    int can_encode_audio;
+    int video_codec_count;
+    avb_video_codec video_codecs[AVB_MAX_CODEC_CAPS];
+    int audio_codec_count;
+    avb_audio_codec audio_codecs[AVB_MAX_CODEC_CAPS];
+    int video_memory_count;
+    avb_video_memory_type video_memory[AVB_MAX_VIDEO_MEMORY_CAPS];
+    int hardware_device_count;
+    avb_hardware_device hardware_devices[AVB_MAX_HARDWARE_DEVICE_CAPS];
+    const char *message;          /* Static human-readable capability summary. */
+} avb_encoder_capabilities;
+
 /* ------------------------------------------------------------------------- *
  * Custom video codec plugins
  * ------------------------------------------------------------------------- */
@@ -669,6 +690,21 @@ AVB_API avb_result avb_encoder_validate_options(
     const char *path,
     const avb_encode_options *options,
     avb_encoder_validation *out
+);
+
+/* Query static encoder capabilities for a backend and optional output path.
+ * When `path` is non-NULL/non-empty, codec lists are filtered by the inferred
+ * container. When `path` is NULL/empty, the lists describe the backend's broad
+ * static capability surface. This does not prove runtime libraries, installed
+ * GStreamer elements, FFmpeg encoder availability, registered custom encoders,
+ * or hardware device availability.
+ *
+ * Returns AVB_OK when the query itself ran and fills `out`; inspect out->result
+ * before using the lists. */
+AVB_API avb_result avb_encoder_query_capabilities(
+    avb_backend backend,
+    const char *path,
+    avb_encoder_capabilities *out
 );
 
 /* Open an encoder writing to `path`; the container is inferred from the file

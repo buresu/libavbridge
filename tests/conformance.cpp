@@ -62,6 +62,30 @@ static avb_result dummy_decode_packet(void *, const avb_encoded_packet *,
     return AVB_ERROR_AGAIN;
 }
 
+static bool has_video_codec(const avb_encoder_capabilities &caps,
+                            avb_video_codec codec) {
+    for (int i = 0; i < caps.video_codec_count; ++i) {
+        if (caps.video_codecs[i] == codec) return true;
+    }
+    return false;
+}
+
+static bool has_audio_codec(const avb_encoder_capabilities &caps,
+                            avb_audio_codec codec) {
+    for (int i = 0; i < caps.audio_codec_count; ++i) {
+        if (caps.audio_codecs[i] == codec) return true;
+    }
+    return false;
+}
+
+static bool has_video_memory(const avb_encoder_capabilities &caps,
+                             avb_video_memory_type memory) {
+    for (int i = 0; i < caps.video_memory_count; ++i) {
+        if (caps.video_memory[i] == memory) return true;
+    }
+    return false;
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         fprintf(stderr, "Usage: %s <fixture.mp4> [backend]\n", argv[0]);
@@ -186,6 +210,46 @@ int main(int argc, char *argv[]) {
         check(avb_encoder_validate_options(path, &e, &v) == AVB_OK &&
               !v.ok && v.result == AVB_ERROR_INVALID_ARGUMENT,
               "encoder_validate_options rejects opus in mp4");
+    }
+    {
+        avb_encoder_capabilities caps{};
+        check(avb_encoder_query_capabilities(backend, path, &caps) == AVB_OK,
+              "encoder_query_capabilities runs");
+        check(caps.result == AVB_OK,
+              "encoder_query_capabilities reports usable backend");
+        check(caps.backend_name && caps.container_name && caps.message,
+              "encoder capabilities reports names/message");
+        check(caps.can_encode_video && has_video_codec(caps, AVB_VIDEO_CODEC_H264),
+              "encoder capabilities includes h264 for mp4");
+        check(caps.can_encode_audio && has_audio_codec(caps, AVB_AUDIO_CODEC_AAC),
+              "encoder capabilities includes aac for mp4");
+        check(has_video_memory(caps, AVB_VIDEO_MEMORY_CPU),
+              "encoder capabilities includes CPU video memory");
+
+        check(avb_encoder_query_capabilities(backend, "out.ogg", &caps) == AVB_OK &&
+              caps.result == AVB_OK,
+              "encoder capabilities filters ogg container");
+        check(caps.can_encode_video == 0 &&
+              !has_video_codec(caps, AVB_VIDEO_CODEC_H264),
+              "encoder capabilities excludes video for ogg");
+        check(!has_audio_codec(caps, AVB_AUDIO_CODEC_AAC),
+              "encoder capabilities excludes aac for ogg");
+        if (caps.backend == AVB_BACKEND_FFMPEG ||
+            caps.backend == AVB_BACKEND_GSTREAMER) {
+            check(caps.can_encode_audio &&
+                  has_audio_codec(caps, AVB_AUDIO_CODEC_OPUS) &&
+                  has_audio_codec(caps, AVB_AUDIO_CODEC_VORBIS),
+                  "encoder capabilities includes opus/vorbis for ogg");
+        }
+
+        check(avb_encoder_query_capabilities(backend, nullptr, &caps) == AVB_OK &&
+              caps.result == AVB_OK &&
+              has_video_codec(caps, AVB_VIDEO_CODEC_H264) &&
+              has_audio_codec(caps, AVB_AUDIO_CODEC_AAC),
+              "encoder capabilities supports broad query without path");
+        check(avb_encoder_query_capabilities(backend, path, nullptr) ==
+              AVB_ERROR_INVALID_ARGUMENT,
+              "encoder_query_capabilities rejects null output");
     }
 
     avb_decode_options opts{};

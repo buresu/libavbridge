@@ -41,6 +41,7 @@ set(AVB_SOURCES
     src/avb_error.cpp
     src/avb_decoder_impl.cpp
     src/avb_encoder.cpp
+    src/avb_encoder_capabilities.cpp
     src/avb_encoder_validation.cpp
     src/avb_probe.cpp
     src/avb_video_codec_registry.cpp
