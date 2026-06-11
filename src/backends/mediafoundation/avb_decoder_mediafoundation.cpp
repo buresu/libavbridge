@@ -1,4 +1,4 @@
-#include "avb_backend_mediafoundation.hpp"
+#include "avb_decoder_mediafoundation.hpp"
 #include "../../avb_video_codec_registry.hpp"
 
 #ifdef _WIN32
@@ -17,7 +17,7 @@
 
 using Microsoft::WRL::ComPtr;
 
-struct AvbBackendMediaFoundation::Impl {
+struct AvbDecoderMediaFoundation::Impl {
     ComPtr<IMFSourceReader> reader;
 
     int audio_stream_idx = -1;
@@ -90,7 +90,7 @@ struct AvbBackendMediaFoundation::Impl {
     }
 };
 
-AvbBackendMediaFoundation::AvbBackendMediaFoundation() {
+AvbDecoderMediaFoundation::AvbDecoderMediaFoundation() {
     m_impl = new Impl();
     HRESULT hr = MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET);
     if (SUCCEEDED(hr)) {
@@ -102,7 +102,7 @@ AvbBackendMediaFoundation::AvbBackendMediaFoundation() {
     }
 }
 
-AvbBackendMediaFoundation::~AvbBackendMediaFoundation() {
+AvbDecoderMediaFoundation::~AvbDecoderMediaFoundation() {
     if (m_impl) {
         m_impl->close_streams();
         if (m_impl->mf_initialized) MFShutdown();
@@ -110,8 +110,8 @@ AvbBackendMediaFoundation::~AvbBackendMediaFoundation() {
     }
 }
 
-const char *AvbBackendMediaFoundation::get_backend_name() const { return "mediafoundation"; }
-const char *AvbBackendMediaFoundation::get_last_error() const {
+const char *AvbDecoderMediaFoundation::get_backend_name() const { return "mediafoundation"; }
+const char *AvbDecoderMediaFoundation::get_last_error() const {
     return m_last_error.empty() ? nullptr : m_last_error.c_str();
 }
 
@@ -261,7 +261,7 @@ static avb_result mf_open_custom_video_decoder(
     return AVB_OK;
 }
 
-avb_result AvbBackendMediaFoundation::open_file(const char *path, const avb_decode_options &options) {
+avb_result AvbDecoderMediaFoundation::open_file(const char *path, const avb_decode_options &options) {
     if (!m_impl->mf_initialized) return AVB_ERROR_BACKEND_NOT_AVAILABLE;
 
     m_impl->close_streams();
@@ -440,7 +440,7 @@ avb_result AvbBackendMediaFoundation::open_file(const char *path, const avb_deco
     return AVB_OK;
 }
 
-avb_result AvbBackendMediaFoundation::get_media_info(avb_media_info &out_info) {
+avb_result AvbDecoderMediaFoundation::get_media_info(avb_media_info &out_info) {
     if (!m_impl->reader) return AVB_ERROR_INVALID_ARGUMENT;
 
     out_info = {};
@@ -470,7 +470,7 @@ avb_result AvbBackendMediaFoundation::get_media_info(avb_media_info &out_info) {
     return AVB_OK;
 }
 
-avb_result AvbBackendMediaFoundation::seek(double seconds) {
+avb_result AvbDecoderMediaFoundation::seek(double seconds) {
     if (!m_impl->reader) return AVB_ERROR_INVALID_ARGUMENT;
 
     PROPVARIANT var;
@@ -500,7 +500,7 @@ avb_result AvbBackendMediaFoundation::seek(double seconds) {
     return AVB_OK;
 }
 
-int AvbBackendMediaFoundation::read_audio_f32(float *dst_interleaved, int frames) {
+int AvbDecoderMediaFoundation::read_audio_f32(float *dst_interleaved, int frames) {
     if (!m_impl->reader || m_impl->audio_stream_idx < 0 || m_impl->channels <= 0) return 0;
 
     const int nb_ch          = m_impl->channels;
@@ -556,7 +556,7 @@ int AvbBackendMediaFoundation::read_audio_f32(float *dst_interleaved, int frames
     return samples_written / nb_ch;
 }
 
-avb_result AvbBackendMediaFoundation::read_video_frame(avb_video_frame &out_frame) {
+avb_result AvbDecoderMediaFoundation::read_video_frame(avb_video_frame &out_frame) {
     if (!m_impl->reader || m_impl->video_stream_idx < 0)
         return AVB_ERROR_STREAM_NOT_FOUND;
 
@@ -869,7 +869,7 @@ avb_result AvbBackendMediaFoundation::read_video_frame(avb_video_frame &out_fram
     return AVB_OK;
 }
 
-void AvbBackendMediaFoundation::release_video_frame(avb_video_frame &frame) {
+void AvbDecoderMediaFoundation::release_video_frame(avb_video_frame &frame) {
     if (m_impl && m_impl->custom_video_decoder) {
         if (m_impl->custom_video_decoder->release_frame)
             m_impl->custom_video_decoder->release_frame(m_impl->custom_video_ctx, &frame);
@@ -881,26 +881,26 @@ void AvbBackendMediaFoundation::release_video_frame(avb_video_frame &frame) {
 
 #else // !_WIN32
 
-AvbBackendMediaFoundation::AvbBackendMediaFoundation() {
+AvbDecoderMediaFoundation::AvbDecoderMediaFoundation() {
     m_impl = nullptr;
     m_last_error = "Media Foundation backend is only available on Windows.";
 }
-AvbBackendMediaFoundation::~AvbBackendMediaFoundation() {}
-const char *AvbBackendMediaFoundation::get_backend_name() const { return "mediafoundation"; }
-const char *AvbBackendMediaFoundation::get_last_error() const {
+AvbDecoderMediaFoundation::~AvbDecoderMediaFoundation() {}
+const char *AvbDecoderMediaFoundation::get_backend_name() const { return "mediafoundation"; }
+const char *AvbDecoderMediaFoundation::get_last_error() const {
     return m_last_error.empty() ? nullptr : m_last_error.c_str();
 }
-avb_result AvbBackendMediaFoundation::open_file(const char *, const avb_decode_options &) {
+avb_result AvbDecoderMediaFoundation::open_file(const char *, const avb_decode_options &) {
     return AVB_ERROR_BACKEND_NOT_AVAILABLE;
 }
-avb_result AvbBackendMediaFoundation::get_media_info(avb_media_info &) {
+avb_result AvbDecoderMediaFoundation::get_media_info(avb_media_info &) {
     return AVB_ERROR_BACKEND_NOT_AVAILABLE;
 }
-avb_result AvbBackendMediaFoundation::seek(double) { return AVB_ERROR_BACKEND_NOT_AVAILABLE; }
-int AvbBackendMediaFoundation::read_audio_f32(float *, int) { return 0; }
-avb_result AvbBackendMediaFoundation::read_video_frame(avb_video_frame &) {
+avb_result AvbDecoderMediaFoundation::seek(double) { return AVB_ERROR_BACKEND_NOT_AVAILABLE; }
+int AvbDecoderMediaFoundation::read_audio_f32(float *, int) { return 0; }
+avb_result AvbDecoderMediaFoundation::read_video_frame(avb_video_frame &) {
     return AVB_ERROR_BACKEND_NOT_AVAILABLE;
 }
-void AvbBackendMediaFoundation::release_video_frame(avb_video_frame &) {}
+void AvbDecoderMediaFoundation::release_video_frame(avb_video_frame &) {}
 
 #endif // _WIN32

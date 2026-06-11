@@ -4,16 +4,16 @@
 
 #include <string>
 
-class AvbBackend {
+class AvbDecoderImpl {
 public:
-    virtual ~AvbBackend();
+    virtual ~AvbDecoderImpl();
 
     virtual avb_result open_file(const char *path, const avb_decode_options &options) = 0;
 
     // Open from custom I/O callbacks. The default implementation buffers the
-    // whole stream into a temporary file and calls open_file(); backends that
-    // can consume callbacks natively (FFmpeg) override this. The temp file, if
-    // created, is removed by ~AvbBackend.
+    // whole stream into a temporary file and calls open_file(); implementations
+    // that can consume callbacks natively (FFmpeg) override this. The temp file,
+    // if created, is removed by ~AvbDecoderImpl.
     virtual avb_result open_io(const avb_io_callbacks &cb, void *user,
                                const avb_decode_options &options);
 
@@ -36,4 +36,4 @@ protected:
     std::string m_spill_path;
 };
 
-AvbBackend *avb_create_backend(avb_backend backend);
+AvbDecoderImpl *avb_create_decoder_impl(avb_backend backend);

@@ -1,4 +1,4 @@
-#include "avb_backend_gstreamer.hpp"
+#include "avb_decoder_gstreamer.hpp"
 #include "../../avb_video_codec_registry.hpp"
 
 #include <cstdarg>
@@ -130,7 +130,7 @@ static std::string caps_to_codec_name(const AvbGstFuncs &gst, const GstCaps *cap
     return name;
 }
 
-AvbBackendGStreamer::AvbBackendGStreamer() {
+AvbDecoderGStreamer::AvbDecoderGStreamer() {
     char err_buf[512];
     m_libs_loaded = avb_gst_load(m_gst, err_buf, sizeof(err_buf));
     if (!m_libs_loaded) {
@@ -140,16 +140,16 @@ AvbBackendGStreamer::AvbBackendGStreamer() {
     m_gst.gst_init(nullptr, nullptr);
 }
 
-AvbBackendGStreamer::~AvbBackendGStreamer() {
+AvbDecoderGStreamer::~AvbDecoderGStreamer() {
     close_internal();
 }
 
-const char *AvbBackendGStreamer::get_backend_name() const { return "gstreamer"; }
-const char *AvbBackendGStreamer::get_last_error() const {
+const char *AvbDecoderGStreamer::get_backend_name() const { return "gstreamer"; }
+const char *AvbDecoderGStreamer::get_last_error() const {
     return m_last_error.empty() ? nullptr : m_last_error.c_str();
 }
 
-void AvbBackendGStreamer::set_error(const char *fmt, ...) {
+void AvbDecoderGStreamer::set_error(const char *fmt, ...) {
     char buf[1024];
     va_list ap;
     va_start(ap, fmt);
@@ -158,7 +158,7 @@ void AvbBackendGStreamer::set_error(const char *fmt, ...) {
     m_last_error = buf;
 }
 
-void AvbBackendGStreamer::close_internal() {
+void AvbDecoderGStreamer::close_internal() {
     if (!m_libs_loaded) return;
 
     if (m_video_preroll_sample) {
@@ -203,7 +203,7 @@ void AvbBackendGStreamer::close_internal() {
     m_hw_device = AVB_HW_DEVICE_AUTO;
 }
 
-void AvbBackendGStreamer::discover_codec_names(const char *uri) {
+void AvbDecoderGStreamer::discover_codec_names(const char *uri) {
     GError *err = nullptr;
     GstDiscoverer *disc = m_gst.gst_discoverer_new(5 * GST_SECOND, &err);
     if (!disc) { m_gst.g_clear_error(&err); return; }
@@ -236,7 +236,7 @@ void AvbBackendGStreamer::discover_codec_names(const char *uri) {
     m_gst.g_object_unref(disc);
 }
 
-avb_result AvbBackendGStreamer::open_custom_file(
+avb_result AvbDecoderGStreamer::open_custom_file(
     const char *path,
     const avb_decode_options &options
 ) {
@@ -381,7 +381,7 @@ avb_result AvbBackendGStreamer::open_custom_file(
     return AVB_OK;
 }
 
-avb_result AvbBackendGStreamer::open_file(const char *path, const avb_decode_options &options) {
+avb_result AvbDecoderGStreamer::open_file(const char *path, const avb_decode_options &options) {
     if (!m_libs_loaded) return AVB_ERROR_BACKEND_NOT_AVAILABLE;
 
     close_internal();
@@ -627,7 +627,7 @@ avb_result AvbBackendGStreamer::open_file(const char *path, const avb_decode_opt
     return AVB_OK;
 }
 
-avb_result AvbBackendGStreamer::get_media_info(avb_media_info &out_info) {
+avb_result AvbDecoderGStreamer::get_media_info(avb_media_info &out_info) {
     if (!m_pipeline) return AVB_ERROR_INVALID_ARGUMENT;
 
     out_info = {};
@@ -655,7 +655,7 @@ avb_result AvbBackendGStreamer::get_media_info(avb_media_info &out_info) {
     return AVB_OK;
 }
 
-avb_result AvbBackendGStreamer::seek(double seconds) {
+avb_result AvbDecoderGStreamer::seek(double seconds) {
     if (!m_pipeline) return AVB_ERROR_INVALID_ARGUMENT;
 
     gint64 pos = (gint64)(seconds * GST_SECOND);
@@ -681,7 +681,7 @@ avb_result AvbBackendGStreamer::seek(double seconds) {
     return AVB_OK;
 }
 
-bool AvbBackendGStreamer::fill_audio_buffer() {
+bool AvbDecoderGStreamer::fill_audio_buffer() {
     if (!m_audio_sink || m_audio_eof) return false;
 
     // pull_sample returns NULL at EOF (or if the sink is shut down).
@@ -723,7 +723,7 @@ bool AvbBackendGStreamer::fill_audio_buffer() {
     return true;
 }
 
-int AvbBackendGStreamer::read_audio_f32(float *dst_interleaved, int frames) {
+int AvbDecoderGStreamer::read_audio_f32(float *dst_interleaved, int frames) {
     if (!m_audio_sink || m_out_channels <= 0) return 0;
 
     int nb_channels     = m_out_channels;
@@ -754,7 +754,7 @@ int AvbBackendGStreamer::read_audio_f32(float *dst_interleaved, int frames) {
     return samples_written / nb_channels;
 }
 
-double AvbBackendGStreamer::audio_next_pts() {
+double AvbDecoderGStreamer::audio_next_pts() {
     if (!m_audio_sink || m_out_channels <= 0) return -1.0;
     if (m_audio_buf_pos >= (int)m_audio_buf.size()) {
         if (!fill_audio_buffer()) return -1.0;
@@ -762,7 +762,7 @@ double AvbBackendGStreamer::audio_next_pts() {
     return m_audio_buf_pts;
 }
 
-avb_result AvbBackendGStreamer::read_custom_video_frame(avb_video_frame &out_frame) {
+avb_result AvbDecoderGStreamer::read_custom_video_frame(avb_video_frame &out_frame) {
     if (!m_custom_video_decoder || !m_custom_video_ctx || !m_video_sink)
         return AVB_ERROR_STREAM_NOT_FOUND;
 
@@ -823,7 +823,7 @@ avb_result AvbBackendGStreamer::read_custom_video_frame(avb_video_frame &out_fra
     }
 }
 
-avb_result AvbBackendGStreamer::fill_dmabuf_video_frame(
+avb_result AvbDecoderGStreamer::fill_dmabuf_video_frame(
     GstSample *sample,
     GstBuffer *buf,
     GstCaps *caps,
@@ -892,7 +892,7 @@ avb_result AvbBackendGStreamer::fill_dmabuf_video_frame(
     return AVB_OK;
 }
 
-avb_result AvbBackendGStreamer::read_video_frame(avb_video_frame &out_frame) {
+avb_result AvbDecoderGStreamer::read_video_frame(avb_video_frame &out_frame) {
     if (m_custom_pipeline) return read_custom_video_frame(out_frame);
     if (!m_video_sink) return AVB_ERROR_STREAM_NOT_FOUND;
 
@@ -1015,7 +1015,7 @@ avb_result AvbBackendGStreamer::read_video_frame(avb_video_frame &out_frame) {
     }
 }
 
-void AvbBackendGStreamer::release_video_frame(avb_video_frame &frame) {
+void AvbDecoderGStreamer::release_video_frame(avb_video_frame &frame) {
     if (m_custom_pipeline) {
         if (m_custom_video_decoder && m_custom_video_decoder->release_frame)
             m_custom_video_decoder->release_frame(m_custom_video_ctx, &frame);

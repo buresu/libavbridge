@@ -1,15 +1,15 @@
 #pragma once
 
-#include "../../avb_encoder_backend.hpp"
+#include "../../avb_encoder_impl.hpp"
 #include "avb_ffmpeg_loader.hpp"
 
 #include <string>
 #include <vector>
 
-// FFmpeg encoder backend (optional, cross-platform). Encodes H.264 video and
+// FFmpeg encoder implementation (optional, cross-platform). Encodes H.264 video and
 // AAC audio into an mp4/mov container. Like the decoder, FFmpeg is loaded at
 // runtime via dynamic loading and never linked at build time.
-class AvbEncoderFFmpeg : public AvbEncoderBackend {
+class AvbEncoderFFmpeg : public AvbEncoderImpl {
 public:
     AvbEncoderFFmpeg();
     ~AvbEncoderFFmpeg() override;

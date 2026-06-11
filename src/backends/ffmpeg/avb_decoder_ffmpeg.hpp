@@ -1,16 +1,16 @@
 #pragma once
 
-#include "../../avb_backend.hpp"
+#include "../../avb_decoder_impl.hpp"
 #include "avb_ffmpeg_loader.hpp"
 
 #include <deque>
 #include <string>
 #include <vector>
 
-class AvbBackendFFmpeg : public AvbBackend {
+class AvbDecoderFFmpeg : public AvbDecoderImpl {
 public:
-    AvbBackendFFmpeg();
-    ~AvbBackendFFmpeg() override;
+    AvbDecoderFFmpeg();
+    ~AvbDecoderFFmpeg() override;
 
     avb_result open_file(const char *path, const avb_decode_options &options) override;
     avb_result open_io(const avb_io_callbacks &cb, void *user,

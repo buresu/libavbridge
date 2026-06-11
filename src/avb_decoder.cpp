@@ -1,5 +1,5 @@
 #include "avb_decoder.hpp"
-#include "avb_backend.hpp"
+#include "avb_decoder_impl.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -43,7 +43,7 @@ long long mem_size(void *user) {
 // audio-EOF distinction.
 void cache_media(avb_decoder *dec) {
     avb_media_info info{};
-    if (dec->backend->get_media_info(info) == AVB_OK) {
+    if (dec->impl->get_media_info(info) == AVB_OK) {
         dec->duration_sec    = info.duration_sec;
         dec->audio_available = info.audio.available != 0;
     }
@@ -70,18 +70,17 @@ avb_decode_options avb_decode_options_default(void) {
     return o;
 }
 
-// Allocate a decoder and its backend, or report why not. The caller-supplied
-// `open` lambda performs the actual open against the backend.
+// Allocate a decoder and its selected implementation, or report why not.
 static avb_result decoder_create(avb_decoder **out_dec, avb_backend be,
                                  avb_decoder **dec_out) {
     auto *dec = new avb_decoder();
-    AvbBackend *backend = avb_create_backend(be);
-    if (!backend) {
+    AvbDecoderImpl *impl = avb_create_decoder_impl(be);
+    if (!impl) {
         dec->set_error("Requested backend is not available on this platform.");
         *out_dec = dec;
         return AVB_ERROR_BACKEND_NOT_AVAILABLE;
     }
-    dec->backend.reset(backend);
+    dec->impl.reset(impl);
     *dec_out = dec;
     return AVB_OK;
 }
@@ -96,9 +95,9 @@ avb_result avb_decoder_open(avb_decoder **out_dec, const char *path,
     avb_result res = decoder_create(out_dec, options->backend, &dec);
     if (res != AVB_OK) return res;
 
-    res = dec->backend->open_file(path, *options);
+    res = dec->impl->open_file(path, *options);
     if (res != AVB_OK) {
-        const char *err = dec->backend->get_last_error();
+        const char *err = dec->impl->get_last_error();
         if (err) dec->set_error(err);
     } else {
         cache_media(dec);
@@ -117,9 +116,9 @@ avb_result avb_decoder_open_io(avb_decoder **out_dec, const avb_io_callbacks *cb
     avb_result res = decoder_create(out_dec, options->backend, &dec);
     if (res != AVB_OK) return res;
 
-    res = dec->backend->open_io(*cb, user, *options);
+    res = dec->impl->open_io(*cb, user, *options);
     if (res != AVB_OK) {
-        const char *err = dec->backend->get_last_error();
+        const char *err = dec->impl->get_last_error();
         if (err) dec->set_error(err);
     } else {
         cache_media(dec);
@@ -146,17 +145,17 @@ avb_result avb_decoder_open_memory(avb_decoder **out_dec, const void *data,
 }
 
 avb_result avb_decoder_get_media_info(avb_decoder *dec, avb_media_info *out_info) {
-    if (!dec || !out_info || !dec->backend) return AVB_ERROR_INVALID_ARGUMENT;
-    avb_result res = dec->backend->get_media_info(*out_info);
+    if (!dec || !out_info || !dec->impl) return AVB_ERROR_INVALID_ARGUMENT;
+    avb_result res = dec->impl->get_media_info(*out_info);
     if (res != AVB_OK) {
-        const char *err = dec->backend->get_last_error();
+        const char *err = dec->impl->get_last_error();
         if (err) dec->set_error(err);
     }
     return res;
 }
 
 avb_result avb_decoder_seek(avb_decoder *dec, double seconds, double *out_landed_sec) {
-    if (!dec || !dec->backend) return AVB_ERROR_INVALID_ARGUMENT;
+    if (!dec || !dec->impl) return AVB_ERROR_INVALID_ARGUMENT;
 
     // Clamp to [0, duration] before seeking: a past-the-end request can leave
     // some backends' pipelines wedged at EOS.
@@ -164,9 +163,9 @@ avb_result avb_decoder_seek(avb_decoder *dec, double seconds, double *out_landed
     if (dec->duration_sec > 0.0 && target > dec->duration_sec)
         target = dec->duration_sec;
 
-    avb_result res = dec->backend->seek(target);
+    avb_result res = dec->impl->seek(target);
     if (res != AVB_OK) {
-        const char *err = dec->backend->get_last_error();
+        const char *err = dec->impl->get_last_error();
         if (err) dec->set_error(err);
         return res;
     }
@@ -177,12 +176,12 @@ avb_result avb_decoder_seek(avb_decoder *dec, double seconds, double *out_landed
 
 int avb_decoder_read_audio_f32(avb_decoder *dec, float *dst_interleaved, int frames,
                                double *out_first_pts) {
-    if (!dec || !dst_interleaved || frames <= 0 || !dec->backend) {
+    if (!dec || !dst_interleaved || frames <= 0 || !dec->impl) {
         if (out_first_pts) *out_first_pts = -1.0;
         return 0;
     }
-    if (out_first_pts) *out_first_pts = dec->backend->audio_next_pts();
-    int got = dec->backend->read_audio_f32(dst_interleaved, frames);
+    if (out_first_pts) *out_first_pts = dec->impl->audio_next_pts();
+    int got = dec->impl->read_audio_f32(dst_interleaved, frames);
     if (got == 0 && dec->audio_available) dec->audio_eof = true;
     return got;
 }
@@ -193,31 +192,31 @@ int avb_decoder_audio_at_eof(avb_decoder *dec) {
 }
 
 avb_result avb_decoder_read_video_frame(avb_decoder *dec, avb_video_frame *out_frame) {
-    if (!dec || !out_frame || !dec->backend) return AVB_ERROR_INVALID_ARGUMENT;
-    avb_result res = dec->backend->read_video_frame(*out_frame);
+    if (!dec || !out_frame || !dec->impl) return AVB_ERROR_INVALID_ARGUMENT;
+    avb_result res = dec->impl->read_video_frame(*out_frame);
     if (res != AVB_OK) {
-        const char *err = dec->backend->get_last_error();
+        const char *err = dec->impl->get_last_error();
         if (err) dec->set_error(err);
     }
     return res;
 }
 
 void avb_decoder_release_video_frame(avb_decoder *dec, avb_video_frame *frame) {
-    if (!dec || !frame || !dec->backend) return;
-    dec->backend->release_video_frame(*frame);
+    if (!dec || !frame || !dec->impl) return;
+    dec->impl->release_video_frame(*frame);
 }
 
 const char *avb_decoder_get_last_error(avb_decoder *dec) {
     if (!dec) return nullptr;
-    if (!dec->backend) return dec->last_error.empty() ? nullptr : dec->last_error.c_str();
-    const char *backend_err = dec->backend->get_last_error();
-    if (backend_err && backend_err[0] != '\0') return backend_err;
+    if (!dec->impl) return dec->last_error.empty() ? nullptr : dec->last_error.c_str();
+    const char *impl_err = dec->impl->get_last_error();
+    if (impl_err && impl_err[0] != '\0') return impl_err;
     return dec->last_error.empty() ? nullptr : dec->last_error.c_str();
 }
 
 void avb_decoder_close(avb_decoder *dec) {
     if (!dec) return;
-    dec->backend.reset(); // close backend (and remove any temp spill) first
+    dec->impl.reset(); // close implementation (and remove any temp spill) first
     delete static_cast<MemIo *>(dec->mem_io);
     delete dec;
 }

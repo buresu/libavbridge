@@ -1,9 +1,9 @@
 #pragma once
 
-#include "../../avb_encoder_backend.hpp"
+#include "../../avb_encoder_impl.hpp"
 #include <string>
 
-class AvbEncoderAVFoundation : public AvbEncoderBackend {
+class AvbEncoderAVFoundation : public AvbEncoderImpl {
 public:
     AvbEncoderAVFoundation();
     ~AvbEncoderAVFoundation() override;

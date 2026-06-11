@@ -1,4 +1,4 @@
-#include "avb_backend.hpp"
+#include "avb_decoder_impl.hpp"
 
 #include <cstring>
 #include <cstdio>
@@ -13,22 +13,22 @@
 #endif
 
 #if defined(AVB_ENABLE_FFMPEG)
-#include "backends/ffmpeg/avb_backend_ffmpeg.hpp"
+#include "backends/ffmpeg/avb_decoder_ffmpeg.hpp"
 #endif
 
 #if defined(AVB_ENABLE_MEDIAFOUNDATION)
-#include "backends/mediafoundation/avb_backend_mediafoundation.hpp"
+#include "backends/mediafoundation/avb_decoder_mediafoundation.hpp"
 #endif
 
 #if defined(AVB_ENABLE_AVFOUNDATION)
-#include "backends/avfoundation/avb_backend_avfoundation.hh"
+#include "backends/avfoundation/avb_decoder_avfoundation.hh"
 #endif
 
 #if defined(AVB_ENABLE_GSTREAMER)
-#include "backends/gstreamer/avb_backend_gstreamer.hpp"
+#include "backends/gstreamer/avb_decoder_gstreamer.hpp"
 #endif
 
-AvbBackend::~AvbBackend() {
+AvbDecoderImpl::~AvbDecoderImpl() {
     if (!m_spill_path.empty()) {
         std::remove(m_spill_path.c_str());
     }
@@ -56,7 +56,7 @@ const char *avb_extension_for_magic(const std::vector<unsigned char> &head) {
 // Default custom-I/O open: spill the entire stream to a temp file (sequential
 // reads only, so a NULL seek callback is fine) and open that file. Backends
 // that read callbacks natively override this.
-avb_result AvbBackend::open_io(const avb_io_callbacks &cb, void *user,
+avb_result AvbDecoderImpl::open_io(const avb_io_callbacks &cb, void *user,
                                const avb_decode_options &options) {
     if (!cb.read) return AVB_ERROR_INVALID_ARGUMENT;
 
@@ -106,11 +106,11 @@ avb_result AvbBackend::open_io(const avb_io_callbacks &cb, void *user,
         }
     }
 
-    m_spill_path = path; // removed by ~AvbBackend
+    m_spill_path = path; // removed by ~AvbDecoderImpl
     return open_file(path.c_str(), options);
 }
 
-AvbBackend *avb_create_backend(avb_backend backend) {
+AvbDecoderImpl *avb_create_decoder_impl(avb_backend backend) {
     avb_backend resolved = backend;
 
     if (resolved == AVB_BACKEND_AUTO) {
@@ -136,19 +136,19 @@ AvbBackend *avb_create_backend(avb_backend backend) {
     switch (resolved) {
 #if defined(AVB_ENABLE_GSTREAMER)
         case AVB_BACKEND_GSTREAMER:
-            return new AvbBackendGStreamer();
+            return new AvbDecoderGStreamer();
 #endif
 #if defined(AVB_ENABLE_FFMPEG)
         case AVB_BACKEND_FFMPEG:
-            return new AvbBackendFFmpeg();
+            return new AvbDecoderFFmpeg();
 #endif
 #if defined(AVB_ENABLE_MEDIAFOUNDATION)
         case AVB_BACKEND_MEDIAFOUNDATION:
-            return new AvbBackendMediaFoundation();
+            return new AvbDecoderMediaFoundation();
 #endif
 #if defined(AVB_ENABLE_AVFOUNDATION)
         case AVB_BACKEND_AVFOUNDATION:
-            return new AvbBackendAVFoundation();
+            return new AvbDecoderAVFoundation();
 #endif
         default:
             return nullptr;

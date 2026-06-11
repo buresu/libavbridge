@@ -2,9 +2,9 @@
 
 #include "avbridge.h"
 
-class AvbEncoderBackend {
+class AvbEncoderImpl {
 public:
-    virtual ~AvbEncoderBackend() = default;
+    virtual ~AvbEncoderImpl() = default;
 
     virtual avb_result open(const char *path, const avb_encode_options &options) = 0;
     virtual avb_result write_video(const avb_video_frame &frame, double pts_sec) = 0;
@@ -13,4 +13,4 @@ public:
     virtual const char *get_last_error() const = 0;
 };
 
-AvbEncoderBackend *avb_create_encoder_backend(avb_backend backend);
+AvbEncoderImpl *avb_create_encoder_impl(avb_backend backend);

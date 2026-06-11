@@ -1,16 +1,16 @@
 #pragma once
 
-#include "../../avb_encoder_backend.hpp"
+#include "../../avb_encoder_impl.hpp"
 #include <string>
 #include <vector>
 
-// Windows Media Foundation encoder backend. Wraps an IMFSinkWriter that muxes
+// Windows Media Foundation encoder implementation. Wraps an IMFSinkWriter that muxes
 // H.264 video and AAC audio into an mp4/mov container. The Sink Writer loads the
 // platform H.264/AAC encoder MFTs and automatically inserts the color converter
 // (RGB32 -> NV12) the encoder needs, so callers can feed packed BGRA/RGBA (or
 // NV12) frames and interleaved float audio directly. Mirrors the FFmpeg and
-// AVFoundation encoder backends.
-class AvbEncoderMediaFoundation : public AvbEncoderBackend {
+// AVFoundation encoder implementations.
+class AvbEncoderMediaFoundation : public AvbEncoderImpl {
 public:
     AvbEncoderMediaFoundation();
     ~AvbEncoderMediaFoundation() override;

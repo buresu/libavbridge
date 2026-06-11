@@ -38,27 +38,27 @@ endif()
 set(AVB_SOURCES
     src/avb_decoder.cpp
     src/avb_error.cpp
-    src/avb_backend.cpp
+    src/avb_decoder_impl.cpp
     src/avb_encoder.cpp
     src/avb_video_codec_registry.cpp
 )
 
 if(AVB_ENABLE_MEDIAFOUNDATION)
     list(APPEND AVB_SOURCES
-        src/backends/mediafoundation/avb_backend_mediafoundation.cpp
+        src/backends/mediafoundation/avb_decoder_mediafoundation.cpp
         src/backends/mediafoundation/avb_encoder_mediafoundation.cpp
     )
 endif()
 
 if(AVB_ENABLE_AVFOUNDATION)
     list(APPEND AVB_SOURCES
-        src/backends/avfoundation/avb_backend_avfoundation.mm
+        src/backends/avfoundation/avb_decoder_avfoundation.mm
         src/backends/avfoundation/avb_encoder_avfoundation.mm
     )
     # The Objective-C++ backends rely on ARC for memory management of the
     # AVFoundation objects they retain across calls.
     set_source_files_properties(
-        src/backends/avfoundation/avb_backend_avfoundation.mm
+        src/backends/avfoundation/avb_decoder_avfoundation.mm
         src/backends/avfoundation/avb_encoder_avfoundation.mm
         PROPERTIES COMPILE_OPTIONS "-fobjc-arc"
     )
@@ -66,7 +66,7 @@ endif()
 
 if(AVB_ENABLE_FFMPEG)
     list(APPEND AVB_SOURCES
-        src/backends/ffmpeg/avb_backend_ffmpeg.cpp
+        src/backends/ffmpeg/avb_decoder_ffmpeg.cpp
         src/backends/ffmpeg/avb_encoder_ffmpeg.cpp
         src/backends/ffmpeg/avb_ffmpeg_loader.cpp
     )
@@ -74,7 +74,7 @@ endif()
 
 if(AVB_ENABLE_GSTREAMER)
     list(APPEND AVB_SOURCES
-        src/backends/gstreamer/avb_backend_gstreamer.cpp
+        src/backends/gstreamer/avb_decoder_gstreamer.cpp
         src/backends/gstreamer/avb_encoder_gstreamer.cpp
         src/backends/gstreamer/avb_gstreamer_loader.cpp
     )

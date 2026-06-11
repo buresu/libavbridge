@@ -1,12 +1,12 @@
 #pragma once
 
 #include "avbridge.h"
-#include "avb_backend.hpp"
+#include "avb_decoder_impl.hpp"
 #include <memory>
 #include <string>
 
 struct avb_decoder {
-    std::unique_ptr<AvbBackend> backend;
+    std::unique_ptr<AvbDecoderImpl> impl;
     std::string last_error;
 
     // Cached at open for the C-layer conveniences (seek clamp, EOF distinction).

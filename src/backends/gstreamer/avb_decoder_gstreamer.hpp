@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../../avb_backend.hpp"
+#include "../../avb_decoder_impl.hpp"
 #include "avb_gstreamer_loader.hpp"
 
 #include <string>
@@ -11,10 +11,10 @@
 // canonical output formats (interleaved F32LE audio, packed RGBA/BGRA or planar
 // NV12 video). Like the ffmpeg backend, GStreamer is loaded at runtime via
 // dlopen and never linked at build time.
-class AvbBackendGStreamer : public AvbBackend {
+class AvbDecoderGStreamer : public AvbDecoderImpl {
 public:
-    AvbBackendGStreamer();
-    ~AvbBackendGStreamer() override;
+    AvbDecoderGStreamer();
+    ~AvbDecoderGStreamer() override;
 
     avb_result open_file(const char *path, const avb_decode_options &options) override;
     avb_result get_media_info(avb_media_info &out_info) override;

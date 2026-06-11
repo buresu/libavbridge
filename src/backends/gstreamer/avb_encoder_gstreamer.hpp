@@ -1,16 +1,16 @@
 #pragma once
 
-#include "../../avb_encoder_backend.hpp"
+#include "../../avb_encoder_impl.hpp"
 #include "avb_gstreamer_loader.hpp"
 
 #include <string>
 #include <vector>
 
-// GStreamer encoder backend. Builds an appsrc -> encoder -> muxer -> filesink
+// GStreamer encoder implementation. Builds an appsrc -> encoder -> muxer -> filesink
 // pipeline (H.264 via x264enc, AAC via avenc_aac, into mp4/mov) and pushes
 // caller-supplied frames/audio into the two appsrc elements. Like the decoder,
 // GStreamer is loaded at runtime via dlopen and never linked at build time.
-class AvbEncoderGStreamer : public AvbEncoderBackend {
+class AvbEncoderGStreamer : public AvbEncoderImpl {
 public:
     AvbEncoderGStreamer();
     ~AvbEncoderGStreamer() override;

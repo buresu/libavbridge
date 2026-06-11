@@ -1,4 +1,4 @@
-#include "avb_backend_ffmpeg.hpp"
+#include "avb_decoder_ffmpeg.hpp"
 #include "../../avb_video_codec_registry.hpp"
 
 #include <cstdio>
@@ -23,7 +23,7 @@ static uint32_t avb_infer_drm_frame_format(const AVDRMFrameDescriptor *drm) {
     return drm->layers[0].format;
 }
 
-AvbBackendFFmpeg::AvbBackendFFmpeg() {
+AvbDecoderFFmpeg::AvbDecoderFFmpeg() {
     char err_buf[512];
     m_libs_loaded = avb_ffmpeg_load(m_ff, err_buf, sizeof(err_buf));
     if (!m_libs_loaded) {
@@ -31,16 +31,16 @@ AvbBackendFFmpeg::AvbBackendFFmpeg() {
     }
 }
 
-AvbBackendFFmpeg::~AvbBackendFFmpeg() {
+AvbDecoderFFmpeg::~AvbDecoderFFmpeg() {
     close_internal();
 }
 
-const char *AvbBackendFFmpeg::get_backend_name() const { return "ffmpeg"; }
-const char *AvbBackendFFmpeg::get_last_error() const {
+const char *AvbDecoderFFmpeg::get_backend_name() const { return "ffmpeg"; }
+const char *AvbDecoderFFmpeg::get_last_error() const {
     return m_last_error.empty() ? nullptr : m_last_error.c_str();
 }
 
-void AvbBackendFFmpeg::set_error(const char *fmt, ...) {
+void AvbDecoderFFmpeg::set_error(const char *fmt, ...) {
     char buf[1024];
     va_list ap;
     va_start(ap, fmt);
@@ -49,20 +49,20 @@ void AvbBackendFFmpeg::set_error(const char *fmt, ...) {
     m_last_error = buf;
 }
 
-void AvbBackendFFmpeg::set_ff_error(const char *prefix, int errnum) {
+void AvbDecoderFFmpeg::set_ff_error(const char *prefix, int errnum) {
     char errbuf[256];
     m_ff.av_strerror(errnum, errbuf, sizeof(errbuf));
     set_error("%s: %s", prefix, errbuf);
 }
 
-void AvbBackendFFmpeg::clear_packet_queues() {
+void AvbDecoderFFmpeg::clear_packet_queues() {
     for (AVPacket *p : m_audio_pkts) m_ff.av_packet_free(&p);
     for (AVPacket *p : m_video_pkts) m_ff.av_packet_free(&p);
     m_audio_pkts.clear();
     m_video_pkts.clear();
 }
 
-AVPacket *AvbBackendFFmpeg::demux_next(int stream_idx) {
+AVPacket *AvbDecoderFFmpeg::demux_next(int stream_idx) {
     std::deque<AVPacket *> &want_q =
         (stream_idx == m_audio_stream_idx) ? m_audio_pkts : m_video_pkts;
     if (!want_q.empty()) {
@@ -98,7 +98,7 @@ AVPacket *AvbBackendFFmpeg::demux_next(int stream_idx) {
     }
 }
 
-void AvbBackendFFmpeg::close_internal() {
+void AvbDecoderFFmpeg::close_internal() {
     if (m_sws) {
         m_ff.sws_freeContext(m_sws);
         m_sws = nullptr;
@@ -180,16 +180,16 @@ void AvbBackendFFmpeg::close_internal() {
     m_custom_video_codec_name.clear();
 }
 
-int AvbBackendFFmpeg::ffio_read(void *opaque, uint8_t *buf, int size) {
-    auto *self = static_cast<AvbBackendFFmpeg *>(opaque);
+int AvbDecoderFFmpeg::ffio_read(void *opaque, uint8_t *buf, int size) {
+    auto *self = static_cast<AvbDecoderFFmpeg *>(opaque);
     int n = self->m_io_cb.read(self->m_io_user, buf, size);
     if (n > 0)  return n;
     if (n == 0) return AVERROR_EOF;
     return AVERROR(EIO);
 }
 
-int64_t AvbBackendFFmpeg::ffio_seek(void *opaque, int64_t offset, int whence) {
-    auto *self = static_cast<AvbBackendFFmpeg *>(opaque);
+int64_t AvbDecoderFFmpeg::ffio_seek(void *opaque, int64_t offset, int whence) {
+    auto *self = static_cast<AvbDecoderFFmpeg *>(opaque);
     if (whence == AVSEEK_SIZE)
         return self->m_io_cb.size ? self->m_io_cb.size(self->m_io_user) : -1;
     whence &= ~AVSEEK_FORCE;
@@ -197,7 +197,7 @@ int64_t AvbBackendFFmpeg::ffio_seek(void *opaque, int64_t offset, int whence) {
     return self->m_io_cb.seek(self->m_io_user, offset, whence);
 }
 
-avb_result AvbBackendFFmpeg::open_file(const char *path, const avb_decode_options &options) {
+avb_result AvbDecoderFFmpeg::open_file(const char *path, const avb_decode_options &options) {
     if (!m_libs_loaded) return AVB_ERROR_BACKEND_NOT_AVAILABLE;
 
     close_internal();
@@ -210,7 +210,7 @@ avb_result AvbBackendFFmpeg::open_file(const char *path, const avb_decode_option
     return setup_after_open(options);
 }
 
-avb_result AvbBackendFFmpeg::open_io(const avb_io_callbacks &cb, void *user,
+avb_result AvbDecoderFFmpeg::open_io(const avb_io_callbacks &cb, void *user,
                                      const avb_decode_options &options) {
     if (!m_libs_loaded) return AVB_ERROR_BACKEND_NOT_AVAILABLE;
     if (!cb.read) return AVB_ERROR_INVALID_ARGUMENT;
@@ -319,9 +319,9 @@ static const AVHWDeviceType *avb_ff_auto_hw_types() {
     return types;
 }
 
-AVPixelFormat AvbBackendFFmpeg::get_hw_format(AVCodecContext *ctx,
+AVPixelFormat AvbDecoderFFmpeg::get_hw_format(AVCodecContext *ctx,
                                               const AVPixelFormat *pix_fmts) {
-    auto *self = static_cast<AvbBackendFFmpeg *>(ctx->opaque);
+    auto *self = static_cast<AvbDecoderFFmpeg *>(ctx->opaque);
     if (!self) return pix_fmts[0];
     for (const AVPixelFormat *p = pix_fmts; *p != AV_PIX_FMT_NONE; ++p) {
         if (*p == self->m_hw_pix_fmt) return *p;
@@ -329,7 +329,7 @@ AVPixelFormat AvbBackendFFmpeg::get_hw_format(AVCodecContext *ctx,
     return pix_fmts[0];
 }
 
-avb_result AvbBackendFFmpeg::setup_hardware_decoder(
+avb_result AvbDecoderFFmpeg::setup_hardware_decoder(
     const AVCodec *codec,
     const avb_decode_options &options
 ) {
@@ -364,7 +364,7 @@ avb_result AvbBackendFFmpeg::setup_hardware_decoder(
         m_hw_device = avb_ff_hw_device(cfg->device_type);
         m_hw_device_ctx = device;
         m_video_codec_ctx->hw_device_ctx = m_ff.av_buffer_ref(m_hw_device_ctx);
-        m_video_codec_ctx->get_format = &AvbBackendFFmpeg::get_hw_format;
+        m_video_codec_ctx->get_format = &AvbDecoderFFmpeg::get_hw_format;
         m_video_codec_ctx->opaque = this;
         return AVB_OK;
     }
@@ -372,7 +372,7 @@ avb_result AvbBackendFFmpeg::setup_hardware_decoder(
     return AVB_ERROR_STREAM_NOT_FOUND;
 }
 
-avb_result AvbBackendFFmpeg::open_custom_video_decoder(
+avb_result AvbDecoderFFmpeg::open_custom_video_decoder(
     AVStream *st,
     const avb_decode_options &options
 ) {
@@ -411,7 +411,7 @@ avb_result AvbBackendFFmpeg::open_custom_video_decoder(
     return AVB_OK;
 }
 
-avb_result AvbBackendFFmpeg::setup_after_open(const avb_decode_options &options) {
+avb_result AvbDecoderFFmpeg::setup_after_open(const avb_decode_options &options) {
     int ret = m_ff.avformat_find_stream_info(m_fmt_ctx, nullptr);
     if (ret < 0) {
         set_ff_error("avformat_find_stream_info failed", ret);
@@ -601,13 +601,13 @@ avb_result AvbBackendFFmpeg::setup_after_open(const avb_decode_options &options)
     return AVB_OK;
 }
 
-avb_result AvbBackendFFmpeg::get_media_info(avb_media_info &out_info) {
+avb_result AvbDecoderFFmpeg::get_media_info(avb_media_info &out_info) {
     if (!m_fmt_ctx) return AVB_ERROR_INVALID_ARGUMENT;
     out_info = m_media_info;
     return AVB_OK;
 }
 
-avb_result AvbBackendFFmpeg::seek(double seconds) {
+avb_result AvbDecoderFFmpeg::seek(double seconds) {
     if (!m_fmt_ctx) return AVB_ERROR_INVALID_ARGUMENT;
 
     int64_t ts = (int64_t)(seconds * AV_TIME_BASE);
@@ -632,7 +632,7 @@ avb_result AvbBackendFFmpeg::seek(double seconds) {
     return AVB_OK;
 }
 
-bool AvbBackendFFmpeg::fill_audio_buffer() {
+bool AvbDecoderFFmpeg::fill_audio_buffer() {
     if (!m_audio_codec_ctx) return false;
 
     while (true) {
@@ -710,7 +710,7 @@ bool AvbBackendFFmpeg::fill_audio_buffer() {
     }
 }
 
-int AvbBackendFFmpeg::read_audio_f32(float *dst_interleaved, int frames) {
+int AvbDecoderFFmpeg::read_audio_f32(float *dst_interleaved, int frames) {
     if (!m_audio_codec_ctx || m_eof) return 0;
 
     int nb_channels    = m_out_channels;
@@ -742,7 +742,7 @@ int AvbBackendFFmpeg::read_audio_f32(float *dst_interleaved, int frames) {
     return samples_written / nb_channels;
 }
 
-double AvbBackendFFmpeg::audio_next_pts() {
+double AvbDecoderFFmpeg::audio_next_pts() {
     if (!m_audio_codec_ctx) return -1.0;
     // Ensure the buffer holds the next sample, then report its timestamp.
     if (m_audio_buf_pos >= (int)m_audio_buf.size()) {
@@ -751,7 +751,7 @@ double AvbBackendFFmpeg::audio_next_pts() {
     return m_audio_buf_pts;
 }
 
-avb_result AvbBackendFFmpeg::read_custom_video_frame(avb_video_frame &out_frame) {
+avb_result AvbDecoderFFmpeg::read_custom_video_frame(avb_video_frame &out_frame) {
     if (!m_custom_video_decoder || !m_custom_video_ctx)
         return AVB_ERROR_STREAM_NOT_FOUND;
 
@@ -798,7 +798,7 @@ avb_result AvbBackendFFmpeg::read_custom_video_frame(avb_video_frame &out_frame)
     }
 }
 
-avb_result AvbBackendFFmpeg::fill_native_video_frame(
+avb_result AvbDecoderFFmpeg::fill_native_video_frame(
     AVFrame *frame,
     double pts_sec,
     avb_video_frame &out_frame
@@ -827,7 +827,7 @@ avb_result AvbBackendFFmpeg::fill_native_video_frame(
     return AVB_OK;
 }
 
-avb_result AvbBackendFFmpeg::fill_dmabuf_video_frame(
+avb_result AvbDecoderFFmpeg::fill_dmabuf_video_frame(
     AVFrame *frame,
     double pts_sec,
     avb_video_frame &out_frame
@@ -886,7 +886,7 @@ avb_result AvbBackendFFmpeg::fill_dmabuf_video_frame(
     return plane_count > 0 ? AVB_OK : AVB_ERROR_DECODE_FAILED;
 }
 
-avb_result AvbBackendFFmpeg::fill_cpu_video_frame(
+avb_result AvbDecoderFFmpeg::fill_cpu_video_frame(
     AVFrame *frame,
     double pts_sec,
     avb_video_frame &out_frame
@@ -971,7 +971,7 @@ avb_result AvbBackendFFmpeg::fill_cpu_video_frame(
     return AVB_OK;
 }
 
-avb_result AvbBackendFFmpeg::read_video_frame(avb_video_frame &out_frame) {
+avb_result AvbDecoderFFmpeg::read_video_frame(avb_video_frame &out_frame) {
     if (m_custom_video_decoder) return read_custom_video_frame(out_frame);
     if (!m_video_codec_ctx) return AVB_ERROR_STREAM_NOT_FOUND;
 
@@ -1048,7 +1048,7 @@ avb_result AvbBackendFFmpeg::read_video_frame(avb_video_frame &out_frame) {
     }
 }
 
-void AvbBackendFFmpeg::release_video_frame(avb_video_frame &frame) {
+void AvbDecoderFFmpeg::release_video_frame(avb_video_frame &frame) {
     if (m_custom_video_decoder) {
         if (m_custom_video_decoder->release_frame)
             m_custom_video_decoder->release_frame(m_custom_video_ctx, &frame);

@@ -1,4 +1,4 @@
-#include "avb_backend_avfoundation.hh"
+#include "avb_decoder_avfoundation.hh"
 #include "../../avb_video_codec_registry.hpp"
 
 #ifdef __APPLE__
@@ -120,7 +120,7 @@ static uint32_t avb_bswap32(uint32_t v) {
            ((v & 0xff000000u) >> 24);
 }
 
-struct AvbBackendAVFoundation::Impl {
+struct AvbDecoderAVFoundation::Impl {
     AVAsset *asset = nil;
     AVAssetReader *reader = nil;
     AVAssetReaderTrackOutput *audio_output = nil;
@@ -156,11 +156,11 @@ struct AvbBackendAVFoundation::Impl {
     std::vector<unsigned char> video_frame_buf;
 };
 
-AvbBackendAVFoundation::AvbBackendAVFoundation() {
+AvbDecoderAVFoundation::AvbDecoderAVFoundation() {
     m_impl = new Impl();
 }
 
-AvbBackendAVFoundation::~AvbBackendAVFoundation() {
+AvbDecoderAVFoundation::~AvbDecoderAVFoundation() {
     if (m_impl) {
         if (m_impl->reader) [m_impl->reader cancelReading];
         if (m_impl->custom_video_decoder) {
@@ -173,12 +173,12 @@ AvbBackendAVFoundation::~AvbBackendAVFoundation() {
     }
 }
 
-const char *AvbBackendAVFoundation::get_backend_name() const { return "avfoundation"; }
-const char *AvbBackendAVFoundation::get_last_error() const {
+const char *AvbDecoderAVFoundation::get_backend_name() const { return "avfoundation"; }
+const char *AvbDecoderAVFoundation::get_last_error() const {
     return m_last_error.empty() ? nullptr : m_last_error.c_str();
 }
 
-avb_result AvbBackendAVFoundation::open_custom_video_decoder(
+avb_result AvbDecoderAVFoundation::open_custom_video_decoder(
     void *track_ptr,
     const avb_decode_options &options
 ) {
@@ -219,7 +219,7 @@ avb_result AvbBackendAVFoundation::open_custom_video_decoder(
     return AVB_OK;
 }
 
-avb_result AvbBackendAVFoundation::open_file(const char *path, const avb_decode_options &options) {
+avb_result AvbDecoderAVFoundation::open_file(const char *path, const avb_decode_options &options) {
     @autoreleasepool {
         if (options.video_memory != AVB_VIDEO_MEMORY_CPU ||
             options.hardware_policy == AVB_HARDWARE_REQUIRE) {
@@ -347,7 +347,7 @@ avb_result AvbBackendAVFoundation::open_file(const char *path, const avb_decode_
     }
 }
 
-avb_result AvbBackendAVFoundation::get_media_info(avb_media_info &out_info) {
+avb_result AvbDecoderAVFoundation::get_media_info(avb_media_info &out_info) {
     if (!m_impl->reader) return AVB_ERROR_INVALID_ARGUMENT;
 
     out_info = {};
@@ -377,7 +377,7 @@ avb_result AvbBackendAVFoundation::get_media_info(avb_media_info &out_info) {
     return AVB_OK;
 }
 
-avb_result AvbBackendAVFoundation::seek(double seconds) {
+avb_result AvbDecoderAVFoundation::seek(double seconds) {
     if (!m_impl->reader) return AVB_ERROR_INVALID_ARGUMENT;
 
     // AVAssetReader does not support seeking directly — recreate it with a time range.
@@ -446,7 +446,7 @@ avb_result AvbBackendAVFoundation::seek(double seconds) {
     return AVB_OK;
 }
 
-bool AvbBackendAVFoundation::fill_audio_buffer() {
+bool AvbDecoderAVFoundation::fill_audio_buffer() {
     if (!m_impl->audio_output || !m_impl->audio_buf.empty()) return false;
 
     @autoreleasepool {
@@ -468,7 +468,7 @@ bool AvbBackendAVFoundation::fill_audio_buffer() {
     }
 }
 
-double AvbBackendAVFoundation::audio_next_pts() {
+double AvbDecoderAVFoundation::audio_next_pts() {
     if (m_impl->end_of_stream) return -1.0;
     if (!m_impl->audio_output || m_impl->channels <= 0 || m_impl->sample_rate <= 0)
         return -1.0;
@@ -480,7 +480,7 @@ double AvbBackendAVFoundation::audio_next_pts() {
     return m_impl->audio_buf_start_pts + frames_offset / (double)m_impl->sample_rate;
 }
 
-int AvbBackendAVFoundation::read_audio_f32(float *dst_interleaved, int frames) {
+int AvbDecoderAVFoundation::read_audio_f32(float *dst_interleaved, int frames) {
     if (m_impl->end_of_stream) return 0;
     if (!m_impl->audio_output) return 0;
 
@@ -512,7 +512,7 @@ int AvbBackendAVFoundation::read_audio_f32(float *dst_interleaved, int frames) {
     return samples_written / nb_channels;
 }
 
-avb_result AvbBackendAVFoundation::read_custom_video_frame(avb_video_frame &out_frame) {
+avb_result AvbDecoderAVFoundation::read_custom_video_frame(avb_video_frame &out_frame) {
     if (!m_impl->custom_video_decoder || !m_impl->custom_video_ctx)
         return AVB_ERROR_STREAM_NOT_FOUND;
 
@@ -576,7 +576,7 @@ avb_result AvbBackendAVFoundation::read_custom_video_frame(avb_video_frame &out_
     }
 }
 
-avb_result AvbBackendAVFoundation::read_video_frame(avb_video_frame &out_frame) {
+avb_result AvbDecoderAVFoundation::read_video_frame(avb_video_frame &out_frame) {
     if (m_impl->end_of_stream) return AVB_ERROR_EOF;
     if (m_impl->custom_video_decoder) return read_custom_video_frame(out_frame);
     if (!m_impl->video_output) return AVB_ERROR_STREAM_NOT_FOUND;
@@ -675,7 +675,7 @@ avb_result AvbBackendAVFoundation::read_video_frame(avb_video_frame &out_frame) 
     return AVB_OK;
 }
 
-void AvbBackendAVFoundation::release_video_frame(avb_video_frame &frame) {
+void AvbDecoderAVFoundation::release_video_frame(avb_video_frame &frame) {
     if (m_impl->custom_video_decoder && m_impl->custom_video_decoder->release_frame) {
         m_impl->custom_video_decoder->release_frame(m_impl->custom_video_ctx, &frame);
         return;
@@ -685,27 +685,27 @@ void AvbBackendAVFoundation::release_video_frame(avb_video_frame &frame) {
 
 #else // !__APPLE__
 
-AvbBackendAVFoundation::AvbBackendAVFoundation() {
+AvbDecoderAVFoundation::AvbDecoderAVFoundation() {
     m_impl = new Impl();
     m_last_error = "AVFoundation backend is only available on Apple platforms.";
 }
-AvbBackendAVFoundation::~AvbBackendAVFoundation() { delete m_impl; }
-const char *AvbBackendAVFoundation::get_backend_name() const { return "avfoundation"; }
-const char *AvbBackendAVFoundation::get_last_error() const {
+AvbDecoderAVFoundation::~AvbDecoderAVFoundation() { delete m_impl; }
+const char *AvbDecoderAVFoundation::get_backend_name() const { return "avfoundation"; }
+const char *AvbDecoderAVFoundation::get_last_error() const {
     return m_last_error.empty() ? nullptr : m_last_error.c_str();
 }
-avb_result AvbBackendAVFoundation::open_file(const char *, const avb_decode_options &) {
+avb_result AvbDecoderAVFoundation::open_file(const char *, const avb_decode_options &) {
     return AVB_ERROR_BACKEND_NOT_AVAILABLE;
 }
-avb_result AvbBackendAVFoundation::get_media_info(avb_media_info &) {
+avb_result AvbDecoderAVFoundation::get_media_info(avb_media_info &) {
     return AVB_ERROR_BACKEND_NOT_AVAILABLE;
 }
-avb_result AvbBackendAVFoundation::seek(double) { return AVB_ERROR_BACKEND_NOT_AVAILABLE; }
-int AvbBackendAVFoundation::read_audio_f32(float *, int) { return 0; }
-double AvbBackendAVFoundation::audio_next_pts() { return -1.0; }
-avb_result AvbBackendAVFoundation::read_video_frame(avb_video_frame &) {
+avb_result AvbDecoderAVFoundation::seek(double) { return AVB_ERROR_BACKEND_NOT_AVAILABLE; }
+int AvbDecoderAVFoundation::read_audio_f32(float *, int) { return 0; }
+double AvbDecoderAVFoundation::audio_next_pts() { return -1.0; }
+avb_result AvbDecoderAVFoundation::read_video_frame(avb_video_frame &) {
     return AVB_ERROR_BACKEND_NOT_AVAILABLE;
 }
-void AvbBackendAVFoundation::release_video_frame(avb_video_frame &) {}
+void AvbDecoderAVFoundation::release_video_frame(avb_video_frame &) {}
 
 #endif // __APPLE__
