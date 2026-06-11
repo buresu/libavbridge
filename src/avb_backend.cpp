@@ -134,6 +134,14 @@ AvbBackend *avb_create_backend(avb_backend backend) {
     }
 
     switch (resolved) {
+#if defined(AVB_ENABLE_GSTREAMER)
+        case AVB_BACKEND_GSTREAMER:
+            return new AvbBackendGStreamer();
+#endif
+#if defined(AVB_ENABLE_FFMPEG)
+        case AVB_BACKEND_FFMPEG:
+            return new AvbBackendFFmpeg();
+#endif
 #if defined(AVB_ENABLE_MEDIAFOUNDATION)
         case AVB_BACKEND_MEDIAFOUNDATION:
             return new AvbBackendMediaFoundation();
@@ -141,14 +149,6 @@ AvbBackend *avb_create_backend(avb_backend backend) {
 #if defined(AVB_ENABLE_AVFOUNDATION)
         case AVB_BACKEND_AVFOUNDATION:
             return new AvbBackendAVFoundation();
-#endif
-#if defined(AVB_ENABLE_FFMPEG)
-        case AVB_BACKEND_FFMPEG:
-            return new AvbBackendFFmpeg();
-#endif
-#if defined(AVB_ENABLE_GSTREAMER)
-        case AVB_BACKEND_GSTREAMER:
-            return new AvbBackendGStreamer();
 #endif
         default:
             return nullptr;

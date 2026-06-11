@@ -26,7 +26,7 @@ extern "C" {
 #endif
 
 #define AVB_VERSION_MAJOR 0
-#define AVB_VERSION_MINOR 4
+#define AVB_VERSION_MINOR 5
 #define AVB_VERSION_PATCH 0
 
 #ifdef _WIN32
@@ -57,24 +57,12 @@ typedef enum avb_result {
 
 typedef enum avb_backend {
     AVB_BACKEND_AUTO = 0,
+    AVB_BACKEND_GSTREAMER,
+    AVB_BACKEND_FFMPEG,
     AVB_BACKEND_MEDIAFOUNDATION,
     AVB_BACKEND_AVFOUNDATION,
-    AVB_BACKEND_FFMPEG,
-    AVB_BACKEND_GSTREAMER,
+    AVB_BACKEND_COUNT,
 } avb_backend;
-
-typedef enum avb_pixel_format {
-    AVB_PIXEL_FORMAT_UNKNOWN = 0,
-    AVB_PIXEL_FORMAT_RGBA8,  /* packed, 1 plane */
-    AVB_PIXEL_FORMAT_BGRA8,  /* packed, 1 plane */
-    AVB_PIXEL_FORMAT_NV12,   /* planar, 2 planes: Y, interleaved CbCr */
-    AVB_PIXEL_FORMAT_I420,   /* planar, 3 planes: Y, Cb, Cr (half size) */
-    AVB_PIXEL_FORMAT_BC1_RGBA, /* compressed, 4x4 blocks, 8 bytes/block */
-    AVB_PIXEL_FORMAT_BC3_RGBA, /* compressed, 4x4 blocks, 16 bytes/block */
-    AVB_PIXEL_FORMAT_BC4_R,    /* compressed, 4x4 blocks, 8 bytes/block */
-    AVB_PIXEL_FORMAT_BC5_RG,   /* compressed, 4x4 blocks, 16 bytes/block */
-    AVB_PIXEL_FORMAT_BC7_RGBA, /* compressed, 4x4 blocks, 16 bytes/block */
-} avb_pixel_format;
 
 /* Codecs usable for encoding. AUTO selects the backend default (H.264 video,
  * AAC audio). Video codecs: H264, HEVC, VP8, VP9, AV1, HAP. Audio codecs:
@@ -83,15 +71,46 @@ typedef enum avb_pixel_format {
  * produce. */
 typedef enum avb_codec {
     AVB_CODEC_AUTO = 0,
-    AVB_CODEC_H264 = 1,
-    AVB_CODEC_AAC  = 2,
-    AVB_CODEC_HEVC = 3,
-    AVB_CODEC_VP9  = 4,
-    AVB_CODEC_OPUS = 5,
-    AVB_CODEC_HAP  = 6,
-    AVB_CODEC_VP8  = 7,
-    AVB_CODEC_AV1  = 8,
+    AVB_CODEC_H264,
+    AVB_CODEC_HEVC,
+    AVB_CODEC_VP8,
+    AVB_CODEC_VP9,
+    AVB_CODEC_AV1,
+    AVB_CODEC_HAP,
+    AVB_CODEC_AAC,
+    AVB_CODEC_OPUS,
+    AVB_CODEC_COUNT,
 } avb_codec;
+
+typedef enum avb_pixel_format {
+    AVB_PIXEL_FORMAT_UNKNOWN = 0,
+    AVB_PIXEL_FORMAT_RGBA8,    /* packed, 1 plane */
+    AVB_PIXEL_FORMAT_BGRA8,    /* packed, 1 plane */
+    AVB_PIXEL_FORMAT_NV12,     /* planar, 2 planes: Y, interleaved CbCr */
+    AVB_PIXEL_FORMAT_I420,     /* planar, 3 planes: Y, Cb, Cr (half size) */
+    AVB_PIXEL_FORMAT_BC1_RGBA, /* compressed, 4x4 blocks, 8 bytes/block */
+    AVB_PIXEL_FORMAT_BC3_RGBA, /* compressed, 4x4 blocks, 16 bytes/block */
+    AVB_PIXEL_FORMAT_BC4_R,    /* compressed, 4x4 blocks, 8 bytes/block */
+    AVB_PIXEL_FORMAT_BC5_RG,   /* compressed, 4x4 blocks, 16 bytes/block */
+    AVB_PIXEL_FORMAT_BC7_RGBA, /* compressed, 4x4 blocks, 16 bytes/block */
+} avb_pixel_format;
+
+typedef enum avb_video_memory_type {
+    /* CPU-readable planes. Decoders fill plane_data/data; encoders read them. */
+    AVB_VIDEO_MEMORY_CPU = 0,
+    /* Backend-native frame or surface. The handle type is backend-specific:
+     * FFmpeg returns/accepts AVFrame* in native_handle and, for VAAPI frames,
+     * also reports VASurfaceID in native_handle_id. GStreamer returns/accepts
+     * GstBuffer*. Future platform backends should use native_handle for the
+     * reference-counted object (CVPixelBufferRef, ID3D11Texture2D*, etc.) and
+     * native_handle_id for small numeric surface IDs when useful. */
+    AVB_VIDEO_MEMORY_NATIVE = 1,
+    /* Linux DRM PRIME / DMABUF frame. drm_format is the DRM fourcc for the full
+     * image (for example NV12), while dmabuf_fd/plane_offset/plane_stride and
+     * dmabuf_modifier describe each plane. Multiple planes may reference the
+     * same fd with different offsets. */
+    AVB_VIDEO_MEMORY_DMABUF = 2,
+} avb_video_memory_type;
 
 typedef enum avb_hardware_policy {
     /* Always use CPU/system-memory codec paths. */
@@ -114,23 +133,6 @@ typedef enum avb_hardware_device {
     AVB_HW_DEVICE_VIDEOTOOLBOX,
     AVB_HW_DEVICE_AMF,
 } avb_hardware_device;
-
-typedef enum avb_video_memory_type {
-    /* CPU-readable planes. Decoders fill plane_data/data; encoders read them. */
-    AVB_VIDEO_MEMORY_CPU = 0,
-    /* Backend-native frame or surface. The handle type is backend-specific:
-     * FFmpeg returns/accepts AVFrame* in native_handle and, for VAAPI frames,
-     * also reports VASurfaceID in native_handle_id. GStreamer returns/accepts
-     * GstBuffer*. Future platform backends should use native_handle for the
-     * reference-counted object (CVPixelBufferRef, ID3D11Texture2D*, etc.) and
-     * native_handle_id for small numeric surface IDs when useful. */
-    AVB_VIDEO_MEMORY_NATIVE = 1,
-    /* Linux DRM PRIME / DMABUF frame. drm_format is the DRM fourcc for the full
-     * image (for example NV12), while dmabuf_fd/plane_offset/plane_stride and
-     * dmabuf_modifier describe each plane. Multiple planes may reference the
-     * same fd with different offsets. */
-    AVB_VIDEO_MEMORY_DMABUF = 2,
-} avb_video_memory_type;
 
 /* ------------------------------------------------------------------------- *
  * Shared media types
@@ -220,34 +222,8 @@ typedef struct avb_media_info {
 } avb_media_info;
 
 /* ------------------------------------------------------------------------- *
- * Library introspection
+ * Configuration
  * ------------------------------------------------------------------------- */
-
-/* "MAJOR.MINOR.PATCH" of the library build. */
-AVB_API const char *avb_version_string(void);
-
-/* Short, stable name for a backend ("auto", "mediafoundation", "avfoundation",
- * "ffmpeg", "gstreamer"), or NULL for an out-of-range value. */
-AVB_API const char *avb_backend_name(avb_backend backend);
-
-/* Parse a backend name (case-sensitive, as returned by avb_backend_name) into
- * *out. Returns AVB_ERROR_INVALID_ARGUMENT for an unknown name. */
-AVB_API avb_result avb_backend_from_name(const char *name, avb_backend *out);
-
-/* 1 if `backend` is compiled into this build (so it can be selected), else 0.
- * This reflects build configuration, not whether the backend's runtime
- * libraries are installed — that is only known once you open a file. AUTO
- * reports whether this platform has any default backend. */
-AVB_API int avb_backend_is_available(avb_backend backend);
-
-/* Short name for a result code, e.g. "AVB_ERROR_EOF". Never NULL. */
-AVB_API const char *avb_result_string(avb_result result);
-
-/* ------------------------------------------------------------------------- *
- * Decoding
- * ------------------------------------------------------------------------- */
-
-typedef struct avb_decoder avb_decoder;
 
 typedef struct avb_decode_options {
     avb_backend backend;
@@ -280,23 +256,6 @@ typedef struct avb_decode_options {
     int enable_custom_video_decoders;
 } avb_decode_options;
 
-/* Sensible defaults: AUTO backend, both audio and video enabled, default
- * stream selection and formats. Prefer this over zero-initialisation. */
-AVB_API avb_decode_options avb_decode_options_default(void);
-
-/* Open `path` for decoding. options may be NULL (uses the defaults above).
- * On failure a non-NULL *out_dec is still returned so the caller can read
- * avb_decoder_get_last_error(); it must still be released with
- * avb_decoder_close(). */
-AVB_API avb_result avb_decoder_open(
-    avb_decoder **out_dec,
-    const char *path,
-    const avb_decode_options *options
-);
-
-/* Custom-I/O source for decoding from something other than a file path (e.g.
- * bytes embedded in an application package). All callbacks receive the `user`
- * pointer passed to avb_decoder_open_io. */
 typedef struct avb_io_callbacks {
     /* Read up to `size` bytes into `buf`. Return the number of bytes read,
      * 0 at end of stream, or a negative value on error. Required. */
@@ -310,26 +269,42 @@ typedef struct avb_io_callbacks {
     long long (*size)(void *user);
 } avb_io_callbacks;
 
-/* Open a custom I/O source for decoding. `cb` and `user` (and any data they
- * reference) must remain valid until avb_decoder_close. Backends that cannot
- * consume callbacks natively buffer the stream into a temporary file first; the
- * FFmpeg backend reads through the callbacks directly. */
-AVB_API avb_result avb_decoder_open_io(
-    avb_decoder **out_dec,
-    const avb_io_callbacks *cb,
-    void *user,
-    const avb_decode_options *options
-);
+typedef struct avb_video_encode_params {
+    int enable;
+    int width;
+    int height;
+    double frame_rate;             /* used to derive PTS when none is given */
+    avb_codec codec;               /* AUTO -> H.264; or H264/HEVC/VP8/VP9/AV1 */
+    int bitrate;                   /* bits/sec, 0 = backend default */
+    avb_pixel_format input_format; /* format of frames passed to write_video */
+    /* Expected memory for frames passed to avb_encoder_write_video.
+     *
+     * CPU input can be encoded by software or uploaded to a hardware encoder
+     * when hardware_policy requests one. NATIVE and DMABUF input require a
+     * compatible hardware encoder path; backend/device mismatches are reported
+     * as open/write failures rather than hidden CPU readbacks. */
+    avb_video_memory_type input_memory;
+    avb_hardware_policy hardware_policy;
+    avb_hardware_device hardware_device;
+} avb_video_encode_params;
 
-/* Open an in-memory media buffer for decoding. `data` is NOT copied: it must
- * remain valid until avb_decoder_close. Convenience wrapper over
- * avb_decoder_open_io. */
-AVB_API avb_result avb_decoder_open_memory(
-    avb_decoder **out_dec,
-    const void *data,
-    size_t size,
-    const avb_decode_options *options
-);
+typedef struct avb_audio_encode_params {
+    int enable;
+    int sample_rate;
+    int channels;
+    avb_codec codec;             /* AUTO -> AAC; or AAC/OPUS */
+    int bitrate;                 /* bits/sec, 0 = backend default */
+} avb_audio_encode_params;
+
+typedef struct avb_encode_options {
+    avb_backend backend;
+    avb_video_encode_params video;
+    avb_audio_encode_params audio;
+} avb_encode_options;
+
+/* ------------------------------------------------------------------------- *
+ * Custom video codec plugins
+ * ------------------------------------------------------------------------- */
 
 typedef struct avb_video_stream_info {
     int stream_index;
@@ -375,20 +350,6 @@ typedef struct avb_video_decoder_plugin {
     void (*close)(void *ctx);
 } avb_video_decoder_plugin;
 
-/* Register a process-wide custom video decoder. The plugin struct and any
- * callback targets it references must remain valid until unregistered. The
- * first registered plugin whose can_decode() returns non-zero handles a stream.
- * Custom video decoders are used by backends that can expose compressed video
- * packets while still supplying demuxing and regular audio decoding. Do not
- * unregister a plugin while any decoder using it may still be open. */
-AVB_API avb_result avb_register_video_decoder(
-    const avb_video_decoder_plugin *plugin
-);
-
-AVB_API avb_result avb_unregister_video_decoder(
-    const avb_video_decoder_plugin *plugin
-);
-
 typedef struct avb_video_encode_info {
     int width;
     int height;
@@ -426,6 +387,20 @@ typedef struct avb_video_encoder_plugin {
     void (*close)(void *ctx);
 } avb_video_encoder_plugin;
 
+/* Register a process-wide custom video decoder. The plugin struct and any
+ * callback targets it references must remain valid until unregistered. The
+ * first registered plugin whose can_decode() returns non-zero handles a stream.
+ * Custom video decoders are used by backends that can expose compressed video
+ * packets while still supplying demuxing and regular audio decoding. Do not
+ * unregister a plugin while any decoder using it may still be open. */
+AVB_API avb_result avb_register_video_decoder(
+    const avb_video_decoder_plugin *plugin
+);
+
+AVB_API avb_result avb_unregister_video_decoder(
+    const avb_video_decoder_plugin *plugin
+);
+
 /* Register a process-wide custom video encoder. When a video encode request is
  * matched by can_encode(), capable backends use the plugin for video
  * compression and still mux audio through their native encoders. Do not
@@ -436,6 +411,71 @@ AVB_API avb_result avb_register_video_encoder(
 
 AVB_API avb_result avb_unregister_video_encoder(
     const avb_video_encoder_plugin *plugin
+);
+
+/* ------------------------------------------------------------------------- *
+ * Library introspection
+ * ------------------------------------------------------------------------- */
+
+/* "MAJOR.MINOR.PATCH" of the library build. */
+AVB_API const char *avb_version_string(void);
+
+/* Short, stable name for a backend ("auto", "gstreamer", "ffmpeg",
+ * "mediafoundation", "avfoundation"), or NULL for an out-of-range value. */
+AVB_API const char *avb_backend_name(avb_backend backend);
+
+/* Parse a backend name (case-sensitive, as returned by avb_backend_name) into
+ * *out. Returns AVB_ERROR_INVALID_ARGUMENT for an unknown name. */
+AVB_API avb_result avb_backend_from_name(const char *name, avb_backend *out);
+
+/* 1 if `backend` is compiled into this build (so it can be selected), else 0.
+ * This reflects build configuration, not whether the backend's runtime
+ * libraries are installed — that is only known once you open a file. AUTO
+ * reports whether this platform has any default backend. */
+AVB_API int avb_backend_is_available(avb_backend backend);
+
+/* Short name for a result code, e.g. "AVB_ERROR_EOF". Never NULL. */
+AVB_API const char *avb_result_string(avb_result result);
+
+/* ------------------------------------------------------------------------- *
+ * Decoding
+ * ------------------------------------------------------------------------- */
+
+typedef struct avb_decoder avb_decoder;
+
+/* Sensible defaults: AUTO backend, both audio and video enabled, default
+ * stream selection and formats. Prefer this over zero-initialisation. */
+AVB_API avb_decode_options avb_decode_options_default(void);
+
+/* Open `path` for decoding. options may be NULL (uses the defaults above).
+ * On failure a non-NULL *out_dec is still returned so the caller can read
+ * avb_decoder_get_last_error(); it must still be released with
+ * avb_decoder_close(). */
+AVB_API avb_result avb_decoder_open(
+    avb_decoder **out_dec,
+    const char *path,
+    const avb_decode_options *options
+);
+
+/* Open a custom I/O source for decoding. `cb` and `user` (and any data they
+ * reference) must remain valid until avb_decoder_close. Backends that cannot
+ * consume callbacks natively buffer the stream into a temporary file first; the
+ * FFmpeg backend reads through the callbacks directly. */
+AVB_API avb_result avb_decoder_open_io(
+    avb_decoder **out_dec,
+    const avb_io_callbacks *cb,
+    void *user,
+    const avb_decode_options *options
+);
+
+/* Open an in-memory media buffer for decoding. `data` is NOT copied: it must
+ * remain valid until avb_decoder_close. Convenience wrapper over
+ * avb_decoder_open_io. */
+AVB_API avb_result avb_decoder_open_memory(
+    avb_decoder **out_dec,
+    const void *data,
+    size_t size,
+    const avb_decode_options *options
 );
 
 AVB_API avb_result avb_decoder_get_media_info(
@@ -512,39 +552,6 @@ AVB_API void avb_decoder_close(
  * ------------------------------------------------------------------------- */
 
 typedef struct avb_encoder avb_encoder;
-
-typedef struct avb_video_encode_params {
-    int enable;
-    int width;
-    int height;
-    double frame_rate;             /* used to derive PTS when none is given */
-    avb_codec codec;               /* AUTO -> H.264; or H264/HEVC/VP8/VP9/AV1 */
-    int bitrate;                   /* bits/sec, 0 = backend default */
-    avb_pixel_format input_format; /* format of frames passed to write_video */
-    /* Expected memory for frames passed to avb_encoder_write_video.
-     *
-     * CPU input can be encoded by software or uploaded to a hardware encoder
-     * when hardware_policy requests one. NATIVE and DMABUF input require a
-     * compatible hardware encoder path; backend/device mismatches are reported
-     * as open/write failures rather than hidden CPU readbacks. */
-    avb_video_memory_type input_memory;
-    avb_hardware_policy hardware_policy;
-    avb_hardware_device hardware_device;
-} avb_video_encode_params;
-
-typedef struct avb_audio_encode_params {
-    int enable;
-    int sample_rate;
-    int channels;
-    avb_codec codec;             /* AUTO -> AAC; or AAC/OPUS */
-    int bitrate;                 /* bits/sec, 0 = backend default */
-} avb_audio_encode_params;
-
-typedef struct avb_encode_options {
-    avb_backend backend;
-    avb_video_encode_params video;
-    avb_audio_encode_params audio;
-} avb_encode_options;
 
 /* Defaults: AUTO backend, both tracks disabled (enable + fill the ones you
  * want), codecs AUTO. */

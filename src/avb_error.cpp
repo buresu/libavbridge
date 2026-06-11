@@ -16,17 +16,17 @@ const char *avb_version_string(void) {
 const char *avb_backend_name(avb_backend backend) {
     switch (backend) {
         case AVB_BACKEND_AUTO:            return "auto";
+        case AVB_BACKEND_GSTREAMER:       return "gstreamer";
+        case AVB_BACKEND_FFMPEG:          return "ffmpeg";
         case AVB_BACKEND_MEDIAFOUNDATION: return "mediafoundation";
         case AVB_BACKEND_AVFOUNDATION:    return "avfoundation";
-        case AVB_BACKEND_FFMPEG:          return "ffmpeg";
-        case AVB_BACKEND_GSTREAMER:       return "gstreamer";
         default:                          return nullptr;
     }
 }
 
 avb_result avb_backend_from_name(const char *name, avb_backend *out) {
     if (!name || !out) return AVB_ERROR_INVALID_ARGUMENT;
-    for (int b = AVB_BACKEND_AUTO; b <= AVB_BACKEND_GSTREAMER; ++b) {
+    for (int b = AVB_BACKEND_AUTO; b < AVB_BACKEND_COUNT; ++b) {
         const char *n = avb_backend_name((avb_backend)b);
         if (n && std::strcmp(n, name) == 0) { *out = (avb_backend)b; return AVB_OK; }
     }
@@ -35,14 +35,8 @@ avb_result avb_backend_from_name(const char *name, avb_backend *out) {
 
 int avb_backend_is_available(avb_backend backend) {
     switch (backend) {
-        case AVB_BACKEND_MEDIAFOUNDATION:
-#if defined(AVB_ENABLE_MEDIAFOUNDATION)
-            return 1;
-#else
-            return 0;
-#endif
-        case AVB_BACKEND_AVFOUNDATION:
-#if defined(AVB_ENABLE_AVFOUNDATION)
+        case AVB_BACKEND_GSTREAMER:
+#if defined(AVB_ENABLE_GSTREAMER)
             return 1;
 #else
             return 0;
@@ -53,8 +47,14 @@ int avb_backend_is_available(avb_backend backend) {
 #else
             return 0;
 #endif
-        case AVB_BACKEND_GSTREAMER:
-#if defined(AVB_ENABLE_GSTREAMER)
+        case AVB_BACKEND_MEDIAFOUNDATION:
+#if defined(AVB_ENABLE_MEDIAFOUNDATION)
+            return 1;
+#else
+            return 0;
+#endif
+        case AVB_BACKEND_AVFOUNDATION:
+#if defined(AVB_ENABLE_AVFOUNDATION)
             return 1;
 #else
             return 0;
