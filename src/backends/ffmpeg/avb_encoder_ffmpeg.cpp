@@ -9,16 +9,88 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-static AVCodecID avb_ff_video_codec_id(avb_codec codec) {
+static AVCodecID avb_ff_video_codec_id(avb_video_codec codec) {
     switch (codec) {
-        case AVB_CODEC_H264: return AV_CODEC_ID_H264;
-        case AVB_CODEC_HEVC: return AV_CODEC_ID_HEVC;
-        case AVB_CODEC_VP8:  return AV_CODEC_ID_VP8;
-        case AVB_CODEC_VP9:  return AV_CODEC_ID_VP9;
-        case AVB_CODEC_AV1:  return AV_CODEC_ID_AV1;
-        case AVB_CODEC_HAP:  return AV_CODEC_ID_HAP;
+        case AVB_VIDEO_CODEC_H264: return AV_CODEC_ID_H264;
+        case AVB_VIDEO_CODEC_HEVC: return AV_CODEC_ID_HEVC;
+        case AVB_VIDEO_CODEC_VP8:  return AV_CODEC_ID_VP8;
+        case AVB_VIDEO_CODEC_VP9:  return AV_CODEC_ID_VP9;
+        case AVB_VIDEO_CODEC_AV1:  return AV_CODEC_ID_AV1;
+        case AVB_VIDEO_CODEC_HAP:  return AV_CODEC_ID_HAP;
         default:             return AV_CODEC_ID_NONE;
     }
+}
+
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+static bool avb_ff_sample_fmt_supported(const AVCodec *codec, AVSampleFormat fmt) {
+    if (!codec || !codec->sample_fmts) return true;
+    for (const AVSampleFormat *p = codec->sample_fmts; *p != AV_SAMPLE_FMT_NONE; ++p) {
+        if (*p == fmt) return true;
+    }
+    return false;
+}
+
+static AVSampleFormat avb_ff_pick_sample_fmt(const AVCodec *codec,
+                                             const AVSampleFormat *preferred) {
+    for (const AVSampleFormat *p = preferred; *p != AV_SAMPLE_FMT_NONE; ++p) {
+        if (avb_ff_sample_fmt_supported(codec, *p)) return *p;
+    }
+    return codec && codec->sample_fmts && codec->sample_fmts[0] != AV_SAMPLE_FMT_NONE
+        ? codec->sample_fmts[0]
+        : preferred[0];
+}
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+
+static const AVCodec *avb_ff_find_audio_encoder(const AvbFFmpegFuncs &ff,
+                                                avb_audio_codec codec,
+                                                const char **out_name,
+                                                const AVSampleFormat **out_preferred,
+                                                bool *out_lossless_or_pcm) {
+    static const AVSampleFormat prefer_aac[]    = { AV_SAMPLE_FMT_FLTP, AV_SAMPLE_FMT_FLT, AV_SAMPLE_FMT_S16P, AV_SAMPLE_FMT_S16, AV_SAMPLE_FMT_NONE };
+    static const AVSampleFormat prefer_opus[]   = { AV_SAMPLE_FMT_FLT, AV_SAMPLE_FMT_FLTP, AV_SAMPLE_FMT_S16, AV_SAMPLE_FMT_S16P, AV_SAMPLE_FMT_NONE };
+    static const AVSampleFormat prefer_mp3[]    = { AV_SAMPLE_FMT_FLTP, AV_SAMPLE_FMT_S16P, AV_SAMPLE_FMT_FLT, AV_SAMPLE_FMT_S16, AV_SAMPLE_FMT_NONE };
+    static const AVSampleFormat prefer_flac[]   = { AV_SAMPLE_FMT_S16, AV_SAMPLE_FMT_S16P, AV_SAMPLE_FMT_S32, AV_SAMPLE_FMT_NONE };
+    static const AVSampleFormat prefer_vorbis[] = { AV_SAMPLE_FMT_FLTP, AV_SAMPLE_FMT_FLT, AV_SAMPLE_FMT_NONE };
+    static const AVSampleFormat prefer_s16[]    = { AV_SAMPLE_FMT_S16, AV_SAMPLE_FMT_NONE };
+    static const AVSampleFormat prefer_f32[]    = { AV_SAMPLE_FMT_FLT, AV_SAMPLE_FMT_NONE };
+
+    const char *preferred_name = nullptr;
+    AVCodecID id = AV_CODEC_ID_NONE;
+    const char *name = nullptr;
+    const AVSampleFormat *preferred = prefer_aac;
+    bool lossless_or_pcm = false;
+
+    switch (codec) {
+        case AVB_AUDIO_CODEC_AUTO:
+        case AVB_AUDIO_CODEC_AAC:
+            id = AV_CODEC_ID_AAC; name = "AAC"; preferred = prefer_aac; break;
+        case AVB_AUDIO_CODEC_OPUS:
+            id = AV_CODEC_ID_OPUS; name = "Opus"; preferred_name = "libopus"; preferred = prefer_opus; break;
+        case AVB_AUDIO_CODEC_MP3:
+            id = AV_CODEC_ID_MP3; name = "MP3"; preferred_name = "libmp3lame"; preferred = prefer_mp3; break;
+        case AVB_AUDIO_CODEC_FLAC:
+            id = AV_CODEC_ID_FLAC; name = "FLAC"; preferred = prefer_flac; lossless_or_pcm = true; break;
+        case AVB_AUDIO_CODEC_VORBIS:
+            id = AV_CODEC_ID_VORBIS; name = "Vorbis"; preferred_name = "libvorbis"; preferred = prefer_vorbis; break;
+        case AVB_AUDIO_CODEC_PCM_S16:
+            id = AV_CODEC_ID_PCM_S16LE; name = "PCM S16LE"; preferred = prefer_s16; lossless_or_pcm = true; break;
+        case AVB_AUDIO_CODEC_PCM_F32:
+            id = AV_CODEC_ID_PCM_F32LE; name = "PCM F32LE"; preferred = prefer_f32; lossless_or_pcm = true; break;
+        default:
+            return nullptr;
+    }
+
+    const AVCodec *codec_ptr = preferred_name ? ff.avcodec_find_encoder_by_name(preferred_name) : nullptr;
+    if (!codec_ptr) codec_ptr = ff.avcodec_find_encoder(id);
+    if (out_name) *out_name = name;
+    if (out_preferred) *out_preferred = preferred;
+    if (out_lossless_or_pcm) *out_lossless_or_pcm = lossless_or_pcm;
+    return codec_ptr;
 }
 
 static AVHWDeviceType avb_ff_encode_hw_type(avb_hardware_device device) {
@@ -32,7 +104,7 @@ static AVHWDeviceType avb_ff_encode_hw_type(avb_hardware_device device) {
     }
 }
 
-static const char *const *avb_ff_hw_encoder_names(avb_codec codec,
+static const char *const *avb_ff_hw_encoder_names(avb_video_codec codec,
                                                   avb_hardware_device device) {
     static const char *h264_vaapi[] = {"h264_vaapi", nullptr};
     static const char *hevc_vaapi[] = {"hevc_vaapi", nullptr};
@@ -53,43 +125,43 @@ static const char *const *avb_ff_hw_encoder_names(avb_codec codec,
     static const char *hevc_vt[] = {"hevc_videotoolbox", nullptr};
     static const char *none[] = {nullptr};
 
-    avb_codec c = codec == AVB_CODEC_AUTO ? AVB_CODEC_H264 : codec;
+    avb_video_codec c = codec == AVB_VIDEO_CODEC_AUTO ? AVB_VIDEO_CODEC_H264 : codec;
     switch (device) {
         case AVB_HW_DEVICE_VAAPI:
-            return c == AVB_CODEC_HEVC ? hevc_vaapi :
-                   c == AVB_CODEC_H264 ? h264_vaapi :
-                   c == AVB_CODEC_VP8  ? vp8_vaapi  :
-                   c == AVB_CODEC_VP9  ? vp9_vaapi  :
-                   c == AVB_CODEC_AV1  ? av1_vaapi  : none;
+            return c == AVB_VIDEO_CODEC_HEVC ? hevc_vaapi :
+                   c == AVB_VIDEO_CODEC_H264 ? h264_vaapi :
+                   c == AVB_VIDEO_CODEC_VP8  ? vp8_vaapi  :
+                   c == AVB_VIDEO_CODEC_VP9  ? vp9_vaapi  :
+                   c == AVB_VIDEO_CODEC_AV1  ? av1_vaapi  : none;
         case AVB_HW_DEVICE_CUDA:
-            return c == AVB_CODEC_HEVC ? hevc_cuda :
-                   c == AVB_CODEC_H264 ? h264_cuda :
-                   c == AVB_CODEC_AV1  ? av1_cuda  : none;
+            return c == AVB_VIDEO_CODEC_HEVC ? hevc_cuda :
+                   c == AVB_VIDEO_CODEC_H264 ? h264_cuda :
+                   c == AVB_VIDEO_CODEC_AV1  ? av1_cuda  : none;
         case AVB_HW_DEVICE_QSV:
-            return c == AVB_CODEC_HEVC ? hevc_qsv :
-                   c == AVB_CODEC_H264 ? h264_qsv :
-                   c == AVB_CODEC_VP9  ? vp9_qsv  :
-                   c == AVB_CODEC_AV1  ? av1_qsv  : none;
+            return c == AVB_VIDEO_CODEC_HEVC ? hevc_qsv :
+                   c == AVB_VIDEO_CODEC_H264 ? h264_qsv :
+                   c == AVB_VIDEO_CODEC_VP9  ? vp9_qsv  :
+                   c == AVB_VIDEO_CODEC_AV1  ? av1_qsv  : none;
         case AVB_HW_DEVICE_D3D11VA:
         case AVB_HW_DEVICE_AMF:
-            return c == AVB_CODEC_HEVC ? hevc_d3d11 :
-                   c == AVB_CODEC_H264 ? h264_d3d11 :
-                   c == AVB_CODEC_AV1  ? av1_d3d11  : none;
+            return c == AVB_VIDEO_CODEC_HEVC ? hevc_d3d11 :
+                   c == AVB_VIDEO_CODEC_H264 ? h264_d3d11 :
+                   c == AVB_VIDEO_CODEC_AV1  ? av1_d3d11  : none;
         case AVB_HW_DEVICE_VIDEOTOOLBOX:
-            return c == AVB_CODEC_HEVC ? hevc_vt : c == AVB_CODEC_H264 ? h264_vt : none;
+            return c == AVB_VIDEO_CODEC_HEVC ? hevc_vt : c == AVB_VIDEO_CODEC_H264 ? h264_vt : none;
         default:
 #if defined(__linux__)
-            return c == AVB_CODEC_HEVC ? hevc_vaapi :
-                   c == AVB_CODEC_H264 ? h264_vaapi :
-                   c == AVB_CODEC_VP8  ? vp8_vaapi  :
-                   c == AVB_CODEC_VP9  ? vp9_vaapi  :
-                   c == AVB_CODEC_AV1  ? av1_vaapi  : none;
+            return c == AVB_VIDEO_CODEC_HEVC ? hevc_vaapi :
+                   c == AVB_VIDEO_CODEC_H264 ? h264_vaapi :
+                   c == AVB_VIDEO_CODEC_VP8  ? vp8_vaapi  :
+                   c == AVB_VIDEO_CODEC_VP9  ? vp9_vaapi  :
+                   c == AVB_VIDEO_CODEC_AV1  ? av1_vaapi  : none;
 #elif defined(_WIN32)
-            return c == AVB_CODEC_HEVC ? hevc_d3d11 :
-                   c == AVB_CODEC_H264 ? h264_d3d11 :
-                   c == AVB_CODEC_AV1  ? av1_d3d11  : none;
+            return c == AVB_VIDEO_CODEC_HEVC ? hevc_d3d11 :
+                   c == AVB_VIDEO_CODEC_H264 ? h264_d3d11 :
+                   c == AVB_VIDEO_CODEC_AV1  ? av1_d3d11  : none;
 #elif defined(__APPLE__)
-            return c == AVB_CODEC_HEVC ? hevc_vt : c == AVB_CODEC_H264 ? h264_vt : none;
+            return c == AVB_VIDEO_CODEC_HEVC ? hevc_vt : c == AVB_VIDEO_CODEC_H264 ? h264_vt : none;
 #else
             return none;
 #endif
@@ -345,12 +417,12 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
         AVCodecID vid;
         const char *vname;
         switch (options.video.codec) {
-            case AVB_CODEC_AUTO:
-            case AVB_CODEC_H264: vid = AV_CODEC_ID_H264; vname = "H.264"; break;
-            case AVB_CODEC_HEVC: vid = AV_CODEC_ID_HEVC; vname = "HEVC";  break;
-            case AVB_CODEC_VP8:  vid = AV_CODEC_ID_VP8;  vname = "VP8";   break;
-            case AVB_CODEC_VP9:  vid = AV_CODEC_ID_VP9;  vname = "VP9";   break;
-            case AVB_CODEC_AV1:  vid = AV_CODEC_ID_AV1;  vname = "AV1";   break;
+            case AVB_VIDEO_CODEC_AUTO:
+            case AVB_VIDEO_CODEC_H264: vid = AV_CODEC_ID_H264; vname = "H.264"; break;
+            case AVB_VIDEO_CODEC_HEVC: vid = AV_CODEC_ID_HEVC; vname = "HEVC";  break;
+            case AVB_VIDEO_CODEC_VP8:  vid = AV_CODEC_ID_VP8;  vname = "VP8";   break;
+            case AVB_VIDEO_CODEC_VP9:  vid = AV_CODEC_ID_VP9;  vname = "VP9";   break;
+            case AVB_VIDEO_CODEC_AV1:  vid = AV_CODEC_ID_AV1;  vname = "AV1";   break;
             default:
                 set_error("Invalid video codec (use AUTO/H264/HEVC/VP8/VP9/AV1).");
                 return AVB_ERROR_INVALID_ARGUMENT;
@@ -429,29 +501,28 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
         m_sample_rate = options.audio.sample_rate;
         m_channels    = options.audio.channels;
 
-        AVCodecID aid;
-        AVSampleFormat asfmt;
-        const char *aname;
-        switch (options.audio.codec) {
-            case AVB_CODEC_AUTO:
-            case AVB_CODEC_AAC:
-                aid = AV_CODEC_ID_AAC; asfmt = AV_SAMPLE_FMT_FLTP; aname = "AAC"; break;
-            case AVB_CODEC_OPUS:
-                aid = AV_CODEC_ID_OPUS; asfmt = AV_SAMPLE_FMT_FLT; aname = "Opus";
-                // libopus only accepts a fixed set of input rates.
-                switch (m_sample_rate) {
-                    case 8000: case 12000: case 16000: case 24000: case 48000: break;
-                    default:
-                        set_error("Opus requires sample_rate of 8000/12000/16000/24000/48000.");
-                        return AVB_ERROR_INVALID_ARGUMENT;
-                }
-                break;
-            default:
-                set_error("Invalid audio codec (use AUTO/AAC/OPUS).");
-                return AVB_ERROR_INVALID_ARGUMENT;
+        if (options.audio.codec == AVB_AUDIO_CODEC_OPUS) {
+            // libopus and FFmpeg's native Opus encoder accept a fixed set of input rates.
+            switch (m_sample_rate) {
+                case 8000: case 12000: case 16000: case 24000: case 48000: break;
+                default:
+                    set_error("Opus requires sample_rate of 8000/12000/16000/24000/48000.");
+                    return AVB_ERROR_INVALID_ARGUMENT;
+            }
         }
-        const AVCodec *acodec = m_ff.avcodec_find_encoder(aid);
+
+        const char *aname = nullptr;
+        const AVSampleFormat *preferred_sample_fmts = nullptr;
+        bool lossless_or_pcm = false;
+        const AVCodec *acodec = avb_ff_find_audio_encoder(m_ff, options.audio.codec,
+                                                          &aname, &preferred_sample_fmts,
+                                                          &lossless_or_pcm);
+        if (!aname) {
+            set_error("Invalid audio codec (use AUTO/AAC/OPUS/MP3/FLAC/VORBIS/PCM_S16/PCM_F32).");
+            return AVB_ERROR_INVALID_ARGUMENT;
+        }
         if (!acodec) { set_error("No %s encoder available in this FFmpeg build.", aname); return AVB_ERROR_OPEN_FAILED; }
+        AVSampleFormat asfmt = avb_ff_pick_sample_fmt(acodec, preferred_sample_fmts);
 
         m_astream = m_ff.avformat_new_stream(m_fmt_ctx, nullptr);
         if (!m_astream) { set_error("avformat_new_stream (audio) failed."); return AVB_ERROR_OPEN_FAILED; }
@@ -462,7 +533,8 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
         m_ff.av_channel_layout_default(&m_aenc->ch_layout, m_channels);
         m_aenc->sample_fmt  = asfmt;
         m_asfmt             = asfmt;
-        m_aenc->bit_rate    = options.audio.bitrate > 0 ? options.audio.bitrate : 128000;
+        if (!lossless_or_pcm || options.audio.bitrate > 0)
+            m_aenc->bit_rate = options.audio.bitrate > 0 ? options.audio.bitrate : 128000;
         m_aenc->time_base   = AVRational{1, m_sample_rate};
         if (global_header) m_aenc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 

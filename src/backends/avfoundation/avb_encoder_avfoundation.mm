@@ -114,14 +114,14 @@ static bool avb_is_compressed_format(avb_pixel_format fmt) {
            fmt == AVB_PIXEL_FORMAT_BC7_RGBA;
 }
 
-static FourCharCode avb_codec_fourcc(avb_codec codec) {
+static FourCharCode avb_video_codec_fourcc(avb_video_codec codec) {
     switch (codec) {
-        case AVB_CODEC_H264: return kCMVideoCodecType_H264;
-        case AVB_CODEC_HEVC: return kCMVideoCodecType_HEVC;
-        case AVB_CODEC_VP8:  return 'vp08';
-        case AVB_CODEC_VP9:  return 'vp09';
-        case AVB_CODEC_AV1:  return 'av01';
-        case AVB_CODEC_HAP:  return 'Hap1';
+        case AVB_VIDEO_CODEC_H264: return kCMVideoCodecType_H264;
+        case AVB_VIDEO_CODEC_HEVC: return kCMVideoCodecType_HEVC;
+        case AVB_VIDEO_CODEC_VP8:  return 'vp08';
+        case AVB_VIDEO_CODEC_VP9:  return 'vp09';
+        case AVB_VIDEO_CODEC_AV1:  return 'av01';
+        case AVB_VIDEO_CODEC_HAP:  return 'Hap1';
         default:             return 0;
     }
 }
@@ -201,8 +201,8 @@ avb_result AvbEncoderAVFoundation::open(const char *path, const avb_encode_optio
                 }
 
                 FourCharCode codec_type = avb_normalize_fourcc(stream.codec_tag);
-                if (codec_type == 0) codec_type = avb_codec_fourcc(stream.codec);
-                if (codec_type == 0) codec_type = avb_codec_fourcc(options.video.codec);
+                if (codec_type == 0) codec_type = avb_video_codec_fourcc(stream.codec);
+                if (codec_type == 0) codec_type = avb_video_codec_fourcc(options.video.codec);
                 if (codec_type == 0) {
                     m_last_error = "Custom AVFoundation video encoder requires codec_tag.";
                     if (plugin->close) plugin->close(ctx);
@@ -238,7 +238,7 @@ avb_result AvbEncoderAVFoundation::open(const char *path, const avb_encode_optio
                     m_last_error = "Unsupported video input_format (use BGRA8, NV12 or I420).";
                     return AVB_ERROR_INVALID_ARGUMENT;
                 }
-                if (options.video.codec == AVB_CODEC_HAP) {
+                if (options.video.codec == AVB_VIDEO_CODEC_HAP) {
                     m_last_error = "HAP encoding requires a registered custom video encoder.";
                     return AVB_ERROR_INVALID_ARGUMENT;
                 }
@@ -251,16 +251,16 @@ avb_result AvbEncoderAVFoundation::open(const char *path, const avb_encode_optio
                 // VP8/VP9/AV1 through the built-in writer settings.
                 AVVideoCodecType vcodec;
                 switch (options.video.codec) {
-                    case AVB_CODEC_AUTO:
-                    case AVB_CODEC_H264: vcodec = AVVideoCodecTypeH264; break;
-                    case AVB_CODEC_HEVC: vcodec = AVVideoCodecTypeHEVC; break;
-                    case AVB_CODEC_VP8:
+                    case AVB_VIDEO_CODEC_AUTO:
+                    case AVB_VIDEO_CODEC_H264: vcodec = AVVideoCodecTypeH264; break;
+                    case AVB_VIDEO_CODEC_HEVC: vcodec = AVVideoCodecTypeHEVC; break;
+                    case AVB_VIDEO_CODEC_VP8:
                         m_last_error = "AVFoundation cannot encode VP8 (use H264, HEVC, FFmpeg, or GStreamer).";
                         return AVB_ERROR_INVALID_ARGUMENT;
-                    case AVB_CODEC_VP9:
+                    case AVB_VIDEO_CODEC_VP9:
                         m_last_error = "AVFoundation cannot encode VP9 (use H264, HEVC, FFmpeg, or GStreamer).";
                         return AVB_ERROR_INVALID_ARGUMENT;
-                    case AVB_CODEC_AV1:
+                    case AVB_VIDEO_CODEC_AV1:
                         m_last_error = "AVFoundation cannot encode AV1 (use H264, HEVC, FFmpeg, or GStreamer).";
                         return AVB_ERROR_INVALID_ARGUMENT;
                     default:
@@ -310,15 +310,21 @@ avb_result AvbEncoderAVFoundation::open(const char *path, const avb_encode_optio
             m_impl->sample_rate = options.audio.sample_rate;
             m_impl->channels    = options.audio.channels;
 
-            // AVAssetWriter into .mp4/.mov/.m4a produces AAC; it cannot mux Opus.
+            // AVAssetWriter into .mp4/.mov/.m4a produces AAC; the expanded
+            // audio codec set is provided by FFmpeg/GStreamer for now.
             switch (options.audio.codec) {
-                case AVB_CODEC_AUTO:
-                case AVB_CODEC_AAC: break;
-                case AVB_CODEC_OPUS:
-                    m_last_error = "AVFoundation cannot encode Opus (use AAC).";
+                case AVB_AUDIO_CODEC_AUTO:
+                case AVB_AUDIO_CODEC_AAC: break;
+                case AVB_AUDIO_CODEC_OPUS:
+                case AVB_AUDIO_CODEC_MP3:
+                case AVB_AUDIO_CODEC_FLAC:
+                case AVB_AUDIO_CODEC_VORBIS:
+                case AVB_AUDIO_CODEC_PCM_S16:
+                case AVB_AUDIO_CODEC_PCM_F32:
+                    m_last_error = "Requested audio codec is not supported by AVFoundation yet (use AAC, FFmpeg, or GStreamer).";
                     return AVB_ERROR_INVALID_ARGUMENT;
                 default:
-                    m_last_error = "Invalid audio codec (use AUTO/AAC).";
+                    m_last_error = "Invalid audio codec.";
                     return AVB_ERROR_INVALID_ARGUMENT;
             }
 

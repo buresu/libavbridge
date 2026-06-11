@@ -142,25 +142,25 @@ static GUID mf_video_subtype_from_fourcc(uint32_t fcc) {
     return g;
 }
 
-static GUID mf_video_subtype_from_codec(avb_codec codec, uint32_t codec_tag) {
+static GUID mf_video_subtype_from_codec(avb_video_codec codec, uint32_t codec_tag) {
     switch (codec) {
-        case AVB_CODEC_H264: return MFVideoFormat_H264;
-        case AVB_CODEC_HEVC: return MFVideoFormat_HEVC;
-        case AVB_CODEC_VP9:  return MFVideoFormat_VP90;
+        case AVB_VIDEO_CODEC_H264: return MFVideoFormat_H264;
+        case AVB_VIDEO_CODEC_HEVC: return MFVideoFormat_HEVC;
+        case AVB_VIDEO_CODEC_VP9:  return MFVideoFormat_VP90;
         default:
             if (codec_tag == 0) return GUID_NULL;
             return mf_video_subtype_from_fourcc(codec_tag);
     }
 }
 
-static const char *mf_codec_name(avb_codec codec) {
+static const char *mf_codec_name(avb_video_codec codec) {
     switch (codec) {
-        case AVB_CODEC_H264: return "H264";
-        case AVB_CODEC_HEVC: return "HEVC";
-        case AVB_CODEC_VP8:  return "VP8";
-        case AVB_CODEC_VP9:  return "VP9";
-        case AVB_CODEC_AV1:  return "AV1";
-        case AVB_CODEC_HAP:  return "HAP";
+        case AVB_VIDEO_CODEC_H264: return "H264";
+        case AVB_VIDEO_CODEC_HEVC: return "HEVC";
+        case AVB_VIDEO_CODEC_VP8:  return "VP8";
+        case AVB_VIDEO_CODEC_VP9:  return "VP9";
+        case AVB_VIDEO_CODEC_AV1:  return "AV1";
+        case AVB_VIDEO_CODEC_HAP:  return "HAP";
         default:             return "custom";
     }
 }
@@ -253,7 +253,7 @@ avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_op
             }
 
             GUID out_subtype = mf_video_subtype_from_codec(
-                stream.codec != AVB_CODEC_AUTO ? stream.codec : options.video.codec,
+                stream.codec != AVB_VIDEO_CODEC_AUTO ? stream.codec : options.video.codec,
                 stream.codec_tag);
             if (IsEqualGUID(out_subtype, GUID_NULL)) {
                 if (plugin->close && ctx) plugin->close(ctx);
@@ -312,20 +312,20 @@ avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_op
         UINT32   profile = 0;       // MF_MT_MPEG2_PROFILE value, 0 = leave unset
         const char *vname;
         switch (options.video.codec) {
-            case AVB_CODEC_AUTO:
-            case AVB_CODEC_H264:
+            case AVB_VIDEO_CODEC_AUTO:
+            case AVB_VIDEO_CODEC_H264:
                 out_subtype = MFVideoFormat_H264; profile = eAVEncH264VProfile_Main; vname = "H264"; break;
-            case AVB_CODEC_HEVC:
+            case AVB_VIDEO_CODEC_HEVC:
                 out_subtype = MFVideoFormat_HEVC; profile = eAVEncH265VProfile_Main_420_8; vname = "HEVC"; break;
-            case AVB_CODEC_VP8:
+            case AVB_VIDEO_CODEC_VP8:
                 m_last_error = "VP8 encoding is not supported by the Media Foundation "
                                "backend (use the FFmpeg or GStreamer backend).";
                 return AVB_ERROR_INVALID_ARGUMENT;
-            case AVB_CODEC_VP9:
+            case AVB_VIDEO_CODEC_VP9:
                 m_last_error = "VP9 encoding is not supported by the Media Foundation "
                                "backend (use the FFmpeg or GStreamer backend).";
                 return AVB_ERROR_INVALID_ARGUMENT;
-            case AVB_CODEC_AV1:
+            case AVB_VIDEO_CODEC_AV1:
                 m_last_error = "AV1 encoding is not supported by the Media Foundation "
                                "backend (use the FFmpeg or GStreamer backend).";
                 return AVB_ERROR_INVALID_ARGUMENT;
@@ -415,17 +415,23 @@ avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_op
         m_impl->sample_rate = options.audio.sample_rate;
         m_impl->channels    = options.audio.channels;
 
-        // Media Foundation ships an AAC encoder but no Opus encoder.
+        // Media Foundation ships a broadly available AAC encoder; the expanded
+        // audio codec set is provided by FFmpeg/GStreamer for now.
         switch (options.audio.codec) {
-            case AVB_CODEC_AUTO:
-            case AVB_CODEC_AAC:
+            case AVB_AUDIO_CODEC_AUTO:
+            case AVB_AUDIO_CODEC_AAC:
                 break;
-            case AVB_CODEC_OPUS:
-                m_last_error = "Opus encoding is not supported by the Media Foundation "
-                               "backend (use the FFmpeg or GStreamer backend).";
+            case AVB_AUDIO_CODEC_OPUS:
+            case AVB_AUDIO_CODEC_MP3:
+            case AVB_AUDIO_CODEC_FLAC:
+            case AVB_AUDIO_CODEC_VORBIS:
+            case AVB_AUDIO_CODEC_PCM_S16:
+            case AVB_AUDIO_CODEC_PCM_F32:
+                m_last_error = "Requested audio codec is not supported by the Media Foundation "
+                               "backend yet (use the FFmpeg or GStreamer backend).";
                 return AVB_ERROR_INVALID_ARGUMENT;
             default:
-                m_last_error = "Invalid audio codec (use AUTO/AAC).";
+                m_last_error = "Invalid audio codec.";
                 return AVB_ERROR_INVALID_ARGUMENT;
         }
 

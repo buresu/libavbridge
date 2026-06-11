@@ -64,23 +64,33 @@ typedef enum avb_backend {
     AVB_BACKEND_COUNT,
 } avb_backend;
 
-/* Codecs usable for encoding. AUTO selects the backend default (H.264 video,
- * AAC audio). Video codecs: H264, HEVC, VP8, VP9, AV1, HAP. Audio codecs:
- * AAC, OPUS. Passing a codec of the wrong media kind (e.g. AAC for video) is
- * an invalid argument, as is a codec a particular backend/container cannot
- * produce. */
-typedef enum avb_codec {
-    AVB_CODEC_AUTO = 0,
-    AVB_CODEC_H264,
-    AVB_CODEC_HEVC,
-    AVB_CODEC_VP8,
-    AVB_CODEC_VP9,
-    AVB_CODEC_AV1,
-    AVB_CODEC_HAP,
-    AVB_CODEC_AAC,
-    AVB_CODEC_OPUS,
-    AVB_CODEC_COUNT,
-} avb_codec;
+/* Video codecs usable for encoding. AUTO selects the backend default (H.264).
+ * Passing a codec that a backend/container cannot produce is an invalid
+ * argument or open failure, depending on when the backend can detect it. */
+typedef enum avb_video_codec {
+    AVB_VIDEO_CODEC_AUTO = 0,
+    AVB_VIDEO_CODEC_H264,
+    AVB_VIDEO_CODEC_HEVC,
+    AVB_VIDEO_CODEC_VP8,
+    AVB_VIDEO_CODEC_VP9,
+    AVB_VIDEO_CODEC_AV1,
+    AVB_VIDEO_CODEC_HAP,
+    AVB_VIDEO_CODEC_COUNT,
+} avb_video_codec;
+
+/* Audio codecs usable for encoding. AUTO selects the backend/container default
+ * (AAC for MP4/MOV-style outputs). */
+typedef enum avb_audio_codec {
+    AVB_AUDIO_CODEC_AUTO = 0,
+    AVB_AUDIO_CODEC_AAC,
+    AVB_AUDIO_CODEC_OPUS,
+    AVB_AUDIO_CODEC_MP3,
+    AVB_AUDIO_CODEC_FLAC,
+    AVB_AUDIO_CODEC_VORBIS,
+    AVB_AUDIO_CODEC_PCM_S16,
+    AVB_AUDIO_CODEC_PCM_F32,
+    AVB_AUDIO_CODEC_COUNT,
+} avb_audio_codec;
 
 typedef enum avb_pixel_format {
     AVB_PIXEL_FORMAT_UNKNOWN = 0,
@@ -274,7 +284,7 @@ typedef struct avb_video_encode_params {
     int width;
     int height;
     double frame_rate;             /* used to derive PTS when none is given */
-    avb_codec codec;               /* AUTO -> H.264; or H264/HEVC/VP8/VP9/AV1 */
+    avb_video_codec codec;         /* AUTO -> H.264; or H264/HEVC/VP8/VP9/AV1/HAP */
     int bitrate;                   /* bits/sec, 0 = backend default */
     avb_pixel_format input_format; /* format of frames passed to write_video */
     /* Expected memory for frames passed to avb_encoder_write_video.
@@ -292,7 +302,7 @@ typedef struct avb_audio_encode_params {
     int enable;
     int sample_rate;
     int channels;
-    avb_codec codec;             /* AUTO -> AAC; or AAC/OPUS */
+    avb_audio_codec codec;       /* AUTO -> AAC; or AAC/OPUS/MP3/FLAC/VORBIS/PCM */
     int bitrate;                 /* bits/sec, 0 = backend default */
 } avb_audio_encode_params;
 
@@ -356,12 +366,12 @@ typedef struct avb_video_encode_info {
     double frame_rate;
     avb_pixel_format input_format;
     avb_video_memory_type input_memory;
-    avb_codec codec;
+    avb_video_codec codec;
     int bitrate;
 } avb_video_encode_info;
 
 typedef struct avb_encoded_video_stream {
-    avb_codec codec;
+    avb_video_codec codec;
     uint32_t codec_tag; /* Container fourcc when available, e.g. 'Hap1'. */
     const char *codec_name;
     const char *gst_caps; /* Optional encoded caps for GStreamer appsrc. */

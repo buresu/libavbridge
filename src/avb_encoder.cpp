@@ -66,11 +66,11 @@ extern "C" {
 avb_encode_options avb_encode_options_default(void) {
     avb_encode_options o{};
     o.backend     = AVB_BACKEND_AUTO;
-    o.video.codec = AVB_CODEC_AUTO;
+    o.video.codec = AVB_VIDEO_CODEC_AUTO;
     o.video.input_memory = AVB_VIDEO_MEMORY_CPU;
     o.video.hardware_policy = AVB_HARDWARE_DISABLED;
     o.video.hardware_device = AVB_HW_DEVICE_AUTO;
-    o.audio.codec = AVB_CODEC_AUTO;
+    o.audio.codec = AVB_AUDIO_CODEC_AUTO;
     return o;
 }
 

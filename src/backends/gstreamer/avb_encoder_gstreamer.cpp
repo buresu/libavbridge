@@ -28,14 +28,14 @@ static bool avb_is_compressed_format(avb_pixel_format fmt) {
            fmt == AVB_PIXEL_FORMAT_BC7_RGBA;
 }
 
-static const char *gst_hw_video_encoder(avb_codec codec, avb_hardware_device device) {
-    avb_codec c = codec == AVB_CODEC_AUTO ? AVB_CODEC_H264 : codec;
+static const char *gst_hw_video_encoder(avb_video_codec codec, avb_hardware_device device) {
+    avb_video_codec c = codec == AVB_VIDEO_CODEC_AUTO ? AVB_VIDEO_CODEC_H264 : codec;
     if (device != AVB_HW_DEVICE_AUTO && device != AVB_HW_DEVICE_VAAPI)
         return nullptr;
     switch (c) {
-        case AVB_CODEC_H264: return "vah264enc";
-        case AVB_CODEC_HEVC: return "vah265enc";
-        case AVB_CODEC_VP9:  return "vavp9lpenc";
+        case AVB_VIDEO_CODEC_H264: return "vah264enc";
+        case AVB_VIDEO_CODEC_HEVC: return "vah265enc";
+        case AVB_VIDEO_CODEC_VP9:  return "vavp9lpenc";
         default: return nullptr;
     }
 }
@@ -269,10 +269,32 @@ avb_result AvbEncoderGStreamer::open(const char *path, const avb_encode_options 
                std::equal(p.end() - n, p.end(), s,
                           [](char a, char b){ return ::tolower(a) == b; });
     };
-    const char *mux = ends_with(".webm") ? "webmmux"
-                    : ends_with(".mkv")  ? "matroskamux"
-                    : ends_with(".mov")  ? "qtmux"
-                                         : "mp4mux";
+    bool audio_mux_is_encoder = false;
+    const char *mux = nullptr;
+    if (ends_with(".webm")) {
+        mux = "webmmux";
+    } else if (ends_with(".mkv")) {
+        mux = "matroskamux";
+    } else if (ends_with(".ogg")) {
+        mux = "oggmux";
+    } else if (ends_with(".wav")) {
+        mux = "wavenc";
+        audio_mux_is_encoder = true;
+    } else if (ends_with(".flac")) {
+        mux = "flacenc";
+        audio_mux_is_encoder = true;
+    } else if (ends_with(".mp3")) {
+        mux = "lamemp3enc";
+        audio_mux_is_encoder = true;
+    } else if (ends_with(".mov")) {
+        mux = "qtmux";
+    } else {
+        mux = "mp4mux";
+    }
+    if (audio_mux_is_encoder && options.video.enable) {
+        m_last_error = "The selected audio-only output container cannot mux video.";
+        return AVB_ERROR_INVALID_ARGUMENT;
+    }
 
     // Video codec -> encoder element (with its bitrate property/units).
     char venc[128] = "x264enc speed-preset=veryfast";
@@ -298,33 +320,33 @@ avb_result AvbEncoderGStreamer::open(const char *path, const avb_encode_options 
         m_input_memory = options.video.input_memory;
         int kbps = options.video.bitrate / 1000;
         switch (options.video.codec) {
-            case AVB_CODEC_AUTO:
-            case AVB_CODEC_H264:
+            case AVB_VIDEO_CODEC_AUTO:
+            case AVB_VIDEO_CODEC_H264:
                 if (kbps > 0) snprintf(venc, sizeof(venc), "x264enc speed-preset=veryfast bitrate=%d", kbps);
                 else          snprintf(venc, sizeof(venc), "x264enc speed-preset=veryfast");
                 snprintf(vparse, sizeof(vparse), "h264parse config-interval=-1 !");
                 break;
-            case AVB_CODEC_HEVC:
+            case AVB_VIDEO_CODEC_HEVC:
                 if (kbps > 0) snprintf(venc, sizeof(venc), "x265enc speed-preset=veryfast bitrate=%d", kbps);
                 else          snprintf(venc, sizeof(venc), "x265enc speed-preset=veryfast");
                 snprintf(vparse, sizeof(vparse), "h265parse config-interval=-1 !");
                 break;
-            case AVB_CODEC_VP8:
+            case AVB_VIDEO_CODEC_VP8:
                 if (options.video.bitrate > 0) snprintf(venc, sizeof(venc), "vp8enc deadline=1 target-bitrate=%d", options.video.bitrate);
                 else          snprintf(venc, sizeof(venc), "vp8enc deadline=1");
                 vparse[0] = '\0';
                 break;
-            case AVB_CODEC_VP9:
+            case AVB_VIDEO_CODEC_VP9:
                 if (options.video.bitrate > 0) snprintf(venc, sizeof(venc), "vp9enc deadline=1 target-bitrate=%d", options.video.bitrate);
                 else          snprintf(venc, sizeof(venc), "vp9enc deadline=1");
                 vparse[0] = '\0';
                 break;
-            case AVB_CODEC_AV1:
+            case AVB_VIDEO_CODEC_AV1:
                 if (kbps > 0) snprintf(venc, sizeof(venc), "av1enc cpu-used=8 target-bitrate=%d", kbps);
                 else          snprintf(venc, sizeof(venc), "av1enc cpu-used=8");
                 snprintf(vparse, sizeof(vparse), "av1parse !");
                 break;
-            case AVB_CODEC_HAP:
+            case AVB_VIDEO_CODEC_HAP:
                 vparse[0] = '\0';
                 break;
             default:
@@ -383,14 +405,14 @@ avb_result AvbEncoderGStreamer::open(const char *path, const avb_encode_options 
             m_custom_video = true;
             if (stream.gst_caps && stream.gst_caps[0]) {
                 custom_vcaps = stream.gst_caps;
-            } else if (stream.codec == AVB_CODEC_HAP || options.video.codec == AVB_CODEC_HAP) {
+            } else if (stream.codec == AVB_VIDEO_CODEC_HAP || options.video.codec == AVB_VIDEO_CODEC_HAP) {
                 custom_vcaps = "video/x-hap,width=%d,height=%d,framerate=%d/1";
             } else {
                 m_last_error = "Custom GStreamer video encoder requires gst_caps.";
                 return AVB_ERROR_INVALID_ARGUMENT;
             }
         }
-        if (!m_custom_video && options.video.codec == AVB_CODEC_HAP) {
+        if (!m_custom_video && options.video.codec == AVB_VIDEO_CODEC_HAP) {
             m_last_error = "HAP encoding requires a registered custom video encoder.";
             return AVB_ERROR_INVALID_ARGUMENT;
         }
@@ -402,19 +424,72 @@ avb_result AvbEncoderGStreamer::open(const char *path, const avb_encode_options 
 
     // Audio codec -> encoder element.
     char aenc[128] = "avenc_aac";
+    const char *audio_caps = "";
+    bool audio_encoded_by_mux = false;
     if (options.audio.enable) {
         switch (options.audio.codec) {
-            case AVB_CODEC_AUTO:
-            case AVB_CODEC_AAC:
+            case AVB_AUDIO_CODEC_AUTO:
+                audio_encoded_by_mux = audio_mux_is_encoder;
+                if (!audio_encoded_by_mux) {
+                    if (options.audio.bitrate > 0) snprintf(aenc, sizeof(aenc), "avenc_aac bitrate=%d", options.audio.bitrate);
+                    else          snprintf(aenc, sizeof(aenc), "avenc_aac");
+                } else if (ends_with(".wav")) {
+                    audio_caps = "! audio/x-raw,format=S16LE";
+                }
+                break;
+            case AVB_AUDIO_CODEC_AAC:
+                if (audio_mux_is_encoder) {
+                    m_last_error = "AAC requires a muxed container such as .mp4, .mov, or .mkv.";
+                    return AVB_ERROR_INVALID_ARGUMENT;
+                }
                 if (options.audio.bitrate > 0) snprintf(aenc, sizeof(aenc), "avenc_aac bitrate=%d", options.audio.bitrate);
                 else          snprintf(aenc, sizeof(aenc), "avenc_aac");
                 break;
-            case AVB_CODEC_OPUS:
+            case AVB_AUDIO_CODEC_OPUS:
+                if (audio_mux_is_encoder) {
+                    m_last_error = "Opus requires a muxed container such as .ogg, .webm, or .mkv.";
+                    return AVB_ERROR_INVALID_ARGUMENT;
+                }
                 if (options.audio.bitrate > 0) snprintf(aenc, sizeof(aenc), "opusenc bitrate=%d", options.audio.bitrate);
                 else          snprintf(aenc, sizeof(aenc), "opusenc");
                 break;
+            case AVB_AUDIO_CODEC_MP3:
+                audio_encoded_by_mux = ends_with(".mp3");
+                if (!audio_encoded_by_mux) {
+                    if (options.audio.bitrate > 0) snprintf(aenc, sizeof(aenc), "lamemp3enc target=bitrate bitrate=%d", options.audio.bitrate / 1000);
+                    else          snprintf(aenc, sizeof(aenc), "lamemp3enc");
+                }
+                break;
+            case AVB_AUDIO_CODEC_FLAC:
+                audio_encoded_by_mux = ends_with(".flac");
+                if (!audio_encoded_by_mux) snprintf(aenc, sizeof(aenc), "flacenc");
+                break;
+            case AVB_AUDIO_CODEC_VORBIS:
+                if (audio_mux_is_encoder) {
+                    m_last_error = "Vorbis requires a muxed container such as .ogg, .webm, or .mkv.";
+                    return AVB_ERROR_INVALID_ARGUMENT;
+                }
+                if (options.audio.bitrate > 0) snprintf(aenc, sizeof(aenc), "vorbisenc bitrate=%d", options.audio.bitrate);
+                else          snprintf(aenc, sizeof(aenc), "vorbisenc");
+                break;
+            case AVB_AUDIO_CODEC_PCM_S16:
+                if (!ends_with(".wav")) {
+                    m_last_error = "PCM_S16 encoding currently requires a .wav output with GStreamer.";
+                    return AVB_ERROR_INVALID_ARGUMENT;
+                }
+                audio_encoded_by_mux = true;
+                audio_caps = "! audio/x-raw,format=S16LE";
+                break;
+            case AVB_AUDIO_CODEC_PCM_F32:
+                if (!ends_with(".wav")) {
+                    m_last_error = "PCM_F32 encoding currently requires a .wav output with GStreamer.";
+                    return AVB_ERROR_INVALID_ARGUMENT;
+                }
+                audio_encoded_by_mux = true;
+                audio_caps = "! audio/x-raw,format=F32LE";
+                break;
             default:
-                m_last_error = "Invalid audio codec (use AUTO/AAC/OPUS).";
+                m_last_error = "Invalid audio codec (use AUTO/AAC/OPUS/MP3/FLAC/VORBIS/PCM_S16/PCM_F32).";
                 return AVB_ERROR_INVALID_ARGUMENT;
         }
         if (options.audio.sample_rate <= 0 || options.audio.channels <= 0) {
@@ -454,9 +529,15 @@ avb_result AvbEncoderGStreamer::open(const char *path, const avb_encode_options 
         }
     }
     if (options.audio.enable) {
-        n += snprintf(desc + n, sizeof(desc) - n,
-            "appsrc name=asrc is-live=false format=time max-bytes=0 ! audioconvert ! "
-            "audioresample ! %s ! queue ! mux. ", aenc);
+        if (audio_encoded_by_mux) {
+            n += snprintf(desc + n, sizeof(desc) - n,
+                "appsrc name=asrc is-live=false format=time max-bytes=0 ! audioconvert ! "
+                "audioresample %s ! queue ! mux. ", audio_caps);
+        } else {
+            n += snprintf(desc + n, sizeof(desc) - n,
+                "appsrc name=asrc is-live=false format=time max-bytes=0 ! audioconvert ! "
+                "audioresample %s ! %s ! queue ! mux. ", audio_caps, aenc);
+        }
     }
 
     GError *err = nullptr;

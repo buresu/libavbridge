@@ -4,7 +4,7 @@
 // Skips cleanly if the selected backend is not built in or its runtime libraries
 // are unavailable.
 //
-// Usage: avb_codecs <fixture.mp4> <out_prefix> [backend] [video-only]
+// Usage: avb_codecs <fixture.mp4> <out_prefix> [backend] [video-only|audio-only]
 
 #include <avbridge.h>
 
@@ -22,7 +22,7 @@ static void check(bool cond, const char *what) {
 }
 
 // Transcode the fixture's video track through `vc`, reading frames as `infmt`.
-static bool transcode_video(const char *in, const char *out, avb_backend backend, avb_codec vc,
+static bool transcode_video(const char *in, const char *out, avb_backend backend, avb_video_codec vc,
                             avb_pixel_format infmt) {
     avb_decode_options dop = avb_decode_options_default();
     dop.backend = backend;
@@ -52,7 +52,8 @@ static bool transcode_video(const char *in, const char *out, avb_backend backend
     return ok;
 }
 
-static bool transcode_audio(const char *in, const char *out, avb_backend backend, avb_codec ac, int rate) {
+static bool transcode_audio(const char *in, const char *out, avb_backend backend,
+                            avb_audio_codec ac, int rate) {
     avb_decode_options dop = avb_decode_options_default();
     dop.backend = backend;
     dop.enable_audio = 1; dop.enable_video = 0;
@@ -82,6 +83,20 @@ static bool transcode_audio(const char *in, const char *out, avb_backend backend
     return ok;
 }
 
+static std::string probe_codec(const char *path, avb_backend backend, bool video);
+
+static void check_audio_codec(const char *label, const char *in, const std::string &out,
+                              avb_backend backend, avb_audio_codec codec, int rate,
+                              const char *expected_codec) {
+    printf("%s audio round-trip:\n", label);
+    check(transcode_audio(in, out.c_str(), backend, codec, rate), "encode audio");
+    std::string actual = probe_codec(out.c_str(), backend, false);
+    if (actual != expected_codec) {
+        printf("    expected codec '%s', got '%s'\n", expected_codec, actual.c_str());
+    }
+    check(actual == expected_codec, "output codec matches");
+}
+
 // Re-open `path` with the selected backend and return the audio/video codec name.
 static std::string probe_codec(const char *path, avb_backend backend, bool video) {
     avb_decode_options o = avb_decode_options_default();
@@ -99,7 +114,7 @@ static std::string probe_codec(const char *path, avb_backend backend, bool video
 
 int main(int argc, char *argv[]) {
     if (argc < 3) {
-        fprintf(stderr, "Usage: %s <fixture.mp4> <out_prefix> [backend] [video-only]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <fixture.mp4> <out_prefix> [backend] [video-only|audio-only]\n", argv[0]);
         return 2;
     }
     const char *fix = argv[1];
@@ -114,6 +129,7 @@ int main(int argc, char *argv[]) {
         }
     }
     bool video_only = argc >= 5 && std::strcmp(argv[4], "video-only") == 0;
+    bool audio_only = argc >= 5 && std::strcmp(argv[4], "audio-only") == 0;
 
     if (!avb_backend_is_available(backend)) {
         printf("SKIP: backend '%s' not built into this library\n", backend_name);
@@ -136,37 +152,53 @@ int main(int argc, char *argv[]) {
         ? AVB_PIXEL_FORMAT_I420
         : AVB_PIXEL_FORMAT_BGRA8;
 
-    if (!video_only) {
+    if (!video_only && !audio_only) {
         printf("HEVC video round-trip:\n");
         std::string hevc = pfx + "_hevc.mp4";
-        check(transcode_video(fix, hevc.c_str(), backend, AVB_CODEC_HEVC, AVB_PIXEL_FORMAT_BGRA8), "encode HEVC");
+        check(transcode_video(fix, hevc.c_str(), backend, AVB_VIDEO_CODEC_HEVC, AVB_PIXEL_FORMAT_BGRA8), "encode HEVC");
         check(probe_codec(hevc.c_str(), backend, true) == "hevc", "output codec == hevc");
     }
 
-    printf("VP8 video round-trip (webm):\n");
-    std::string vp8 = pfx + "_vp8.webm";
-    check(transcode_video(fix, vp8.c_str(), backend, AVB_CODEC_VP8, web_video_input), "encode VP8");
-    check(probe_codec(vp8.c_str(), backend, true) == "vp8", "output codec == vp8");
+    if (!audio_only) {
+        printf("VP8 video round-trip (webm):\n");
+        std::string vp8 = pfx + "_vp8.webm";
+        check(transcode_video(fix, vp8.c_str(), backend, AVB_VIDEO_CODEC_VP8, web_video_input), "encode VP8");
+        check(probe_codec(vp8.c_str(), backend, true) == "vp8", "output codec == vp8");
 
-    printf("VP9 video round-trip (webm):\n");
-    std::string vp9 = pfx + "_vp9.webm";
-    check(transcode_video(fix, vp9.c_str(), backend, AVB_CODEC_VP9, web_video_input), "encode VP9");
-    check(probe_codec(vp9.c_str(), backend, true) == "vp9", "output codec == vp9");
+        printf("VP9 video round-trip (webm):\n");
+        std::string vp9 = pfx + "_vp9.webm";
+        check(transcode_video(fix, vp9.c_str(), backend, AVB_VIDEO_CODEC_VP9, web_video_input), "encode VP9");
+        check(probe_codec(vp9.c_str(), backend, true) == "vp9", "output codec == vp9");
 
-    printf("AV1 video round-trip (mkv):\n");
-    std::string av1 = pfx + "_av1.mkv";
-    check(transcode_video(fix, av1.c_str(), backend, AVB_CODEC_AV1, web_video_input), "encode AV1");
-    check(probe_codec(av1.c_str(), backend, true) == "av1", "output codec == av1");
+        printf("AV1 video round-trip (mkv):\n");
+        std::string av1 = pfx + "_av1.mkv";
+        check(transcode_video(fix, av1.c_str(), backend, AVB_VIDEO_CODEC_AV1, web_video_input), "encode AV1");
+        check(probe_codec(av1.c_str(), backend, true) == "av1", "output codec == av1");
+    }
 
     if (!video_only) {
-        printf("Opus audio round-trip (48k):\n");
-        std::string opus = pfx + "_opus.mp4";
-        check(transcode_audio(fix, opus.c_str(), backend, AVB_CODEC_OPUS, 48000), "encode Opus");
-        check(probe_codec(opus.c_str(), backend, false) == "opus", "output codec == opus");
+        const char *mp3_name = backend == AVB_BACKEND_GSTREAMER ? "mp3" : "mp3float";
+        const char *pcm_s16_name = backend == AVB_BACKEND_GSTREAMER ? "wav" : "pcm_s16le";
+        const char *pcm_f32_name = backend == AVB_BACKEND_GSTREAMER ? "wav" : "pcm_f32le";
 
+        check_audio_codec("Opus (48k)", fix, pfx + "_opus.ogg", backend,
+                          AVB_AUDIO_CODEC_OPUS, 48000, "opus");
+        check_audio_codec("MP3", fix, pfx + "_mp3.mp3", backend,
+                          AVB_AUDIO_CODEC_MP3, 44100, mp3_name);
+        check_audio_codec("FLAC", fix, pfx + "_flac.flac", backend,
+                          AVB_AUDIO_CODEC_FLAC, 44100, "flac");
+        check_audio_codec("Vorbis", fix, pfx + "_vorbis.ogg", backend,
+                          AVB_AUDIO_CODEC_VORBIS, 44100, "vorbis");
+        check_audio_codec("PCM S16", fix, pfx + "_pcm_s16.wav", backend,
+                          AVB_AUDIO_CODEC_PCM_S16, 44100, pcm_s16_name);
+        check_audio_codec("PCM F32", fix, pfx + "_pcm_f32.wav", backend,
+                          AVB_AUDIO_CODEC_PCM_F32, 44100, pcm_f32_name);
+    }
+
+    if (!video_only && !audio_only) {
         printf("I420 encoder input round-trip:\n");
         std::string i420 = pfx + "_i420.mp4";
-        check(transcode_video(fix, i420.c_str(), backend, AVB_CODEC_H264, AVB_PIXEL_FORMAT_I420), "encode from I420 frames");
+        check(transcode_video(fix, i420.c_str(), backend, AVB_VIDEO_CODEC_H264, AVB_PIXEL_FORMAT_I420), "encode from I420 frames");
         check(probe_codec(i420.c_str(), backend, true) == "h264", "output codec == h264");
     }
 

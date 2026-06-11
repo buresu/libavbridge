@@ -114,6 +114,9 @@ if(FFMPEG_EXECUTABLE)
         add_test(NAME codecs_gstreamer
                  COMMAND avb_codecs "${AVB_FIXTURE}" "${AVB_OUT}/codec_gstreamer" gstreamer video-only)
         set_tests_properties(codecs_gstreamer PROPERTIES SKIP_RETURN_CODE 77)
+        add_test(NAME codecs_gstreamer_audio
+                 COMMAND avb_codecs "${AVB_FIXTURE}" "${AVB_OUT}/codec_gstreamer_audio" gstreamer audio-only)
+        set_tests_properties(codecs_gstreamer_audio PROPERTIES SKIP_RETURN_CODE 77)
         add_test(NAME custom_decoder_gstreamer
                  COMMAND avb_custom_decoder "${AVB_FIXTURE}" gstreamer)
         set_tests_properties(custom_decoder_gstreamer PROPERTIES SKIP_RETURN_CODE 77)

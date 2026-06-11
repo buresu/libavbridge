@@ -31,7 +31,7 @@ static uint32_t fourcc_le(const char *s) {
 }
 
 static int can_encode(const avb_video_encode_info *info) {
-    return info && info->codec == AVB_CODEC_HAP;
+    return info && info->codec == AVB_VIDEO_CODEC_HAP;
 }
 
 static avb_result open_encoder(void **out_ctx,
@@ -45,7 +45,7 @@ static avb_result open_encoder(void **out_ctx,
     *out_ctx = ctx;
 
     *out_stream = {};
-    out_stream->codec = AVB_CODEC_HAP;
+    out_stream->codec = AVB_VIDEO_CODEC_HAP;
     out_stream->codec_tag = fourcc_le("Hap1");
     out_stream->codec_name = "hap";
     out_stream->gst_caps = "video/x-raw,format=RGB,width=%d,height=%d,framerate=%d/1";
@@ -134,7 +134,7 @@ int main(int argc, char **argv) {
     opts.video.width = W;
     opts.video.height = H;
     opts.video.frame_rate = 30.0;
-    opts.video.codec = AVB_CODEC_HAP;
+    opts.video.codec = AVB_VIDEO_CODEC_HAP;
     opts.video.input_format = AVB_PIXEL_FORMAT_BGRA8;
 
     avb_encoder *enc = nullptr;

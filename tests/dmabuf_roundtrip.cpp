@@ -105,7 +105,7 @@ int main(int argc, char *argv[]) {
     eopts.video.width = first.width;
     eopts.video.height = first.height;
     eopts.video.frame_rate = mi.video.frame_rate > 0.0 ? mi.video.frame_rate : 25.0;
-    eopts.video.codec = AVB_CODEC_H264;
+    eopts.video.codec = AVB_VIDEO_CODEC_H264;
     eopts.video.input_format = AVB_PIXEL_FORMAT_UNKNOWN;
     eopts.video.input_memory = AVB_VIDEO_MEMORY_DMABUF;
     eopts.video.hardware_policy = AVB_HARDWARE_PREFER;

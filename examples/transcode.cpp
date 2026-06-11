@@ -6,7 +6,7 @@
 //   avb_transcode <input> <output>
 //       [--backend auto|gstreamer|ffmpeg|mediafoundation|avfoundation]
 //       [--video-codec auto|h264|hevc|vp8|vp9|av1|hap]
-//       [--audio-codec auto|aac|opus]
+//       [--audio-codec auto|aac|opus|mp3|flac|vorbis|pcm_s16|pcm_f32]
 //       [--video-bitrate bits-per-sec] [--audio-bitrate bits-per-sec]
 //       [--hardware disabled|prefer|require]
 //       [--hardware-device auto|vaapi|cuda|qsv|d3d11va|videotoolbox|amf]
@@ -39,16 +39,26 @@ static bool ends_with_ci(const char *path, const char *suffix) {
     return true;
 }
 
-static bool parse_codec(const char *name, avb_codec *out) {
-    if (std::strcmp(name, "auto") == 0) { *out = AVB_CODEC_AUTO; return true; }
-    if (std::strcmp(name, "h264") == 0) { *out = AVB_CODEC_H264; return true; }
-    if (std::strcmp(name, "hevc") == 0) { *out = AVB_CODEC_HEVC; return true; }
-    if (std::strcmp(name, "vp8")  == 0) { *out = AVB_CODEC_VP8;  return true; }
-    if (std::strcmp(name, "vp9")  == 0) { *out = AVB_CODEC_VP9;  return true; }
-    if (std::strcmp(name, "av1")  == 0) { *out = AVB_CODEC_AV1;  return true; }
-    if (std::strcmp(name, "hap")  == 0) { *out = AVB_CODEC_HAP;  return true; }
-    if (std::strcmp(name, "aac")  == 0) { *out = AVB_CODEC_AAC;  return true; }
-    if (std::strcmp(name, "opus") == 0) { *out = AVB_CODEC_OPUS; return true; }
+static bool parse_video_codec(const char *name, avb_video_codec *out) {
+    if (std::strcmp(name, "auto") == 0) { *out = AVB_VIDEO_CODEC_AUTO; return true; }
+    if (std::strcmp(name, "h264") == 0) { *out = AVB_VIDEO_CODEC_H264; return true; }
+    if (std::strcmp(name, "hevc") == 0) { *out = AVB_VIDEO_CODEC_HEVC; return true; }
+    if (std::strcmp(name, "vp8")  == 0) { *out = AVB_VIDEO_CODEC_VP8;  return true; }
+    if (std::strcmp(name, "vp9")  == 0) { *out = AVB_VIDEO_CODEC_VP9;  return true; }
+    if (std::strcmp(name, "av1")  == 0) { *out = AVB_VIDEO_CODEC_AV1;  return true; }
+    if (std::strcmp(name, "hap")  == 0) { *out = AVB_VIDEO_CODEC_HAP;  return true; }
+    return false;
+}
+
+static bool parse_audio_codec(const char *name, avb_audio_codec *out) {
+    if (std::strcmp(name, "auto") == 0) { *out = AVB_AUDIO_CODEC_AUTO; return true; }
+    if (std::strcmp(name, "aac")  == 0) { *out = AVB_AUDIO_CODEC_AAC;  return true; }
+    if (std::strcmp(name, "opus") == 0) { *out = AVB_AUDIO_CODEC_OPUS; return true; }
+    if (std::strcmp(name, "mp3") == 0) { *out = AVB_AUDIO_CODEC_MP3; return true; }
+    if (std::strcmp(name, "flac") == 0) { *out = AVB_AUDIO_CODEC_FLAC; return true; }
+    if (std::strcmp(name, "vorbis") == 0) { *out = AVB_AUDIO_CODEC_VORBIS; return true; }
+    if (std::strcmp(name, "pcm_s16") == 0) { *out = AVB_AUDIO_CODEC_PCM_S16; return true; }
+    if (std::strcmp(name, "pcm_f32") == 0) { *out = AVB_AUDIO_CODEC_PCM_F32; return true; }
     return false;
 }
 
@@ -78,10 +88,10 @@ static bool parse_positive_int(const char *text, int *out) {
     return true;
 }
 
-static bool is_web_video_codec(avb_codec codec) {
-    return codec == AVB_CODEC_VP8 ||
-           codec == AVB_CODEC_VP9 ||
-           codec == AVB_CODEC_AV1;
+static bool is_web_video_codec(avb_video_codec codec) {
+    return codec == AVB_VIDEO_CODEC_VP8 ||
+           codec == AVB_VIDEO_CODEC_VP9 ||
+           codec == AVB_VIDEO_CODEC_AV1;
 }
 
 int main(int argc, char *argv[]) {
@@ -91,8 +101,8 @@ int main(int argc, char *argv[]) {
     }
 
     avb_backend backend = AVB_BACKEND_AUTO;
-    avb_codec video_codec = AVB_CODEC_AUTO;
-    avb_codec audio_codec = AVB_CODEC_AUTO;
+    avb_video_codec video_codec = AVB_VIDEO_CODEC_AUTO;
+    avb_audio_codec audio_codec = AVB_AUDIO_CODEC_AUTO;
     int video_bitrate = 2000000;
     int audio_bitrate = 0;
     avb_hardware_policy hardware_policy = AVB_HARDWARE_DISABLED;
@@ -115,13 +125,13 @@ int main(int argc, char *argv[]) {
             }
         } else if (std::strcmp(argv[i], "--video-codec") == 0) {
             const char *value = need_value(argv[i]);
-            if (!value || !parse_codec(value, &video_codec)) {
+            if (!value || !parse_video_codec(value, &video_codec)) {
                 fprintf(stderr, "unknown video codec '%s'\n", value ? value : "");
                 return 2;
             }
         } else if (std::strcmp(argv[i], "--audio-codec") == 0) {
             const char *value = need_value(argv[i]);
-            if (!value || !parse_codec(value, &audio_codec)) {
+            if (!value || !parse_audio_codec(value, &audio_codec)) {
                 fprintf(stderr, "unknown audio codec '%s'\n", value ? value : "");
                 return 2;
             }
@@ -156,9 +166,9 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    if (audio_codec == AVB_CODEC_AUTO && ends_with_ci(argv[2], ".webm"))
-        audio_codec = AVB_CODEC_OPUS;
-    bool wants_opus = audio_codec == AVB_CODEC_OPUS;
+    if (audio_codec == AVB_AUDIO_CODEC_AUTO && ends_with_ci(argv[2], ".webm"))
+        audio_codec = AVB_AUDIO_CODEC_OPUS;
+    bool wants_opus = audio_codec == AVB_AUDIO_CODEC_OPUS;
 
     // --- Open the source for decode ---
     avb_decode_options dopts{};
