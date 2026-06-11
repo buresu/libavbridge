@@ -29,6 +29,9 @@ extern "C" {
 #define AVB_VERSION_MINOR 5
 #define AVB_VERSION_PATCH 0
 
+#define AVB_MAX_NAME 64
+#define AVB_MAX_ERROR 256
+
 #ifdef _WIN32
 #  ifdef AVB_BUILDING_SHARED
 #    define AVB_API __declspec(dllexport)
@@ -230,6 +233,35 @@ typedef struct avb_media_info {
     avb_audio_info audio;
     avb_video_info video;
 } avb_media_info;
+
+typedef struct avb_probe_audio_info {
+    int available;
+    int stream_index;
+    int track_count;
+    int sample_rate;
+    int channels;
+    double duration_sec;
+    char codec_name[AVB_MAX_NAME];
+} avb_probe_audio_info;
+
+typedef struct avb_probe_video_info {
+    int available;
+    int stream_index;
+    int width;
+    int height;
+    double frame_rate;
+    double duration_sec;
+    char codec_name[AVB_MAX_NAME];
+} avb_probe_video_info;
+
+typedef struct avb_media_probe {
+    avb_result result;
+    char error[AVB_MAX_ERROR];
+    char backend_name[AVB_MAX_NAME];
+    double duration_sec;
+    avb_probe_audio_info audio;
+    avb_probe_video_info video;
+} avb_media_probe;
 
 /* ------------------------------------------------------------------------- *
  * Configuration
@@ -537,6 +569,17 @@ AVB_API avb_result avb_decoder_open_memory(
 AVB_API avb_result avb_decoder_get_media_info(
     avb_decoder *dec,
     avb_media_info *out_info
+);
+
+/* Open enough of `path` to report container/stream metadata, then close it.
+ * Unlike avb_media_info, all strings in avb_media_probe are owned by the output
+ * struct and remain valid after this call returns. `options` may be NULL.
+ *
+ * On failure, out_probe is still filled with result/error when possible. */
+AVB_API avb_result avb_probe_media(
+    const char *path,
+    const avb_decode_options *options,
+    avb_media_probe *out_probe
 );
 
 /* Seek both the audio and video streams to ~`seconds`. The decoders are

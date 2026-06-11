@@ -213,6 +213,33 @@ int main(int argc, char *argv[]) {
     printf("media_info:\n");
     check_near(info.duration_sec, 3.0, 0.2, "container duration ~3.0s");
 
+    printf("probe:\n");
+    {
+        avb_media_probe probe{};
+        check(avb_probe_media(path, &opts, &probe) == AVB_OK,
+              "avb_probe_media succeeds");
+        check(probe.result == AVB_OK, "probe result == OK");
+        check_str(probe.backend_name, info.backend_name, "probe backend matches decoder");
+        check_near(probe.duration_sec, info.duration_sec, 0.01,
+                   "probe duration matches decoder");
+        check(probe.audio.available == info.audio.available,
+              "probe audio availability matches decoder");
+        check(probe.video.available == info.video.available,
+              "probe video availability matches decoder");
+        check_str(probe.audio.codec_name, info.audio.codec_name,
+                  "probe audio codec matches decoder");
+        check_str(probe.video.codec_name, info.video.codec_name,
+                  "probe video codec matches decoder");
+
+        avb_decode_options bad = opts;
+        bad.enable_audio = 0;
+        bad.enable_video = 0;
+        check(avb_probe_media(path, &bad, &probe) == AVB_ERROR_INVALID_ARGUMENT &&
+              probe.result == AVB_ERROR_INVALID_ARGUMENT &&
+              probe.error[0] != '\0',
+              "avb_probe_media reports validation error");
+    }
+
     // --- Audio contract ---
     check(info.audio.available, "audio stream available");
     check(info.audio.sample_rate == 44100, "audio sample_rate == 44100");
