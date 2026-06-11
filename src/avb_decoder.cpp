@@ -85,11 +85,27 @@ static avb_result decoder_create(avb_decoder **out_dec, avb_backend be,
     return AVB_OK;
 }
 
+static avb_result decoder_validate_for_open(avb_decoder **out_dec,
+                                            const avb_decode_options &options) {
+    avb_decoder_validation validation{};
+    avb_result res = avb_decoder_validate_options(&options, &validation);
+    if (res != AVB_OK) return res;
+    if (validation.ok) return AVB_OK;
+
+    auto *dec = new avb_decoder();
+    dec->set_error(validation.message);
+    *out_dec = dec;
+    return validation.result;
+}
+
 avb_result avb_decoder_open(avb_decoder **out_dec, const char *path,
                             const avb_decode_options *options) {
     if (!out_dec || !path) return AVB_ERROR_INVALID_ARGUMENT;
     avb_decode_options default_opts = avb_decode_options_default();
     if (!options) options = &default_opts;
+
+    avb_result vres = decoder_validate_for_open(out_dec, *options);
+    if (vres != AVB_OK) return vres;
 
     avb_decoder *dec = nullptr;
     avb_result res = decoder_create(out_dec, options->backend, &dec);
@@ -111,6 +127,9 @@ avb_result avb_decoder_open_io(avb_decoder **out_dec, const avb_io_callbacks *cb
     if (!out_dec || !cb || !cb->read) return AVB_ERROR_INVALID_ARGUMENT;
     avb_decode_options default_opts = avb_decode_options_default();
     if (!options) options = &default_opts;
+
+    avb_result vres = decoder_validate_for_open(out_dec, *options);
+    if (vres != AVB_OK) return vres;
 
     avb_decoder *dec = nullptr;
     avb_result res = decoder_create(out_dec, options->backend, &dec);

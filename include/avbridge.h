@@ -266,6 +266,17 @@ typedef struct avb_decode_options {
     int enable_custom_video_decoders;
 } avb_decode_options;
 
+typedef struct avb_decoder_validation {
+    int ok;                         /* 1 when this option shape is supported. */
+    avb_result result;              /* AVB_OK when ok, otherwise the suggested failure code. */
+    avb_backend backend;            /* Resolved backend (AUTO expanded when possible). */
+    const char *backend_name;       /* Static string; NULL only for invalid backend values. */
+    avb_video_memory_type video_memory;
+    avb_hardware_policy hardware_policy;
+    avb_hardware_device hardware_device;
+    const char *message;            /* Static human-readable validation result. */
+} avb_decoder_validation;
+
 typedef struct avb_io_callbacks {
     /* Read up to `size` bytes into `buf`. Return the number of bytes read,
      * 0 at end of stream, or a negative value on error. Required. */
@@ -478,6 +489,19 @@ typedef struct avb_decoder avb_decoder;
 /* Sensible defaults: AUTO backend, both audio and video enabled, default
  * stream selection and formats. Prefer this over zero-initialisation. */
 AVB_API avb_decode_options avb_decode_options_default(void);
+
+/* Validate decode option shape without opening input media. This checks public
+ * option invariants and known static backend constraints. It does not inspect
+ * the file or prove that a stream index, codec, runtime library, or hardware
+ * device exists.
+ *
+ * `options` may be NULL, in which case defaults are validated. Returns AVB_OK
+ * when validation itself ran and fills `out`; inspect out->ok or out->result
+ * for support. */
+AVB_API avb_result avb_decoder_validate_options(
+    const avb_decode_options *options,
+    avb_decoder_validation *out
+);
 
 /* Open `path` for decoding. options may be NULL (uses the defaults above).
  * On failure a non-NULL *out_dec is still returned so the caller can read

@@ -138,6 +138,28 @@ int main(int argc, char *argv[]) {
               "decode_options_default enables audio+video");
         check(d.enable_custom_video_decoders == 1,
               "decode_options_default enables custom video decoders");
+
+        d.backend = backend;
+        avb_decoder_validation v{};
+        check(avb_decoder_validate_options(&d, &v) == AVB_OK,
+              "decoder_validate_options runs");
+        check(v.ok && v.result == AVB_OK,
+              "decoder_validate_options accepts default shape");
+        check(v.backend_name && v.message,
+              "decoder validation reports names/message");
+
+        d.audio_stream_index = -2;
+        check(avb_decoder_validate_options(&d, &v) == AVB_OK &&
+              !v.ok && v.result == AVB_ERROR_INVALID_ARGUMENT,
+              "decoder_validate_options rejects invalid stream index");
+
+        d = avb_decode_options_default();
+        d.backend = backend;
+        d.video_memory = AVB_VIDEO_MEMORY_NATIVE;
+        d.hardware_policy = AVB_HARDWARE_DISABLED;
+        check(avb_decoder_validate_options(&d, &v) == AVB_OK &&
+              !v.ok && v.result == AVB_ERROR_INVALID_ARGUMENT,
+              "decoder_validate_options rejects native output with hardware disabled");
     }
     {
         avb_encode_options e = avb_encode_options_default();
