@@ -39,29 +39,6 @@ static bool ends_with_ci(const char *path, const char *suffix) {
     return true;
 }
 
-static bool parse_video_codec(const char *name, avb_video_codec *out) {
-    if (std::strcmp(name, "auto") == 0) { *out = AVB_VIDEO_CODEC_AUTO; return true; }
-    if (std::strcmp(name, "h264") == 0) { *out = AVB_VIDEO_CODEC_H264; return true; }
-    if (std::strcmp(name, "hevc") == 0) { *out = AVB_VIDEO_CODEC_HEVC; return true; }
-    if (std::strcmp(name, "vp8")  == 0) { *out = AVB_VIDEO_CODEC_VP8;  return true; }
-    if (std::strcmp(name, "vp9")  == 0) { *out = AVB_VIDEO_CODEC_VP9;  return true; }
-    if (std::strcmp(name, "av1")  == 0) { *out = AVB_VIDEO_CODEC_AV1;  return true; }
-    if (std::strcmp(name, "hap")  == 0) { *out = AVB_VIDEO_CODEC_HAP;  return true; }
-    return false;
-}
-
-static bool parse_audio_codec(const char *name, avb_audio_codec *out) {
-    if (std::strcmp(name, "auto") == 0) { *out = AVB_AUDIO_CODEC_AUTO; return true; }
-    if (std::strcmp(name, "aac")  == 0) { *out = AVB_AUDIO_CODEC_AAC;  return true; }
-    if (std::strcmp(name, "opus") == 0) { *out = AVB_AUDIO_CODEC_OPUS; return true; }
-    if (std::strcmp(name, "mp3") == 0) { *out = AVB_AUDIO_CODEC_MP3; return true; }
-    if (std::strcmp(name, "flac") == 0) { *out = AVB_AUDIO_CODEC_FLAC; return true; }
-    if (std::strcmp(name, "vorbis") == 0) { *out = AVB_AUDIO_CODEC_VORBIS; return true; }
-    if (std::strcmp(name, "pcm_s16") == 0) { *out = AVB_AUDIO_CODEC_PCM_S16; return true; }
-    if (std::strcmp(name, "pcm_f32") == 0) { *out = AVB_AUDIO_CODEC_PCM_F32; return true; }
-    return false;
-}
-
 static bool parse_hardware_policy(const char *name, avb_hardware_policy *out) {
     if (std::strcmp(name, "disabled") == 0) { *out = AVB_HARDWARE_DISABLED; return true; }
     if (std::strcmp(name, "prefer")   == 0) { *out = AVB_HARDWARE_PREFER;   return true; }
@@ -125,13 +102,13 @@ int main(int argc, char *argv[]) {
             }
         } else if (std::strcmp(argv[i], "--video-codec") == 0) {
             const char *value = need_value(argv[i]);
-            if (!value || !parse_video_codec(value, &video_codec)) {
+            if (!value || avb_video_codec_from_name(value, &video_codec) != AVB_OK) {
                 fprintf(stderr, "unknown video codec '%s'\n", value ? value : "");
                 return 2;
             }
         } else if (std::strcmp(argv[i], "--audio-codec") == 0) {
             const char *value = need_value(argv[i]);
-            if (!value || !parse_audio_codec(value, &audio_codec)) {
+            if (!value || avb_audio_codec_from_name(value, &audio_codec) != AVB_OK) {
                 fprintf(stderr, "unknown audio codec '%s'\n", value ? value : "");
                 return 2;
             }
@@ -212,6 +189,20 @@ int main(int argc, char *argv[]) {
         eopts.audio.channels    = info.audio.channels;
         eopts.audio.codec       = audio_codec;
         eopts.audio.bitrate     = audio_bitrate;
+    }
+
+    avb_encoder_validation validation{};
+    if (avb_encoder_validate_options(argv[2], &eopts, &validation) != AVB_OK ||
+        !validation.ok) {
+        fprintf(stderr, "encoder options are not supported: %s\n",
+                validation.message ? validation.message : "unknown");
+        fprintf(stderr, "  backend=%s container=%s video=%s audio=%s\n",
+                validation.backend_name ? validation.backend_name : "(invalid)",
+                validation.container_name ? validation.container_name : "(unknown)",
+                validation.video_codec_name ? validation.video_codec_name : "none",
+                validation.audio_codec_name ? validation.audio_codec_name : "none");
+        avb_decoder_close(dec);
+        return 1;
     }
 
     avb_encoder *enc = nullptr;

@@ -80,6 +80,19 @@ avb_result avb_encoder_open(avb_encoder **out_enc, const char *path,
 
     auto *enc = new avb_encoder();
 
+    avb_encoder_validation validation{};
+    avb_result validation_res = avb_encoder_validate_options(path, options, &validation);
+    if (validation_res != AVB_OK) {
+        enc->set_error("Invalid encoder validation arguments.");
+        *out_enc = enc;
+        return validation_res;
+    }
+    if (!validation.ok) {
+        enc->set_error(validation.message);
+        *out_enc = enc;
+        return validation.result;
+    }
+
     AvbEncoderImpl *impl = avb_create_encoder_impl(options->backend);
     if (!impl) {
         enc->set_error("Requested encoder backend is not available on this platform.");

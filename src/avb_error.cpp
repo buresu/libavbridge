@@ -24,11 +24,62 @@ const char *avb_backend_name(avb_backend backend) {
     }
 }
 
+const char *avb_video_codec_name(avb_video_codec codec) {
+    switch (codec) {
+        case AVB_VIDEO_CODEC_AUTO: return "auto";
+        case AVB_VIDEO_CODEC_H264: return "h264";
+        case AVB_VIDEO_CODEC_HEVC: return "hevc";
+        case AVB_VIDEO_CODEC_VP8:  return "vp8";
+        case AVB_VIDEO_CODEC_VP9:  return "vp9";
+        case AVB_VIDEO_CODEC_AV1:  return "av1";
+        case AVB_VIDEO_CODEC_HAP:  return "hap";
+        default:                   return nullptr;
+    }
+}
+
+const char *avb_audio_codec_name(avb_audio_codec codec) {
+    switch (codec) {
+        case AVB_AUDIO_CODEC_AUTO:    return "auto";
+        case AVB_AUDIO_CODEC_AAC:     return "aac";
+        case AVB_AUDIO_CODEC_OPUS:    return "opus";
+        case AVB_AUDIO_CODEC_MP3:     return "mp3";
+        case AVB_AUDIO_CODEC_FLAC:    return "flac";
+        case AVB_AUDIO_CODEC_VORBIS:  return "vorbis";
+        case AVB_AUDIO_CODEC_PCM_S16: return "pcm_s16";
+        case AVB_AUDIO_CODEC_PCM_F32: return "pcm_f32";
+        default:                      return nullptr;
+    }
+}
+
 avb_result avb_backend_from_name(const char *name, avb_backend *out) {
     if (!name || !out) return AVB_ERROR_INVALID_ARGUMENT;
     for (int b = AVB_BACKEND_AUTO; b < AVB_BACKEND_COUNT; ++b) {
         const char *n = avb_backend_name((avb_backend)b);
         if (n && std::strcmp(n, name) == 0) { *out = (avb_backend)b; return AVB_OK; }
+    }
+    return AVB_ERROR_INVALID_ARGUMENT;
+}
+
+avb_result avb_video_codec_from_name(const char *name, avb_video_codec *out) {
+    if (!name || !out) return AVB_ERROR_INVALID_ARGUMENT;
+    for (int c = AVB_VIDEO_CODEC_AUTO; c < AVB_VIDEO_CODEC_COUNT; ++c) {
+        const char *n = avb_video_codec_name((avb_video_codec)c);
+        if (n && std::strcmp(n, name) == 0) {
+            *out = (avb_video_codec)c;
+            return AVB_OK;
+        }
+    }
+    return AVB_ERROR_INVALID_ARGUMENT;
+}
+
+avb_result avb_audio_codec_from_name(const char *name, avb_audio_codec *out) {
+    if (!name || !out) return AVB_ERROR_INVALID_ARGUMENT;
+    for (int c = AVB_AUDIO_CODEC_AUTO; c < AVB_AUDIO_CODEC_COUNT; ++c) {
+        const char *n = avb_audio_codec_name((avb_audio_codec)c);
+        if (n && std::strcmp(n, name) == 0) {
+            *out = (avb_audio_codec)c;
+            return AVB_OK;
+        }
     }
     return AVB_ERROR_INVALID_ARGUMENT;
 }

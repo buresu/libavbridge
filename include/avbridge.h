@@ -312,6 +312,19 @@ typedef struct avb_encode_options {
     avb_audio_encode_params audio;
 } avb_encode_options;
 
+typedef struct avb_encoder_validation {
+    int ok;                       /* 1 when this option shape is supported. */
+    avb_result result;            /* AVB_OK when ok, otherwise the suggested failure code. */
+    avb_backend backend;          /* Resolved backend (AUTO expanded when possible). */
+    const char *backend_name;     /* Static string; NULL only for invalid backend values. */
+    const char *container_name;   /* Static string inferred from path, e.g. "mp4". */
+    avb_video_codec video_codec;  /* Resolved video codec (AUTO expanded when possible). */
+    avb_audio_codec audio_codec;  /* Resolved audio codec (AUTO expanded when possible). */
+    const char *video_codec_name; /* Static string for video_codec. */
+    const char *audio_codec_name; /* Static string for audio_codec. */
+    const char *message;          /* Static human-readable validation result. */
+} avb_encoder_validation;
+
 /* ------------------------------------------------------------------------- *
  * Custom video codec plugins
  * ------------------------------------------------------------------------- */
@@ -447,6 +460,15 @@ AVB_API int avb_backend_is_available(avb_backend backend);
 /* Short name for a result code, e.g. "AVB_ERROR_EOF". Never NULL. */
 AVB_API const char *avb_result_string(avb_result result);
 
+/* Short codec names ("h264", "opus", "pcm_s16", ...), or NULL for an
+ * out-of-range value. */
+AVB_API const char *avb_video_codec_name(avb_video_codec codec);
+AVB_API const char *avb_audio_codec_name(avb_audio_codec codec);
+
+/* Parse short codec names returned by the *_codec_name functions. */
+AVB_API avb_result avb_video_codec_from_name(const char *name, avb_video_codec *out);
+AVB_API avb_result avb_audio_codec_from_name(const char *name, avb_audio_codec *out);
+
 /* ------------------------------------------------------------------------- *
  * Decoding
  * ------------------------------------------------------------------------- */
@@ -566,6 +588,21 @@ typedef struct avb_encoder avb_encoder;
 /* Defaults: AUTO backend, both tracks disabled (enable + fill the ones you
  * want), codecs AUTO. */
 AVB_API avb_encode_options avb_encode_options_default(void);
+
+/* Validate the backend/container/codec shape of an encode request without
+ * opening the output. This checks public option invariants and known static
+ * backend/container compatibility. It does not prove runtime libraries,
+ * installed GStreamer elements, FFmpeg encoder availability, or hardware
+ * devices; avb_encoder_open can still fail for those dynamic conditions.
+ *
+ * Returns AVB_OK when validation itself ran and fills `out`. Inspect out->ok or
+ * out->result for support. Returns AVB_ERROR_INVALID_ARGUMENT only when the
+ * validation call is malformed (NULL path/options/out). */
+AVB_API avb_result avb_encoder_validate_options(
+    const char *path,
+    const avb_encode_options *options,
+    avb_encoder_validation *out
+);
 
 /* Open an encoder writing to `path`; the container is inferred from the file
  * extension (.mp4/.mov/.m4a, and .webm/.mkv where the backend supports it).

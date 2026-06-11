@@ -97,6 +97,24 @@ int main(int argc, char *argv[]) {
         const char *n = avb_backend_name(AVB_BACKEND_GSTREAMER);
         check(n && std::strcmp(n, "gstreamer") == 0, "backend_name(gstreamer)");
     }
+    {
+        avb_video_codec vc;
+        avb_audio_codec ac;
+        check(std::strcmp(avb_video_codec_name(AVB_VIDEO_CODEC_HEVC), "hevc") == 0,
+              "video_codec_name(HEVC)");
+        check(avb_video_codec_from_name("vp9", &vc) == AVB_OK &&
+              vc == AVB_VIDEO_CODEC_VP9,
+              "video_codec_from_name(vp9)");
+        check(avb_video_codec_from_name("aac", &vc) == AVB_ERROR_INVALID_ARGUMENT,
+              "video_codec_from_name(aac) rejects audio codec");
+        check(std::strcmp(avb_audio_codec_name(AVB_AUDIO_CODEC_FLAC), "flac") == 0,
+              "audio_codec_name(FLAC)");
+        check(avb_audio_codec_from_name("pcm_f32", &ac) == AVB_OK &&
+              ac == AVB_AUDIO_CODEC_PCM_F32,
+              "audio_codec_from_name(pcm_f32)");
+        check(avb_audio_codec_from_name("h264", &ac) == AVB_ERROR_INVALID_ARGUMENT,
+              "audio_codec_from_name(h264) rejects video codec");
+    }
     check(std::strcmp(avb_result_string(AVB_ERROR_EOF), "AVB_ERROR_EOF") == 0,
           "result_string(EOF)");
     check(std::strcmp(avb_result_string(AVB_ERROR_AGAIN), "AVB_ERROR_AGAIN") == 0,
@@ -120,6 +138,32 @@ int main(int argc, char *argv[]) {
               "decode_options_default enables audio+video");
         check(d.enable_custom_video_decoders == 1,
               "decode_options_default enables custom video decoders");
+    }
+    {
+        avb_encode_options e = avb_encode_options_default();
+        e.backend = backend;
+        e.video.enable = 1;
+        e.video.width = 320;
+        e.video.height = 240;
+        e.video.frame_rate = 25.0;
+        e.video.codec = AVB_VIDEO_CODEC_H264;
+        e.video.input_format = AVB_PIXEL_FORMAT_BGRA8;
+        e.audio.enable = 1;
+        e.audio.sample_rate = 44100;
+        e.audio.channels = 1;
+        e.audio.codec = AVB_AUDIO_CODEC_AAC;
+        avb_encoder_validation v{};
+        check(avb_encoder_validate_options(path, &e, &v) == AVB_OK,
+              "encoder_validate_options runs");
+        check(v.ok && v.result == AVB_OK,
+              "encoder_validate_options accepts h264/aac mp4 shape");
+        check(v.backend_name && v.container_name && v.video_codec_name && v.audio_codec_name,
+              "encoder validation reports names");
+
+        e.audio.codec = AVB_AUDIO_CODEC_OPUS;
+        check(avb_encoder_validate_options(path, &e, &v) == AVB_OK &&
+              !v.ok && v.result == AVB_ERROR_INVALID_ARGUMENT,
+              "encoder_validate_options rejects opus in mp4");
     }
 
     avb_decode_options opts{};
