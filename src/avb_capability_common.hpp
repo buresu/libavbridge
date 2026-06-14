@@ -149,6 +149,8 @@ inline bool container_accepts_audio(Container c, avb_audio_codec codec) {
             return codec == AVB_AUDIO_CODEC_FLAC;
         case Container::mp3:
             return codec == AVB_AUDIO_CODEC_MP3;
+        case Container::ivf:
+            return false; // IVF is a video-only elementary stream container.
         case Container::unknown:
             return codec == AVB_AUDIO_CODEC_AAC;
     }
