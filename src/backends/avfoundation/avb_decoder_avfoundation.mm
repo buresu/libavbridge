@@ -90,6 +90,23 @@ static OSType avb_cvpixfmt(avb_pixel_format want) {
     }
 }
 
+// Reverse mapping, used to report the format of a native CVPixelBuffer handed
+// back to the caller for AVB_VIDEO_MEMORY_NATIVE output.
+static avb_pixel_format avb_avbfmt_from_cv(OSType cvfmt) {
+    switch (cvfmt) {
+        case kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange:
+        case kCVPixelFormatType_420YpCbCr8BiPlanarFullRange:
+            return AVB_PIXEL_FORMAT_NV12;
+        case kCVPixelFormatType_420YpCbCr8Planar:
+        case kCVPixelFormatType_420YpCbCr8PlanarFullRange:
+            return AVB_PIXEL_FORMAT_I420;
+        case kCVPixelFormatType_32BGRA:
+            return AVB_PIXEL_FORMAT_BGRA8;
+        default:
+            return AVB_PIXEL_FORMAT_UNKNOWN;
+    }
+}
+
 // Build the AVAssetReaderTrackOutput settings for interleaved float32 PCM.
 // req_rate/req_channels of 0 leave the source value untouched; otherwise
 // AVFoundation resamples / remixes to the requested values.
@@ -144,6 +161,7 @@ struct AvbDecoderAVFoundation::Impl {
     OSType cv_pixel_format          = kCVPixelFormatType_32BGRA;
     avb_pixel_format video_avb_fmt  = AVB_PIXEL_FORMAT_BGRA8;
     bool swizzle_rgba               = false; // request BGRA, emit RGBA
+    avb_video_memory_type video_memory = AVB_VIDEO_MEMORY_CPU;
 
     std::string audio_codec_name;
     std::string video_codec_name;
@@ -221,11 +239,14 @@ avb_result AvbDecoderAVFoundation::open_custom_video_decoder(
 
 avb_result AvbDecoderAVFoundation::open_file(const char *path, const avb_decode_options &options) {
     @autoreleasepool {
-        if (options.video_memory != AVB_VIDEO_MEMORY_CPU ||
-            options.hardware_policy == AVB_HARDWARE_REQUIRE) {
-            m_last_error = "AVFoundation native hardware video frames are not implemented yet.";
+        // CPU frames are copied out plane-by-plane; NATIVE hands back the
+        // decoder's IOSurface-backed CVPixelBuffer (zero-copy, VideoToolbox).
+        // DMABUF is a Linux-only export and has no AVFoundation equivalent.
+        if (options.video_memory == AVB_VIDEO_MEMORY_DMABUF) {
+            m_last_error = "AVFoundation does not support DMABUF video frames.";
             return AVB_ERROR_OPEN_FAILED;
         }
+        m_impl->video_memory = options.video_memory;
         NSString *ns_path = [NSString stringWithUTF8String:path];
         NSURL *url = [NSURL fileURLWithPath:ns_path];
 
@@ -312,16 +333,24 @@ avb_result AvbDecoderAVFoundation::open_file(const char *path, const avb_decode_
                 }
 
                 if (!m_impl->custom_video_decoder) {
-                    m_impl->cv_pixel_format = avb_cvpixfmt(options.video_format);
-                    m_impl->video_avb_fmt =
-                        options.video_format == AVB_PIXEL_FORMAT_UNKNOWN
-                            ? AVB_PIXEL_FORMAT_BGRA8 : options.video_format;
-                    m_impl->swizzle_rgba =
+                    bool native = m_impl->video_memory == AVB_VIDEO_MEMORY_NATIVE;
+                    // Native output defaults to NV12, the format VideoToolbox
+                    // decodes into, so the IOSurface is handed back untouched.
+                    avb_pixel_format want = options.video_format;
+                    if (want == AVB_PIXEL_FORMAT_UNKNOWN)
+                        want = native ? AVB_PIXEL_FORMAT_NV12 : AVB_PIXEL_FORMAT_BGRA8;
+                    m_impl->cv_pixel_format = avb_cvpixfmt(want);
+                    m_impl->video_avb_fmt = want;
+                    // RGBA is emulated by swizzling a BGRA CPU copy, which is not
+                    // possible for a zero-copy native buffer.
+                    m_impl->swizzle_rgba = !native &&
                         (options.video_format == AVB_PIXEL_FORMAT_RGBA8);
-                    NSDictionary *settings = @{
+                    NSMutableDictionary *settings = [@{
                         (NSString *)kCVPixelBufferPixelFormatTypeKey:
                             @(m_impl->cv_pixel_format),
-                    };
+                    } mutableCopy];
+                    if (native)
+                        settings[(NSString *)kCVPixelBufferIOSurfacePropertiesKey] = @{};
 
                     m_impl->video_output = [AVAssetReaderTrackOutput
                         assetReaderTrackOutputWithTrack:track
@@ -422,10 +451,16 @@ avb_result AvbDecoderAVFoundation::seek(double seconds) {
         if (m_impl->video_output) {
             AVAssetTrack *track =
                 avb_load_tracks(m_impl->asset, AVMediaTypeVideo)[m_impl->video_stream_idx];
-            NSDictionary *settings = m_impl->custom_video_decoder
-                ? nil
-                : @{ (NSString *)kCVPixelBufferPixelFormatTypeKey:
-                         @(m_impl->cv_pixel_format) };
+            NSDictionary *settings = nil;
+            if (!m_impl->custom_video_decoder) {
+                NSMutableDictionary *s = [@{
+                    (NSString *)kCVPixelBufferPixelFormatTypeKey:
+                        @(m_impl->cv_pixel_format),
+                } mutableCopy];
+                if (m_impl->video_memory == AVB_VIDEO_MEMORY_NATIVE)
+                    s[(NSString *)kCVPixelBufferIOSurfacePropertiesKey] = @{};
+                settings = s;
+            }
             m_impl->video_output = [AVAssetReaderTrackOutput
                 assetReaderTrackOutputWithTrack:track
                 outputSettings:settings];
@@ -594,6 +629,28 @@ avb_result AvbDecoderAVFoundation::read_video_frame(avb_video_frame &out_frame) 
             return AVB_ERROR_DECODE_FAILED;
         }
 
+        // Native output: retain the decoder's IOSurface-backed CVPixelBuffer and
+        // hand it back without copying. The caller keeps native_owner intact and
+        // calls release_video_frame(), which releases our retain.
+        if (m_impl->video_memory == AVB_VIDEO_MEMORY_NATIVE) {
+            CVPixelBufferRef pb = (CVPixelBufferRef)image;
+            CVPixelBufferRetain(pb);
+            out_frame = {};
+            out_frame.width       = (int)CVPixelBufferGetWidth(pb);
+            out_frame.height      = (int)CVPixelBufferGetHeight(pb);
+            out_frame.format      =
+                avb_avbfmt_from_cv(CVPixelBufferGetPixelFormatType(pb));
+            out_frame.pts_sec     = CMTimeGetSeconds(pts);
+            out_frame.memory_type = AVB_VIDEO_MEMORY_NATIVE;
+            out_frame.hardware_device = AVB_HW_DEVICE_VIDEOTOOLBOX;
+            out_frame.plane_count = 0;
+            out_frame.native_handle = pb;
+            out_frame.native_owner  = this;
+            for (int p = 0; p < AVB_MAX_PLANES; ++p) out_frame.dmabuf_fd[p] = -1;
+            CFRelease(sample_buf);
+            return AVB_OK;
+        }
+
         CVPixelBufferLockBaseAddress(image, kCVPixelBufferLock_ReadOnly);
 
         size_t width  = CVPixelBufferGetWidth(image);
@@ -679,6 +736,10 @@ void AvbDecoderAVFoundation::release_video_frame(avb_video_frame &frame) {
     if (m_impl->custom_video_decoder && m_impl->custom_video_decoder->release_frame) {
         m_impl->custom_video_decoder->release_frame(m_impl->custom_video_ctx, &frame);
         return;
+    }
+    if (frame.memory_type == AVB_VIDEO_MEMORY_NATIVE &&
+        frame.native_owner == this && frame.native_handle) {
+        CVPixelBufferRelease((CVPixelBufferRef)frame.native_handle);
     }
     memset(&frame, 0, sizeof(frame));
 }

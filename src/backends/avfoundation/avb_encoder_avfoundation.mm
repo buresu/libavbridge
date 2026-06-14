@@ -33,6 +33,7 @@ struct AvbEncoderAVFoundation::Impl {
     double frame_rate = 30.0;
     OSType cv_pixel_format = kCVPixelFormatType_32BGRA;
     avb_pixel_format input_format = AVB_PIXEL_FORMAT_BGRA8;
+    avb_video_memory_type input_memory = AVB_VIDEO_MEMORY_CPU;
 
     int    sample_rate = 0;
     int    channels = 0;
@@ -147,10 +148,12 @@ static FourCharCode avb_normalize_fourcc(uint32_t tag) {
 
 avb_result AvbEncoderAVFoundation::open(const char *path, const avb_encode_options &options) {
     @autoreleasepool {
+        // CPU input is copied into a fresh CVPixelBuffer; NATIVE input appends
+        // the caller's IOSurface-backed CVPixelBuffer directly (zero-copy).
+        // DMABUF has no AVFoundation equivalent.
         if (options.video.enable &&
-            (options.video.input_memory != AVB_VIDEO_MEMORY_CPU ||
-             options.video.hardware_policy == AVB_HARDWARE_REQUIRE)) {
-            m_last_error = "AVFoundation native hardware video input is not implemented yet.";
+            options.video.input_memory == AVB_VIDEO_MEMORY_DMABUF) {
+            m_last_error = "AVFoundation does not consume DMABUF video input.";
             return AVB_ERROR_OPEN_FAILED;
         }
         NSString *ns_path = [NSString stringWithUTF8String:path];
@@ -174,8 +177,11 @@ avb_result AvbEncoderAVFoundation::open(const char *path, const avb_encode_optio
                 m_last_error = "Video width/height must be positive.";
                 return AVB_ERROR_INVALID_ARGUMENT;
             }
-            m_impl->input_format = options.video.input_format == AVB_PIXEL_FORMAT_UNKNOWN
-                ? AVB_PIXEL_FORMAT_BGRA8 : options.video.input_format;
+            m_impl->input_memory = options.video.input_memory;
+            bool native_in = m_impl->input_memory == AVB_VIDEO_MEMORY_NATIVE;
+            m_impl->input_format = options.video.input_format != AVB_PIXEL_FORMAT_UNKNOWN
+                ? options.video.input_format
+                : (native_in ? AVB_PIXEL_FORMAT_NV12 : AVB_PIXEL_FORMAT_BGRA8);
             m_impl->width      = options.video.width;
             m_impl->height     = options.video.height;
             m_impl->frame_rate = options.video.frame_rate > 0 ? options.video.frame_rate : 30.0;
@@ -554,6 +560,26 @@ avb_result AvbEncoderAVFoundation::write_video(const avb_video_frame &frame, dou
             m_impl->custom_video_encoder->release_packet(m_impl->custom_video_ctx, &packet);
         if (res == AVB_OK) m_impl->video_frame_index++;
         return res;
+    }
+    if (m_impl->input_memory == AVB_VIDEO_MEMORY_NATIVE) {
+        if (frame.memory_type != AVB_VIDEO_MEMORY_NATIVE || !frame.native_handle) {
+            m_last_error = "Encoder configured for native input but frame is not a native CVPixelBuffer.";
+            return AVB_ERROR_INVALID_ARGUMENT;
+        }
+        @autoreleasepool {
+            double pts = pts_sec >= 0.0      ? pts_sec
+                       : frame.pts_sec >= 0.0 ? frame.pts_sec
+                       : (double)m_impl->video_frame_index / m_impl->frame_rate;
+            CMTime t = CMTimeMakeWithSeconds(pts, 90000);
+            // Retain the caller's CVPixelBuffer while it sits queued; drain()
+            // releases it after appendPixelBuffer accepts it.
+            CVPixelBufferRef pb = (CVPixelBufferRef)frame.native_handle;
+            CVPixelBufferRetain(pb);
+            m_impl->video_q.emplace_back(pb, t);
+            m_impl->video_frame_index++;
+            if (!drain()) return AVB_ERROR_ENCODE_FAILED;
+            return AVB_OK;
+        }
     }
     if (frame.format != m_impl->input_format) {
         m_last_error = "Frame pixel format does not match configured input_format.";

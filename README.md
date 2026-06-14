@@ -72,13 +72,20 @@ runtime-install dependent:
 - Media Foundation may report an already-decoded PCM subtype for some source
   handlers. In particular, Ogg/Vorbis can decode successfully while
   `avb_media_info::audio.codec_name` reports `pcm` rather than `vorbis`.
+- AVFoundation decoder runtime probing queries VideoToolbox
+  (`VTIsHardwareDecodeSupported`) and AudioToolbox decoder registrations. On
+  current macOS this exposes H.264/HEVC decode (always) plus VP9/AV1 when the
+  hardware supports them, and AAC, MP3, FLAC, Opus, and PCM audio decode. The
+  encoder probe walks `VTCopyVideoEncoderList`, reporting H.264/HEVC video and
+  AAC audio for the writer's MP4/MOV/M4A containers.
 
 Applications can query the static and runtime codec surface with
 `avb_decoder_query_capabilities`, `avb_encoder_query_capabilities`,
 `avb_decoder_probe_runtime_capabilities`, and
 `avb_encoder_probe_runtime_capabilities`. Runtime probes inspect the loaded
-backend environment: FFmpeg libraries, GStreamer elements/plugins, and Media
-Foundation Transform (MFT) registrations on Windows. The lists are still
+backend environment: FFmpeg libraries, GStreamer elements/plugins, Media
+Foundation Transform (MFT) registrations on Windows, and VideoToolbox/
+AudioToolbox registrations on macOS. The lists are still
 container-filtered and are a probe, not a guarantee that every resolution,
 bitrate, profile, or media sink will accept a full session.
 
@@ -96,7 +103,7 @@ Memory modes:
   `plane_stride[]`, `data`, and `stride`.
 - `AVB_VIDEO_MEMORY_NATIVE` keeps the backend's native object alive until the
   frame is released. FFmpeg uses `AVFrame*`; GStreamer uses `GstBuffer*`;
-  platform backends should use their reference-counted surface object.
+  Media Foundation uses `ID3D11Texture2D*`; AVFoundation uses `CVPixelBufferRef`.
 - `AVB_VIDEO_MEMORY_DMABUF` is the Linux zero-copy interchange mode. Frames
   carry DRM PRIME / DMABUF fd, offset, stride, modifier, and `drm_format`
   metadata. Multiple planes may point at the same fd.
@@ -132,6 +139,10 @@ Implemented native paths:
   application-provided `ID3D11Device`.
 - Media Foundation H.264/HEVC MP4/MOV encode can consume those textures on the
   same device without a CPU pixel copy.
+- AVFoundation decode returns the VideoToolbox-decoded, IOSurface-backed
+  `CVPixelBufferRef` in `native_handle` (NV12 by default) without a CPU copy.
+- AVFoundation H.264/HEVC MP4/MOV encode appends a caller-provided
+  `CVPixelBufferRef` straight into the `AVAssetWriter`, avoiding a readback.
 
 The optional `avb_dmabuf_roundtrip` CTest smoke validates all Linux VAAPI
 interchange paths when the runtime stack supports them:

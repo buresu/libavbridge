@@ -110,7 +110,11 @@ static void fill_platform(avb_decoder_capabilities &out, Container c) {
     add_audio_codec(out, AVB_AUDIO_CODEC_MP3, c);
     add_software_pixel_formats(out);
     add_memory(out, AVB_VIDEO_MEMORY_CPU);
+    if (!audio_only_container(c))
+        add_memory(out, AVB_VIDEO_MEMORY_NATIVE);
     add_device(out, AVB_HW_DEVICE_AUTO);
+    if (!audio_only_container(c))
+        add_device(out, AVB_HW_DEVICE_VIDEOTOOLBOX);
 }
 
 static void fill_mediafoundation(avb_decoder_capabilities &out, Container c) {

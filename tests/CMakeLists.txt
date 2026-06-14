@@ -53,6 +53,12 @@ if(AVB_BUILD_SHARED)
     target_compile_definitions(avb_dmabuf_roundtrip PRIVATE AVB_USING_SHARED)
 endif()
 
+add_executable(avb_native_roundtrip native_roundtrip.cpp)
+target_link_libraries(avb_native_roundtrip PRIVATE avbridge)
+if(AVB_BUILD_SHARED)
+    target_compile_definitions(avb_native_roundtrip PRIVATE AVB_USING_SHARED)
+endif()
+
 find_program(FFMPEG_EXECUTABLE ffmpeg)
 
 if(FFMPEG_EXECUTABLE)
@@ -195,6 +201,7 @@ if(FFMPEG_EXECUTABLE)
                          avb_mediafoundation_codec_fixtures)
     endif()
     add_dependencies(avb_dmabuf_roundtrip avb_conformance_fixture)
+    add_dependencies(avb_native_roundtrip avb_conformance_fixture)
 
     # The conformance contract is backend-agnostic, so run it against every
     # backend compiled into this build (each skips itself if not present). A
@@ -279,6 +286,11 @@ if(FFMPEG_EXECUTABLE)
         add_test(NAME custom_encoder_avfoundation
                  COMMAND avb_custom_encoder "${AVB_OUT}/custom_encoder_avfoundation.mov" avfoundation)
         set_tests_properties(custom_encoder_avfoundation PROPERTIES SKIP_RETURN_CODE 77)
+        add_test(NAME native_roundtrip_avfoundation
+                 COMMAND avb_native_roundtrip "${AVB_FIXTURE}"
+                         "${AVB_OUT}/native_roundtrip_avfoundation.mp4"
+                         avfoundation avfoundation)
+        set_tests_properties(native_roundtrip_avfoundation PROPERTIES SKIP_RETURN_CODE 77)
     endif()
 else()
     message(WARNING

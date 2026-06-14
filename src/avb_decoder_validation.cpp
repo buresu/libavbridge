@@ -156,11 +156,20 @@ avb_result avb_decoder_validate_options(const avb_decode_options *options,
         options->video_format == AVB_PIXEL_FORMAT_NV12 &&
         (options->hardware_device == AVB_HW_DEVICE_AUTO ||
          options->hardware_device == AVB_HW_DEVICE_D3D11VA);
+    // AVFoundation hands back the decoder's IOSurface-backed CVPixelBuffer for
+    // NATIVE output via VideoToolbox; the format is the decoder's own (NV12 by
+    // default) so it is not constrained here.
+    const bool avfoundation_native =
+        out->backend == AVB_BACKEND_AVFOUNDATION &&
+        options->video_memory == AVB_VIDEO_MEMORY_NATIVE &&
+        (options->hardware_device == AVB_HW_DEVICE_AUTO ||
+         options->hardware_device == AVB_HW_DEVICE_VIDEOTOOLBOX);
+    const bool platform_native = mediafoundation_native || avfoundation_native;
     if (platform_backend(out->backend) &&
         ((options->video_memory != AVB_VIDEO_MEMORY_CPU &&
-          !mediafoundation_native) ||
+          !platform_native) ||
          (options->hardware_policy == AVB_HARDWARE_REQUIRE &&
-          !mediafoundation_native))) {
+          !platform_native))) {
         set_result(*out, AVB_ERROR_OPEN_FAILED,
                    "The platform backend cannot produce the requested native video output.");
         return AVB_OK;

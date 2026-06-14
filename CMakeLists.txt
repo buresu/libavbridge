@@ -113,6 +113,9 @@ if(AVB_ENABLE_AVFOUNDATION)
         "-framework CoreMedia"
         "-framework CoreVideo"
         "-framework Foundation"
+        "-framework VideoToolbox"
+        "-framework AudioToolbox"
+        "-framework CoreFoundation"
     )
 endif()
 

@@ -257,17 +257,29 @@ avb_result avb_encoder_validate_options(const char *path,
                            "The platform backend does not support this built-in audio codec/container.");
                 return AVB_OK;
             }
-            if (options->video.enable &&
-                options->video.input_memory != AVB_VIDEO_MEMORY_CPU &&
-                (out->backend != AVB_BACKEND_MEDIAFOUNDATION ||
-                 options->video.input_memory != AVB_VIDEO_MEMORY_NATIVE ||
-                 options->video.input_format != AVB_PIXEL_FORMAT_NV12 ||
-                 (container != Container::ivf &&
-                  container != Container::mp4 &&
-                  container != Container::mov))) {
-                set_result(*out, AVB_ERROR_OPEN_FAILED,
-                           "The platform backend cannot consume the requested native video input.");
-                return AVB_OK;
+            {
+                const bool mf_native_in =
+                    out->backend == AVB_BACKEND_MEDIAFOUNDATION &&
+                    options->video.input_memory == AVB_VIDEO_MEMORY_NATIVE &&
+                    options->video.input_format == AVB_PIXEL_FORMAT_NV12 &&
+                    (container == Container::ivf ||
+                     container == Container::mp4 ||
+                     container == Container::mov);
+                // AVFoundation appends the caller's IOSurface-backed
+                // CVPixelBuffer straight into the AVAssetWriter (zero-copy).
+                const bool avf_native_in =
+                    out->backend == AVB_BACKEND_AVFOUNDATION &&
+                    options->video.input_memory == AVB_VIDEO_MEMORY_NATIVE &&
+                    (container == Container::mp4 ||
+                     container == Container::mov ||
+                     container == Container::unknown);
+                if (options->video.enable &&
+                    options->video.input_memory != AVB_VIDEO_MEMORY_CPU &&
+                    !mf_native_in && !avf_native_in) {
+                    set_result(*out, AVB_ERROR_OPEN_FAILED,
+                               "The platform backend cannot consume the requested native video input.");
+                    return AVB_OK;
+                }
             }
             if (out->backend == AVB_BACKEND_MEDIAFOUNDATION &&
                 options->video.enable &&

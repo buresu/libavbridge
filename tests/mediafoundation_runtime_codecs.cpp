@@ -1182,8 +1182,10 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+#ifdef _WIN32
     if (smoke_native_source_decoder(argv[2], "HEVC MP4") != 0)
         return 1;
+#endif
 
     std::printf("Media Foundation HEVC runtime encode smoke passed (%d frames)\n",
                 frames);

@@ -16,6 +16,13 @@
 #include <wrl/client.h>
 #endif
 
+#if defined(AVB_ENABLE_AVFOUNDATION)
+#include <VideoToolbox/VideoToolbox.h>
+#include <AudioToolbox/AudioToolbox.h>
+#include <CoreMedia/CoreMedia.h>
+#include <CoreFoundation/CoreFoundation.h>
+#endif
+
 namespace {
 
 using avb::detail::Container;
@@ -829,6 +836,131 @@ static void fill_gstreamer_encoder_runtime(avb_encoder_capabilities &out,
 }
 #endif
 
+#if defined(AVB_ENABLE_AVFOUNDATION)
+// AVFoundation runtime probing leans on VideoToolbox (VTCopyVideoEncoderList /
+// VTIsHardwareDecodeSupported) and AudioToolbox (kAudioFormatProperty_Decoders /
+// _Encoders) so the reported codecs reflect what this macOS runtime can really
+// do instead of a static H.264/HEVC/AAC assumption. AVAssetReader/AVAssetWriter
+// can still reject a concrete session over container, profile, or memory limits.
+static bool vt_has_audio_codec(UInt32 format_id, bool encoder) {
+    if (format_id == 0) return false;
+    UInt32 size = 0;
+    OSStatus st = AudioFormatGetPropertyInfo(
+        encoder ? kAudioFormatProperty_Encoders : kAudioFormatProperty_Decoders,
+        sizeof(UInt32), &format_id, &size);
+    return st == noErr && size > 0;
+}
+
+static UInt32 vt_audio_format_id(avb_audio_codec codec) {
+    switch (codec) {
+        case AVB_AUDIO_CODEC_AAC:  return kAudioFormatMPEG4AAC;
+        case AVB_AUDIO_CODEC_MP3:  return kAudioFormatMPEGLayer3;
+        case AVB_AUDIO_CODEC_FLAC: return kAudioFormatFLAC;
+        case AVB_AUDIO_CODEC_OPUS: return kAudioFormatOpus;
+        default:                   return 0;
+    }
+}
+
+static CMVideoCodecType vt_video_codec_type(avb_video_codec codec) {
+    switch (codec) {
+        case AVB_VIDEO_CODEC_H264: return kCMVideoCodecType_H264;
+        case AVB_VIDEO_CODEC_HEVC: return kCMVideoCodecType_HEVC;
+        case AVB_VIDEO_CODEC_VP9:  return (CMVideoCodecType)'vp09';
+        case AVB_VIDEO_CODEC_AV1:  return (CMVideoCodecType)'av01';
+        default:                   return 0;
+    }
+}
+
+static bool vt_has_video_encoder(CMVideoCodecType type) {
+    if (type == 0) return false;
+    CFArrayRef list = nullptr;
+    if (VTCopyVideoEncoderList(nullptr, &list) != noErr || !list) return false;
+    bool found = false;
+    CFIndex count = CFArrayGetCount(list);
+    for (CFIndex i = 0; i < count && !found; ++i) {
+        CFDictionaryRef entry = (CFDictionaryRef)CFArrayGetValueAtIndex(list, i);
+        CFNumberRef codec_type = (CFNumberRef)CFDictionaryGetValue(
+            entry, kVTVideoEncoderList_CodecType);
+        int32_t value = 0;
+        if (codec_type &&
+            CFNumberGetValue(codec_type, kCFNumberSInt32Type, &value) &&
+            (CMVideoCodecType)value == type) {
+            found = true;
+        }
+    }
+    CFRelease(list);
+    return found;
+}
+
+static bool vt_can_decode(avb_video_codec codec) {
+    switch (codec) {
+        // VideoToolbox always provides H.264/HEVC decode on macOS.
+        case AVB_VIDEO_CODEC_H264:
+        case AVB_VIDEO_CODEC_HEVC:
+            return true;
+        // VP9/AV1 decode is only present when the runtime advertises hardware
+        // support (Apple silicon); AVFoundation has no software fallback for them.
+        case AVB_VIDEO_CODEC_VP9:
+        case AVB_VIDEO_CODEC_AV1:
+            return VTIsHardwareDecodeSupported(vt_video_codec_type(codec));
+        default:
+            return false;
+    }
+}
+
+static void fill_avfoundation_decoder_runtime(avb_decoder_capabilities &out,
+                                              Container c) {
+    static const avb_video_codec video[] = {
+        AVB_VIDEO_CODEC_H264, AVB_VIDEO_CODEC_HEVC,
+        AVB_VIDEO_CODEC_VP9, AVB_VIDEO_CODEC_AV1
+    };
+    static const avb_audio_codec audio[] = {
+        AVB_AUDIO_CODEC_AAC, AVB_AUDIO_CODEC_MP3, AVB_AUDIO_CODEC_FLAC,
+        AVB_AUDIO_CODEC_OPUS, AVB_AUDIO_CODEC_PCM_S16, AVB_AUDIO_CODEC_PCM_F32
+    };
+    if (!audio_only_container(c)) {
+        for (avb_video_codec codec : video) {
+            if (vt_can_decode(codec)) add_video_codec(out, codec, c);
+        }
+    }
+    for (avb_audio_codec codec : audio) {
+        if (codec == AVB_AUDIO_CODEC_PCM_S16 ||
+            codec == AVB_AUDIO_CODEC_PCM_F32 ||
+            vt_has_audio_codec(vt_audio_format_id(codec), false)) {
+            add_audio_codec(out, codec, c);
+        }
+    }
+    add_software_pixel_formats(out);
+    add_memory(out, AVB_VIDEO_MEMORY_CPU);
+    if (!audio_only_container(c))
+        add_memory(out, AVB_VIDEO_MEMORY_NATIVE);
+    add_device(out, AVB_HW_DEVICE_AUTO);
+    add_device(out, AVB_HW_DEVICE_VIDEOTOOLBOX);
+}
+
+static void fill_avfoundation_encoder_runtime(avb_encoder_capabilities &out,
+                                              Container c) {
+    static const avb_video_codec video[] = {
+        AVB_VIDEO_CODEC_H264, AVB_VIDEO_CODEC_HEVC
+    };
+    if (!audio_only_container(c)) {
+        for (avb_video_codec codec : video) {
+            if (vt_has_video_encoder(vt_video_codec_type(codec)))
+                add_video_codec(out, codec, c);
+        }
+    }
+    // AVAssetWriter only produces AAC built-in audio across its containers.
+    if (vt_has_audio_codec(kAudioFormatMPEG4AAC, true))
+        add_audio_codec(out, AVB_AUDIO_CODEC_AAC, c);
+
+    add_memory(out, AVB_VIDEO_MEMORY_CPU);
+    if (!audio_only_container(c))
+        add_memory(out, AVB_VIDEO_MEMORY_NATIVE);
+    add_device(out, AVB_HW_DEVICE_AUTO);
+    add_device(out, AVB_HW_DEVICE_VIDEOTOOLBOX);
+}
+#endif
+
 } // namespace
 
 extern "C" {
@@ -912,7 +1044,11 @@ avb_result avb_decoder_probe_runtime_capabilities(
 #endif
 
         case AVB_BACKEND_AVFOUNDATION:
+#if defined(AVB_ENABLE_AVFOUNDATION)
+            fill_avfoundation_decoder_runtime(*out, container);
+#else
             fill_platform_decoder(*out, container);
+#endif
             break;
 
         default:
@@ -1006,7 +1142,11 @@ avb_result avb_encoder_probe_runtime_capabilities(
 #endif
 
         case AVB_BACKEND_AVFOUNDATION:
+#if defined(AVB_ENABLE_AVFOUNDATION)
+            fill_avfoundation_encoder_runtime(*out, container);
+#else
             fill_platform_encoder(*out, container);
+#endif
             break;
 
         default:
