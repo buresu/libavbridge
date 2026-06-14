@@ -34,6 +34,7 @@ set(AVB_SOURCES
     src/avb_core.cpp
     src/avb_encoder.cpp
     src/avb_encoder_validation.cpp
+    src/avb_encoder_validation_backend.cpp
     src/avb_capabilities.cpp
     src/avb_probe.cpp
     src/avb_runtime_capabilities.cpp
