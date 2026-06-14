@@ -1,8 +1,22 @@
-#include "avb_decoder.hpp"
 #include "avb_decoder_impl.hpp"
 
 #include <cstdio>
 #include <cstring>
+#include <memory>
+#include <string>
+
+struct avb_decoder {
+    std::unique_ptr<AvbDecoderImpl> impl;
+    std::string last_error;
+    double duration_sec = 0.0;
+    bool audio_available = false;
+    bool audio_eof = false;
+    void *mem_io = nullptr;
+
+    void set_error(const char *message) {
+        last_error = message ? message : "";
+    }
+};
 
 namespace {
 

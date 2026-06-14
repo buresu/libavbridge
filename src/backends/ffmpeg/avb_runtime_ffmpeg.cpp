@@ -1,5 +1,5 @@
 #include "backends/ffmpeg/avb_runtime_ffmpeg.hpp"
-#include "avb_capability_builder.hpp"
+#include "avb_media_rules.hpp"
 
 #if defined(AVB_ENABLE_FFMPEG)
 

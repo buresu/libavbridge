@@ -1,7 +1,7 @@
 #include "avb_encoder_mediafoundation.hpp"
 #include "avb_mediafoundation_common.hpp"
 #include "avb_mediafoundation_ivf.hpp"
-#include "avb_capability_common.hpp"
+#include "avb_media_rules.hpp"
 #include "avb_video_plugins.hpp"
 
 #ifdef _WIN32

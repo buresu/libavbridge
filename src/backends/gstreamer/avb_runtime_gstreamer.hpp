@@ -1,6 +1,6 @@
 #pragma once
 
-#include "avb_capability_common.hpp"
+#include "avb_media_rules.hpp"
 
 // Runtime element and allocator discovery owned by the GStreamer backend.
 

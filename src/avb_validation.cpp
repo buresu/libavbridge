@@ -1,5 +1,5 @@
 #include "avbridge.h"
-#include "avb_capability_common.hpp"
+#include "avb_media_rules.hpp"
 #include "avb_video_plugins.hpp"
 
 namespace {

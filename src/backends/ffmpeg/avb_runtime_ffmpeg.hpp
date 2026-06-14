@@ -1,6 +1,6 @@
 #pragma once
 
-#include "avb_capability_common.hpp"
+#include "avb_media_rules.hpp"
 
 // Runtime codec and hardware discovery owned by the FFmpeg backend.
 

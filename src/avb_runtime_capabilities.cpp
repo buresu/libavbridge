@@ -1,5 +1,5 @@
 #include "avbridge.h"
-#include "avb_capability_common.hpp"
+#include "avb_media_rules.hpp"
 
 #if defined(AVB_ENABLE_FFMPEG)
 #include "backends/ffmpeg/avb_runtime_ffmpeg.hpp"

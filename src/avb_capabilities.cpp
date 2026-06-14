@@ -1,6 +1,5 @@
 #include "avbridge.h"
-#include "avb_capability_builder.hpp"
-#include "avb_capability_common.hpp"
+#include "avb_media_rules.hpp"
 
 using avb::detail::Container;
 using avb::detail::audio_only_container;

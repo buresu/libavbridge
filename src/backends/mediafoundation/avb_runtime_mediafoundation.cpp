@@ -1,5 +1,5 @@
 #include "backends/mediafoundation/avb_runtime_mediafoundation.hpp"
-#include "avb_capability_builder.hpp"
+#include "avb_media_rules.hpp"
 
 #if defined(AVB_ENABLE_MEDIAFOUNDATION)
 

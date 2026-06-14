@@ -1,5 +1,5 @@
 #include "backends/gstreamer/avb_runtime_gstreamer.hpp"
-#include "avb_capability_builder.hpp"
+#include "avb_media_rules.hpp"
 
 #if defined(AVB_ENABLE_GSTREAMER)
 
