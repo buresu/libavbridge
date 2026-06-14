@@ -113,6 +113,31 @@ static void fill_platform(avb_decoder_capabilities &out, Container c) {
     add_device(out, AVB_HW_DEVICE_AUTO);
 }
 
+static void fill_mediafoundation(avb_decoder_capabilities &out, Container c) {
+    if (c == Container::ivf) {
+        add_video_codec(out, AVB_VIDEO_CODEC_VP8, c);
+        add_video_codec(out, AVB_VIDEO_CODEC_VP9, c);
+        add_video_codec(out, AVB_VIDEO_CODEC_AV1, c);
+        add_software_pixel_formats(out);
+        add_memory(out, AVB_VIDEO_MEMORY_CPU);
+        add_memory(out, AVB_VIDEO_MEMORY_NATIVE);
+        add_device(out, AVB_HW_DEVICE_AUTO);
+        add_device(out, AVB_HW_DEVICE_D3D11VA);
+        return;
+    }
+    if (!audio_only_container(c)) {
+        add_common_video_codecs(out, c);
+    }
+    add_common_audio_codecs(out, c);
+    add_software_pixel_formats(out);
+    add_memory(out, AVB_VIDEO_MEMORY_CPU);
+    if (!audio_only_container(c))
+        add_memory(out, AVB_VIDEO_MEMORY_NATIVE);
+    add_device(out, AVB_HW_DEVICE_AUTO);
+    if (!audio_only_container(c))
+        add_device(out, AVB_HW_DEVICE_D3D11VA);
+}
+
 } // namespace
 
 extern "C" {
@@ -141,8 +166,10 @@ avb_result avb_decoder_query_capabilities(avb_backend backend, const char *path,
         case AVB_BACKEND_GSTREAMER:
             fill_gstreamer(*out, container);
             break;
-        case AVB_BACKEND_AVFOUNDATION:
         case AVB_BACKEND_MEDIAFOUNDATION:
+            fill_mediafoundation(*out, container);
+            break;
+        case AVB_BACKEND_AVFOUNDATION:
             fill_platform(*out, container);
             break;
         default:

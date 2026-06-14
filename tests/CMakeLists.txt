@@ -38,6 +38,15 @@ if(AVB_BUILD_SHARED)
     target_compile_definitions(avb_custom_encoder PRIVATE AVB_USING_SHARED)
 endif()
 
+add_executable(avb_mediafoundation_runtime_codecs mediafoundation_runtime_codecs.cpp)
+target_link_libraries(avb_mediafoundation_runtime_codecs PRIVATE avbridge)
+if(WIN32)
+    target_link_libraries(avb_mediafoundation_runtime_codecs PRIVATE d3d11 dxgi)
+endif()
+if(AVB_BUILD_SHARED)
+    target_compile_definitions(avb_mediafoundation_runtime_codecs PRIVATE AVB_USING_SHARED)
+endif()
+
 add_executable(avb_dmabuf_roundtrip dmabuf_roundtrip.cpp)
 target_link_libraries(avb_dmabuf_roundtrip PRIVATE avbridge)
 if(AVB_BUILD_SHARED)
@@ -62,18 +71,138 @@ if(FFMPEG_EXECUTABLE)
         VERBATIM
     )
     add_custom_target(avb_conformance_fixture DEPENDS "${AVB_FIXTURE}")
+    set(AVB_MF_RUNTIME_CODEC_ARGS)
+    if(WIN32 AND AVB_ENABLE_MEDIAFOUNDATION)
+        execute_process(
+            COMMAND ${FFMPEG_EXECUTABLE} -hide_banner -encoders
+            OUTPUT_VARIABLE AVB_FFMPEG_ENCODERS
+            ERROR_QUIET
+        )
+
+        set(AVB_MF_AUDIO_FIXTURES)
+        set(AVB_MF_VIDEO_FIXTURES)
+        set(AVB_MF_FLAC_FIXTURE "${AVB_OUT}/runtime_codecs_mediafoundation_flac.flac")
+        add_custom_command(
+            OUTPUT "${AVB_MF_FLAC_FIXTURE}"
+            COMMAND ${FFMPEG_EXECUTABLE} -y -loglevel error
+                    -f lavfi -i "sine=frequency=660:duration=1"
+                    -c:a flac -ar 44100 -ac 1
+                    "${AVB_MF_FLAC_FIXTURE}"
+            COMMENT "Generating Media Foundation FLAC runtime fixture"
+            VERBATIM
+        )
+        list(APPEND AVB_MF_AUDIO_FIXTURES "${AVB_MF_FLAC_FIXTURE}")
+        list(APPEND AVB_MF_RUNTIME_CODEC_ARGS
+             audio flac "${AVB_MF_FLAC_FIXTURE}" flac)
+
+        if(AVB_FFMPEG_ENCODERS MATCHES "libopus")
+            set(AVB_MF_OPUS_FIXTURE "${AVB_OUT}/runtime_codecs_mediafoundation_opus.ogg")
+            add_custom_command(
+                OUTPUT "${AVB_MF_OPUS_FIXTURE}"
+                COMMAND ${FFMPEG_EXECUTABLE} -y -loglevel error
+                        -f lavfi -i "sine=frequency=550:duration=1"
+                        -c:a libopus -ar 48000 -ac 1
+                        "${AVB_MF_OPUS_FIXTURE}"
+                COMMENT "Generating Media Foundation Opus runtime fixture"
+                VERBATIM
+            )
+            list(APPEND AVB_MF_AUDIO_FIXTURES "${AVB_MF_OPUS_FIXTURE}")
+            list(APPEND AVB_MF_RUNTIME_CODEC_ARGS
+                 audio opus "${AVB_MF_OPUS_FIXTURE}" opus)
+        endif()
+
+        if(AVB_FFMPEG_ENCODERS MATCHES "libvorbis")
+            set(AVB_MF_VORBIS_FIXTURE "${AVB_OUT}/runtime_codecs_mediafoundation_vorbis.ogg")
+            add_custom_command(
+                OUTPUT "${AVB_MF_VORBIS_FIXTURE}"
+                COMMAND ${FFMPEG_EXECUTABLE} -y -loglevel error
+                        -f lavfi -i "sine=frequency=770:duration=1"
+                        -c:a libvorbis -ar 44100 -ac 1
+                        "${AVB_MF_VORBIS_FIXTURE}"
+                COMMENT "Generating Media Foundation Vorbis runtime fixture"
+                VERBATIM
+            )
+            list(APPEND AVB_MF_AUDIO_FIXTURES "${AVB_MF_VORBIS_FIXTURE}")
+            list(APPEND AVB_MF_RUNTIME_CODEC_ARGS
+                 audio vorbis "${AVB_MF_VORBIS_FIXTURE}" "*")
+        endif()
+
+        if(AVB_FFMPEG_ENCODERS MATCHES "libvpx")
+            set(AVB_MF_VP8_FIXTURE "${AVB_OUT}/runtime_codecs_mediafoundation_vp8.webm")
+            add_custom_command(
+                OUTPUT "${AVB_MF_VP8_FIXTURE}"
+                COMMAND ${FFMPEG_EXECUTABLE} -y -loglevel error
+                        -f lavfi -i "testsrc=duration=1:size=160x120:rate=15"
+                        -an -c:v libvpx -pix_fmt yuv420p -b:v 500k
+                        "${AVB_MF_VP8_FIXTURE}"
+                COMMENT "Generating Media Foundation VP8 runtime fixture"
+                VERBATIM
+            )
+            list(APPEND AVB_MF_VIDEO_FIXTURES "${AVB_MF_VP8_FIXTURE}")
+            list(APPEND AVB_MF_RUNTIME_CODEC_ARGS
+                 video vp8 "${AVB_MF_VP8_FIXTURE}" vp8)
+        endif()
+
+        if(AVB_FFMPEG_ENCODERS MATCHES "libvpx-vp9")
+            set(AVB_MF_VP9_FIXTURE "${AVB_OUT}/runtime_codecs_mediafoundation_vp9.webm")
+            add_custom_command(
+                OUTPUT "${AVB_MF_VP9_FIXTURE}"
+                COMMAND ${FFMPEG_EXECUTABLE} -y -loglevel error
+                        -f lavfi -i "testsrc=duration=1:size=160x120:rate=15"
+                        -an -c:v libvpx-vp9 -pix_fmt yuv420p -b:v 500k
+                        "${AVB_MF_VP9_FIXTURE}"
+                COMMENT "Generating Media Foundation VP9 runtime fixture"
+                VERBATIM
+            )
+            list(APPEND AVB_MF_VIDEO_FIXTURES "${AVB_MF_VP9_FIXTURE}")
+            list(APPEND AVB_MF_RUNTIME_CODEC_ARGS
+                 video vp9 "${AVB_MF_VP9_FIXTURE}" vp9)
+        endif()
+
+        if(AVB_FFMPEG_ENCODERS MATCHES "libaom-av1")
+            set(AVB_MF_AV1_FIXTURE "${AVB_OUT}/runtime_codecs_mediafoundation_av1.mkv")
+            add_custom_command(
+                OUTPUT "${AVB_MF_AV1_FIXTURE}"
+                COMMAND ${FFMPEG_EXECUTABLE} -y -loglevel error
+                        -f lavfi -i "testsrc=duration=1:size=320x240:rate=15"
+                        -an -c:v libaom-av1 -pix_fmt yuv420p -crf 38 -b:v 0
+                        -cpu-used 8
+                        "${AVB_MF_AV1_FIXTURE}"
+                COMMENT "Generating Media Foundation AV1 runtime fixture"
+                VERBATIM
+            )
+            list(APPEND AVB_MF_VIDEO_FIXTURES "${AVB_MF_AV1_FIXTURE}")
+            list(APPEND AVB_MF_RUNTIME_CODEC_ARGS
+                 video av1 "${AVB_MF_AV1_FIXTURE}" av1)
+        endif()
+
+        if(AVB_MF_AUDIO_FIXTURES OR AVB_MF_VIDEO_FIXTURES)
+            add_custom_target(avb_mediafoundation_codec_fixtures
+                              DEPENDS ${AVB_MF_AUDIO_FIXTURES}
+                                      ${AVB_MF_VIDEO_FIXTURES})
+        endif()
+    endif()
+
     add_dependencies(avb_conformance avb_conformance_fixture)
     add_dependencies(avb_roundtrip avb_conformance_fixture)
     add_dependencies(avb_codecs avb_conformance_fixture)
     add_dependencies(avb_io avb_conformance_fixture)
     add_dependencies(avb_custom_decoder avb_conformance_fixture)
     add_dependencies(avb_custom_encoder avb_conformance_fixture)
+    add_dependencies(avb_mediafoundation_runtime_codecs avb_conformance_fixture)
+    if(TARGET avb_mediafoundation_codec_fixtures)
+        add_dependencies(avb_mediafoundation_runtime_codecs
+                         avb_mediafoundation_codec_fixtures)
+    endif()
     add_dependencies(avb_dmabuf_roundtrip avb_conformance_fixture)
 
     # The conformance contract is backend-agnostic, so run it against every
     # backend compiled into this build (each skips itself if not present). A
     # SKIP_RETURN_CODE of 77 reports "not run" rather than a failure.
     set(_avb_backends auto)
+    if(WIN32 AND AVB_ENABLE_MEDIAFOUNDATION)
+        list(APPEND _avb_backends mediafoundation)
+    endif()
     if(AVB_ENABLE_GSTREAMER)
         list(APPEND _avb_backends gstreamer)
     endif()
@@ -100,6 +229,11 @@ if(FFMPEG_EXECUTABLE)
         add_test(NAME custom_decoder_mediafoundation
                  COMMAND avb_custom_decoder "${AVB_FIXTURE}" mediafoundation)
         set_tests_properties(custom_decoder_mediafoundation PROPERTIES SKIP_RETURN_CODE 77)
+        add_test(NAME runtime_codecs_mediafoundation
+                 COMMAND avb_mediafoundation_runtime_codecs "${AVB_FIXTURE}"
+                         "${AVB_OUT}/runtime_codecs_mediafoundation_hevc.mp4"
+                         ${AVB_MF_RUNTIME_CODEC_ARGS})
+        set_tests_properties(runtime_codecs_mediafoundation PROPERTIES SKIP_RETURN_CODE 77)
     endif()
     add_test(NAME custom_encoder_ffmpeg
              COMMAND avb_custom_encoder "${AVB_OUT}/custom_encoder_ffmpeg.mov" ffmpeg)

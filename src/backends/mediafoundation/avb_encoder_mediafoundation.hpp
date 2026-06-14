@@ -5,11 +5,9 @@
 #include <vector>
 
 // Windows Media Foundation encoder implementation. Wraps an IMFSinkWriter that muxes
-// H.264 video and AAC audio into an mp4/mov container. The Sink Writer loads the
-// platform H.264/AAC encoder MFTs and automatically inserts the color converter
-// (RGB32 -> NV12) the encoder needs, so callers can feed packed BGRA/RGBA (or
-// NV12) frames and interleaved float audio directly. Mirrors the FFmpeg and
-// AVFoundation encoder implementations.
+// H.264/HEVC video and supported audio into platform containers. The Sink
+// Writer loads the platform encoder MFTs and accepts CPU frames or D3D11 NV12
+// surfaces configured through avb_video_encode_params::hardware_context.
 class AvbEncoderMediaFoundation : public AvbEncoderImpl {
 public:
     AvbEncoderMediaFoundation();
@@ -23,6 +21,12 @@ public:
 
 private:
     struct Impl;
+    avb_result open_ivf_video(const char *path, const avb_encode_options &options);
+    avb_result process_video_mft_output();
+    avb_result drain_video_mft(long long time_hns, long long dur_hns);
+    avb_result wait_async_video_input();
+    avb_result drain_async_video_mft();
+    avb_result drain_audio_mft(long long time_hns, long long dur_hns);
     Impl *m_impl = nullptr;
     std::string m_last_error;
 };

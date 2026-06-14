@@ -29,16 +29,58 @@ unavailable and opening fails with a clear backend-unavailable error.
 
 ## Codec support
 
-The public encoder API can request H.264, HEVC, VP8, VP9, AV1, HAP, AAC, and
-Opus. Exact availability is backend, container, and runtime-install dependent:
+The public encoder API can request H.264, HEVC, VP8, VP9, AV1, HAP, AAC, Opus,
+MP3, FLAC, Vorbis, and PCM. Exact availability is backend, container, and
+runtime-install dependent:
 
-- FFmpeg can encode H.264, HEVC, VP8, VP9, AV1, HAP, AAC, and Opus when the
-  installed FFmpeg build provides the corresponding encoder.
-- GStreamer can encode H.264, HEVC, VP8, VP9, AV1, HAP, AAC, and Opus when the
-  required plugins are installed.
-- AVFoundation and Media Foundation built-in encoders are limited to H.264 and
-  HEVC. VP8, VP9, AV1, and HAP can still be produced through registered custom
-  video encoders when the selected container accepts the compressed packets.
+- FFmpeg can encode H.264, HEVC, VP8, VP9, AV1, HAP, AAC, Opus, MP3, FLAC,
+  Vorbis, and PCM when the installed FFmpeg build provides the corresponding
+  encoder.
+- GStreamer can encode H.264, HEVC, VP8, VP9, AV1, HAP, AAC, Opus, MP3, FLAC,
+  Vorbis, and PCM when the required plugins are installed.
+- AVFoundation built-in encoders are limited to H.264, HEVC, and AAC.
+- Media Foundation built-in encoders support H.264/HEVC video, AAC audio for
+  MP4/MOV/M4A-style outputs, MP3 audio through the MP3 ACM codec wrapper, FLAC
+  audio for native FLAC outputs, and PCM_S16/PCM_F32 audio for WAV outputs.
+  VP8/VP9/AV1 video can be encoded through Media Foundation encoder MFTs to
+  video-only IVF outputs when the installed runtime can configure them.
+  VP8, VP9, AV1, and HAP can
+  still be produced through registered custom video encoders when the selected
+  container accepts the compressed packets. Asynchronous encoder MFTs are driven
+  through their Media Foundation event stream.
+- Media Foundation directly demuxes IVF and decodes VP8, VP9, or AV1 through
+  installed decoder MFTs, including IVF files produced by this library.
+- Media Foundation IVF encoding accepts `AVB_VIDEO_MEMORY_NATIVE` NV12 frames
+  whose `native_handle` is an `ID3D11Texture2D*`, avoiding a CPU readback.
+- Media Foundation MP4/MOV H.264 and HEVC encoding accepts the same D3D11 NV12
+  frames when `avb_video_encode_params::hardware_context` points to the
+  texture's `ID3D11Device`.
+- Media Foundation decoding can return D3D11 NV12 textures for IVF and for
+  containers handled by Source Reader, such as MP4/MOV, WebM, and Matroska.
+  This covers H.264, HEVC, VP8, VP9, and AV1 when the installed decoder MFT
+  exposes D3D11 output. The texture and its owning sample remain valid until
+  `avb_decoder_release_video_frame`. Set
+  `avb_decode_options::hardware_context` to an `ID3D11Device*` to allocate
+  decoded textures on an application-owned device. Multiple native frames may
+  be held simultaneously and released in any order, including across a seek.
+- Media Foundation decoder runtime probing checks installed Media Foundation
+  Transform registrations. On current Windows runtimes this can expose H.264,
+  HEVC, VP8, VP9, AV1, AAC, Opus, MP3, FLAC, Vorbis, and PCM decode support,
+  depending on the installed OS components/codecs. The test suite exercises
+  VP8, VP9, AV1, FLAC, Opus, and Vorbis decode when the corresponding runtime
+  support is present.
+- Media Foundation may report an already-decoded PCM subtype for some source
+  handlers. In particular, Ogg/Vorbis can decode successfully while
+  `avb_media_info::audio.codec_name` reports `pcm` rather than `vorbis`.
+
+Applications can query the static and runtime codec surface with
+`avb_decoder_query_capabilities`, `avb_encoder_query_capabilities`,
+`avb_decoder_probe_runtime_capabilities`, and
+`avb_encoder_probe_runtime_capabilities`. Runtime probes inspect the loaded
+backend environment: FFmpeg libraries, GStreamer elements/plugins, and Media
+Foundation Transform (MFT) registrations on Windows. The lists are still
+container-filtered and are a probe, not a guarantee that every resolution,
+bitrate, profile, or media sink will accept a full session.
 
 ## Hardware video frames
 
@@ -86,6 +128,10 @@ Implemented native paths:
   native handle or by wrapping the `dmabuf_fd[]` planes into a new buffer.
 - FFmpeg encode can import DMABUF input into the VAAPI hardware encoder path by
   wrapping the plane descriptors as a DRM PRIME `AVFrame`.
+- Media Foundation decode can allocate NV12 `ID3D11Texture2D` frames on an
+  application-provided `ID3D11Device`.
+- Media Foundation H.264/HEVC MP4/MOV encode can consume those textures on the
+  same device without a CPU pixel copy.
 
 The optional `avb_dmabuf_roundtrip` CTest smoke validates all Linux VAAPI
 interchange paths when the runtime stack supports them:

@@ -62,6 +62,29 @@ static avb_result dummy_decode_packet(void *, const avb_encoded_packet *,
     return AVB_ERROR_AGAIN;
 }
 
+static int dummy_can_encode(const avb_video_encode_info *info) {
+    return info && info->codec == AVB_VIDEO_CODEC_HAP;
+}
+
+static avb_result dummy_encoder_open(void **out_ctx,
+                                     const avb_video_encode_info *,
+                                     avb_encoded_video_stream *out_stream) {
+    if (!out_ctx || !out_stream) return AVB_ERROR_INVALID_ARGUMENT;
+    *out_ctx = nullptr;
+    *out_stream = {};
+    out_stream->codec = AVB_VIDEO_CODEC_HAP;
+    out_stream->codec_tag =
+        ((uint32_t)'H') | ((uint32_t)'a' << 8) |
+        ((uint32_t)'p' << 16) | ((uint32_t)'1' << 24);
+    out_stream->codec_name = "hap";
+    return AVB_OK;
+}
+
+static avb_result dummy_encode_frame(void *, const avb_video_frame *,
+                                     double, avb_encoded_packet *) {
+    return AVB_ERROR_EOF;
+}
+
 static bool has_video_codec(const avb_decoder_capabilities &caps,
                             avb_video_codec codec) {
     for (int i = 0; i < caps.video_codec_count; ++i) {
@@ -243,7 +266,8 @@ int main(int argc, char *argv[]) {
         check(!has_audio_codec(caps, AVB_AUDIO_CODEC_AAC),
               "decoder capabilities excludes aac for ogg");
         if (caps.backend == AVB_BACKEND_FFMPEG ||
-            caps.backend == AVB_BACKEND_GSTREAMER) {
+            caps.backend == AVB_BACKEND_GSTREAMER ||
+            caps.backend == AVB_BACKEND_MEDIAFOUNDATION) {
             check(caps.can_decode_audio &&
                   has_audio_codec(caps, AVB_AUDIO_CODEC_OPUS) &&
                   has_audio_codec(caps, AVB_AUDIO_CODEC_VORBIS),
@@ -273,9 +297,53 @@ int main(int argc, char *argv[]) {
               "decoder runtime capabilities includes BGRA8 output");
         check(has_video_memory(caps, AVB_VIDEO_MEMORY_CPU),
               "decoder runtime capabilities includes CPU video memory");
+        if (caps.backend == AVB_BACKEND_MEDIAFOUNDATION) {
+            check(has_video_memory(caps, AVB_VIDEO_MEMORY_NATIVE),
+                  "MediaFoundation decoder runtime capabilities include native video memory");
+        }
         check(avb_decoder_probe_runtime_capabilities(backend, path, nullptr) ==
               AVB_ERROR_INVALID_ARGUMENT,
               "decoder_probe_runtime_capabilities rejects null output");
+
+        if (caps.backend == AVB_BACKEND_MEDIAFOUNDATION) {
+            check(avb_decoder_query_capabilities(backend, path, &caps) == AVB_OK &&
+                  caps.result == AVB_OK &&
+                  has_video_memory(caps, AVB_VIDEO_MEMORY_NATIVE),
+                  "MediaFoundation decoder static capabilities include native MP4 video");
+            check(avb_decoder_query_capabilities(backend, "input.webm", &caps) == AVB_OK &&
+                  caps.result == AVB_OK &&
+                  has_video_codec(caps, AVB_VIDEO_CODEC_VP8) &&
+                  has_video_codec(caps, AVB_VIDEO_CODEC_VP9) &&
+                  has_video_codec(caps, AVB_VIDEO_CODEC_AV1),
+                  "MediaFoundation decoder static capabilities include WebM video codecs");
+            check(avb_decoder_probe_runtime_capabilities(backend, "input.webm", &caps) == AVB_OK &&
+                  caps.result == AVB_OK &&
+                  !has_video_codec(caps, AVB_VIDEO_CODEC_H264) &&
+                  !has_video_codec(caps, AVB_VIDEO_CODEC_HEVC),
+                  "MediaFoundation decoder runtime capabilities filter WebM codecs");
+            check(avb_decoder_query_capabilities(backend, "input.wav", &caps) == AVB_OK &&
+                  caps.result == AVB_OK &&
+                  has_audio_codec(caps, AVB_AUDIO_CODEC_PCM_S16) &&
+                  has_audio_codec(caps, AVB_AUDIO_CODEC_PCM_F32),
+                  "MediaFoundation decoder static capabilities include WAV PCM");
+            check(avb_decoder_probe_runtime_capabilities(backend, "input.wav", &caps) == AVB_OK &&
+                  caps.result == AVB_OK &&
+                  has_audio_codec(caps, AVB_AUDIO_CODEC_PCM_S16) &&
+                  has_audio_codec(caps, AVB_AUDIO_CODEC_PCM_F32),
+                  "MediaFoundation decoder runtime capabilities include WAV PCM");
+            check(avb_decoder_query_capabilities(backend, "input.ivf", &caps) == AVB_OK &&
+                  caps.result == AVB_OK &&
+                  caps.can_decode_video == 1 &&
+                  caps.can_decode_audio == 0 &&
+                  has_video_memory(caps, AVB_VIDEO_MEMORY_NATIVE),
+                  "MediaFoundation decoder static capabilities include IVF video");
+            check(avb_decoder_probe_runtime_capabilities(backend, "input.ivf", &caps) == AVB_OK &&
+                  caps.result == AVB_OK &&
+                  caps.can_decode_video == 1 &&
+                  caps.can_decode_audio == 0 &&
+                  has_video_memory(caps, AVB_VIDEO_MEMORY_NATIVE),
+                  "MediaFoundation decoder runtime capabilities include IVF video");
+        }
     }
     {
         avb_encode_options e = avb_encode_options_default();
@@ -302,6 +370,76 @@ int main(int argc, char *argv[]) {
         check(avb_encoder_validate_options(path, &e, &v) == AVB_OK &&
               !v.ok && v.result == AVB_ERROR_INVALID_ARGUMENT,
               "encoder_validate_options rejects opus in mp4");
+        if (backend == AVB_BACKEND_MEDIAFOUNDATION) {
+            e = avb_encode_options_default();
+            e.backend = backend;
+            e.audio.enable = 1;
+            e.audio.codec = AVB_AUDIO_CODEC_MP3;
+            check(avb_encoder_validate_options("out.m4a", &e, &v) == AVB_OK &&
+                  !v.ok && v.result == AVB_ERROR_INVALID_ARGUMENT,
+                  "encoder_validate_options rejects MediaFoundation MP3 in M4A");
+            e = avb_encode_options_default();
+            e.backend = backend;
+            e.video.enable = 1;
+            e.video.width = 320;
+            e.video.height = 240;
+            e.video.frame_rate = 30.0;
+            e.video.codec = AVB_VIDEO_CODEC_VP9;
+            e.video.input_format = AVB_PIXEL_FORMAT_I420;
+            check(avb_encoder_validate_options("out.ivf", &e, &v) == AVB_OK &&
+                  v.ok && v.result == AVB_OK,
+                  "encoder_validate_options accepts MediaFoundation VP9 IVF");
+            e.video.codec = AVB_VIDEO_CODEC_AV1;
+            check(avb_encoder_validate_options("out.ivf", &e, &v) == AVB_OK &&
+                  v.ok && v.result == AVB_OK,
+                  "encoder_validate_options accepts MediaFoundation AV1 IVF");
+            e.video.input_format = AVB_PIXEL_FORMAT_NV12;
+            e.video.input_memory = AVB_VIDEO_MEMORY_NATIVE;
+            e.video.hardware_policy = AVB_HARDWARE_REQUIRE;
+            e.video.hardware_device = AVB_HW_DEVICE_D3D11VA;
+            check(avb_encoder_validate_options("out.ivf", &e, &v) == AVB_OK &&
+                  v.ok && v.result == AVB_OK,
+                  "encoder_validate_options accepts MediaFoundation native NV12 IVF");
+            e.video.codec = AVB_VIDEO_CODEC_H264;
+            check(avb_encoder_validate_options("out.mp4", &e, &v) == AVB_OK &&
+                  !v.ok && v.result == AVB_ERROR_INVALID_ARGUMENT,
+                  "encoder_validate_options requires MediaFoundation MP4 hardware context");
+            e.video.hardware_context = reinterpret_cast<void *>(1);
+            check(avb_encoder_validate_options("out.mp4", &e, &v) == AVB_OK &&
+                  v.ok && v.result == AVB_OK,
+                  "encoder_validate_options accepts MediaFoundation native H264 MP4");
+            e = avb_encode_options_default();
+            e.backend = backend;
+            e.audio.enable = 1;
+            e.audio.codec = AVB_AUDIO_CODEC_FLAC;
+            e.audio.sample_rate = 44100;
+            e.audio.channels = 1;
+            check(avb_encoder_validate_options("out.flac", &e, &v) == AVB_OK &&
+                  v.ok && v.result == AVB_OK,
+                  "encoder_validate_options accepts MediaFoundation FLAC");
+        }
+
+        avb_video_encoder_plugin plugin{};
+        plugin.struct_size = sizeof(plugin);
+        plugin.name = "dummy-custom-encoder";
+        plugin.can_encode = dummy_can_encode;
+        plugin.open = dummy_encoder_open;
+        plugin.encode_frame = dummy_encode_frame;
+        check(avb_register_video_encoder(&plugin) == AVB_OK,
+              "register dummy video encoder");
+        e = avb_encode_options_default();
+        e.backend = backend;
+        e.video.enable = 1;
+        e.video.width = 320;
+        e.video.height = 240;
+        e.video.frame_rate = 25.0;
+        e.video.codec = AVB_VIDEO_CODEC_HAP;
+        e.video.input_format = AVB_PIXEL_FORMAT_BGRA8;
+        check(avb_encoder_validate_options("custom.mov", &e, &v) == AVB_OK &&
+              v.ok && v.result == AVB_OK,
+              "encoder_validate_options accepts registered custom video encoder");
+        check(avb_unregister_video_encoder(&plugin) == AVB_OK,
+              "unregister dummy video encoder");
     }
     {
         avb_encoder_capabilities caps{};
@@ -317,6 +455,10 @@ int main(int argc, char *argv[]) {
               "encoder capabilities includes aac for mp4");
         check(has_video_memory(caps, AVB_VIDEO_MEMORY_CPU),
               "encoder capabilities includes CPU video memory");
+        if (caps.backend == AVB_BACKEND_MEDIAFOUNDATION) {
+            check(has_video_memory(caps, AVB_VIDEO_MEMORY_NATIVE),
+                  "MediaFoundation encoder capabilities include native MP4 input");
+        }
 
         check(avb_encoder_query_capabilities(backend, "out.ogg", &caps) == AVB_OK &&
               caps.result == AVB_OK,
@@ -355,9 +497,101 @@ int main(int argc, char *argv[]) {
               "encoder runtime capabilities includes aac for fixture");
         check(has_video_memory(caps, AVB_VIDEO_MEMORY_CPU),
               "encoder runtime capabilities includes CPU video memory");
+        if (caps.backend == AVB_BACKEND_MEDIAFOUNDATION) {
+            check(has_video_memory(caps, AVB_VIDEO_MEMORY_NATIVE),
+                  "MediaFoundation encoder runtime capabilities include native MP4 input");
+        }
         check(avb_encoder_probe_runtime_capabilities(backend, path, nullptr) ==
               AVB_ERROR_INVALID_ARGUMENT,
               "encoder_probe_runtime_capabilities rejects null output");
+
+        if (caps.backend == AVB_BACKEND_MEDIAFOUNDATION) {
+            check(avb_encoder_query_capabilities(backend, "out.webm", &caps) == AVB_OK &&
+                  caps.result == AVB_OK &&
+                  caps.can_encode_video == 0 &&
+                  caps.can_encode_audio == 0,
+                  "MediaFoundation encoder static capabilities do not overreport WebM");
+            check(avb_encoder_probe_runtime_capabilities(backend, "out.webm", &caps) == AVB_OK &&
+                  caps.result == AVB_OK &&
+                  caps.can_encode_video == 0 &&
+                  caps.can_encode_audio == 0,
+                  "MediaFoundation encoder runtime capabilities do not overreport WebM");
+            check(avb_encoder_query_capabilities(backend, "out.mkv", &caps) == AVB_OK &&
+                  caps.result == AVB_OK &&
+                  caps.can_encode_video == 0 &&
+                  caps.can_encode_audio == 0,
+                  "MediaFoundation encoder static capabilities do not overreport MKV");
+            check(avb_encoder_probe_runtime_capabilities(backend, "out.mkv", &caps) == AVB_OK &&
+                  caps.result == AVB_OK &&
+                  caps.can_encode_video == 0 &&
+                  caps.can_encode_audio == 0,
+                  "MediaFoundation encoder runtime capabilities do not overreport MKV");
+            check(avb_encoder_query_capabilities(backend, "out.ivf", &caps) == AVB_OK &&
+                  caps.result == AVB_OK &&
+                  caps.can_encode_video == 1 &&
+                  has_video_codec(caps, AVB_VIDEO_CODEC_VP8) &&
+                  has_video_codec(caps, AVB_VIDEO_CODEC_VP9) &&
+                  has_video_codec(caps, AVB_VIDEO_CODEC_AV1) &&
+                  has_video_memory(caps, AVB_VIDEO_MEMORY_NATIVE),
+                  "MediaFoundation encoder static capabilities include VP8/VP9/AV1 IVF");
+            check(avb_encoder_probe_runtime_capabilities(backend, "out.ivf", &caps) == AVB_OK &&
+                  caps.result == AVB_OK &&
+                  caps.can_encode_video == 1 &&
+                  has_video_codec(caps, AVB_VIDEO_CODEC_VP8) &&
+                  has_video_codec(caps, AVB_VIDEO_CODEC_VP9) &&
+                  has_video_memory(caps, AVB_VIDEO_MEMORY_NATIVE),
+                  "MediaFoundation encoder runtime capabilities include VP8/VP9 IVF");
+            check(avb_encoder_query_capabilities(backend, "out.mp3", &caps) == AVB_OK &&
+                  caps.result == AVB_OK &&
+                  caps.can_encode_video == 0 &&
+                  caps.can_encode_audio == 1 &&
+                  has_audio_codec(caps, AVB_AUDIO_CODEC_MP3),
+                  "MediaFoundation encoder static capabilities include MP3");
+            check(avb_encoder_probe_runtime_capabilities(backend, "out.mp3", &caps) == AVB_OK &&
+                  caps.result == AVB_OK &&
+                  caps.can_encode_video == 0 &&
+                  caps.can_encode_audio == 1 &&
+                  has_audio_codec(caps, AVB_AUDIO_CODEC_MP3),
+                  "MediaFoundation encoder runtime capabilities include MP3");
+            check(avb_encoder_query_capabilities(backend, "out.flac", &caps) == AVB_OK &&
+                  caps.result == AVB_OK &&
+                  caps.can_encode_video == 0 &&
+                  caps.can_encode_audio == 1 &&
+                  has_audio_codec(caps, AVB_AUDIO_CODEC_FLAC),
+                  "MediaFoundation encoder static capabilities include FLAC");
+            check(avb_encoder_probe_runtime_capabilities(backend, "out.flac", &caps) == AVB_OK &&
+                  caps.result == AVB_OK &&
+                  caps.can_encode_video == 0 &&
+                  caps.can_encode_audio == 1 &&
+                  has_audio_codec(caps, AVB_AUDIO_CODEC_FLAC),
+                  "MediaFoundation encoder runtime capabilities include FLAC");
+            check(avb_encoder_query_capabilities(backend, "out.m4a", &caps) == AVB_OK &&
+                  caps.result == AVB_OK &&
+                  caps.can_encode_audio == 1 &&
+                  has_audio_codec(caps, AVB_AUDIO_CODEC_AAC) &&
+                  !has_audio_codec(caps, AVB_AUDIO_CODEC_MP3),
+                  "MediaFoundation encoder static capabilities keep MP3 out of M4A");
+            check(avb_encoder_probe_runtime_capabilities(backend, "out.m4a", &caps) == AVB_OK &&
+                  caps.result == AVB_OK &&
+                  caps.can_encode_audio == 1 &&
+                  has_audio_codec(caps, AVB_AUDIO_CODEC_AAC) &&
+                  !has_audio_codec(caps, AVB_AUDIO_CODEC_MP3),
+                  "MediaFoundation encoder runtime capabilities keep MP3 out of M4A");
+            check(avb_encoder_query_capabilities(backend, "out.wav", &caps) == AVB_OK &&
+                  caps.result == AVB_OK &&
+                  caps.can_encode_video == 0 &&
+                  caps.can_encode_audio == 1 &&
+                  has_audio_codec(caps, AVB_AUDIO_CODEC_PCM_S16) &&
+                  has_audio_codec(caps, AVB_AUDIO_CODEC_PCM_F32),
+                  "MediaFoundation encoder static capabilities include WAV PCM");
+            check(avb_encoder_probe_runtime_capabilities(backend, "out.wav", &caps) == AVB_OK &&
+                  caps.result == AVB_OK &&
+                  caps.can_encode_video == 0 &&
+                  caps.can_encode_audio == 1 &&
+                  has_audio_codec(caps, AVB_AUDIO_CODEC_PCM_S16) &&
+                  has_audio_codec(caps, AVB_AUDIO_CODEC_PCM_F32),
+                  "MediaFoundation encoder runtime capabilities include WAV PCM");
+        }
     }
 
     avb_decode_options opts{};

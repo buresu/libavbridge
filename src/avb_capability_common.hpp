@@ -18,6 +18,7 @@ enum class Container {
     wav,
     flac,
     mp3,
+    ivf,
     unknown,
 };
 
@@ -45,6 +46,7 @@ inline Container container_from_path(const char *path, Container fallback) {
     if (ends_with_ci(path, ".wav"))  return Container::wav;
     if (ends_with_ci(path, ".flac")) return Container::flac;
     if (ends_with_ci(path, ".mp3"))  return Container::mp3;
+    if (ends_with_ci(path, ".ivf"))  return Container::ivf;
     if (ends_with_ci(path, ".mp4"))  return Container::mp4;
     return fallback;
 }
@@ -61,6 +63,7 @@ inline const char *container_name(Container c) {
         case Container::wav:     return "wav";
         case Container::flac:    return "flac";
         case Container::mp3:     return "mp3";
+        case Container::ivf:     return "ivf";
         case Container::unknown: return "unknown";
     }
     return "unknown";
@@ -109,6 +112,7 @@ inline bool container_accepts_video(Container c, avb_video_codec codec) {
                    codec == AVB_VIDEO_CODEC_HEVC ||
                    codec == AVB_VIDEO_CODEC_AV1;
         case Container::webm:
+        case Container::ivf:
             return codec == AVB_VIDEO_CODEC_VP8 ||
                    codec == AVB_VIDEO_CODEC_VP9 ||
                    codec == AVB_VIDEO_CODEC_AV1;

@@ -197,8 +197,9 @@ typedef struct avb_video_frame {
     int stride;
     int data_size;
 
-    /* Native/GPU handles. native_owner is for libavbridge's decoder-side
-     * lifetime tracking; applications should leave it NULL for encoder input. */
+    /* Native/GPU handles. native_owner is an opaque decoder-side frame lease
+     * used for lifetime tracking; applications must preserve it until release
+     * and should leave it NULL for encoder input. */
     void *native_handle;
     uint64_t native_handle_id;
     void *native_owner;
@@ -300,6 +301,10 @@ typedef struct avb_decode_options {
     /* 1 = allow registered custom video decoders to handle matching video
      * streams before the backend's built-in video decoder is opened. */
     int enable_custom_video_decoders;
+    /* Optional backend-native device context for decoded hardware frames.
+     * Media Foundation interprets this as ID3D11Device*. The caller retains
+     * ownership; the decoder takes its own reference while open. */
+    void *hardware_context;
 } avb_decode_options;
 
 typedef struct avb_decoder_validation {
@@ -363,6 +368,11 @@ typedef struct avb_video_encode_params {
     avb_video_memory_type input_memory;
     avb_hardware_policy hardware_policy;
     avb_hardware_device hardware_device;
+    /* Optional backend-native device context used to establish hardware
+     * interop before the first frame is submitted. For Media Foundation
+     * D3D11 native MP4/MOV input this is an ID3D11Device*. The caller retains
+     * ownership; the backend takes its own reference while the encoder is open. */
+    void *hardware_context;
 } avb_video_encode_params;
 
 typedef struct avb_audio_encode_params {
@@ -594,7 +604,8 @@ AVB_API avb_result avb_decoder_query_capabilities(
 /* Query decoder capabilities backed by the current runtime environment.
  * This has the same shape as avb_decoder_query_capabilities(), but filters the
  * lists to codecs/devices that can be found in the loaded runtime backend
- * (FFmpeg libraries, GStreamer elements/plugins, or platform runtime).
+ * (FFmpeg libraries, GStreamer elements/plugins, or platform runtime such as
+ * Media Foundation Transform registrations on Windows).
  *
  * It still does not inspect a concrete media stream; use avb_probe_media for
  * source-specific stream information. Returns AVB_OK when the probe itself ran
@@ -759,7 +770,8 @@ AVB_API avb_result avb_encoder_query_capabilities(
 /* Query encoder capabilities backed by the current runtime environment.
  * This has the same shape as avb_encoder_query_capabilities(), but filters the
  * lists to codecs/devices that can be found in the loaded runtime backend
- * (FFmpeg libraries, GStreamer elements/plugins, or platform runtime).
+ * (FFmpeg libraries, GStreamer elements/plugins, or platform runtime such as
+ * Media Foundation Transform registrations on Windows).
  *
  * It does not prove that a specific resolution, bitrate, or device accepts a
  * full encode session; avb_encoder_open remains the final authority. Returns

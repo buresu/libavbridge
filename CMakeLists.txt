@@ -103,7 +103,7 @@ target_include_directories(avbridge
 
 if(AVB_ENABLE_MEDIAFOUNDATION)
     target_compile_definitions(avbridge PRIVATE AVB_ENABLE_MEDIAFOUNDATION)
-    target_link_libraries(avbridge PRIVATE mfplat mf mfreadwrite mfuuid wmcodecdspuuid ole32)
+    target_link_libraries(avbridge PRIVATE mfplat mf mfreadwrite mfuuid wmcodecdspuuid ole32 d3d11 dxgi)
 endif()
 
 if(AVB_ENABLE_AVFOUNDATION)

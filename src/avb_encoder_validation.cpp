@@ -64,12 +64,32 @@ static bool platform_video_codec(avb_backend backend, avb_video_codec codec) {
     if (backend == AVB_BACKEND_AVFOUNDATION)
         return codec == AVB_VIDEO_CODEC_H264 || codec == AVB_VIDEO_CODEC_HEVC;
     if (backend == AVB_BACKEND_MEDIAFOUNDATION)
-        return codec == AVB_VIDEO_CODEC_H264 || codec == AVB_VIDEO_CODEC_HEVC;
+        return codec == AVB_VIDEO_CODEC_H264 ||
+               codec == AVB_VIDEO_CODEC_HEVC ||
+               codec == AVB_VIDEO_CODEC_VP8 ||
+               codec == AVB_VIDEO_CODEC_VP9 ||
+               codec == AVB_VIDEO_CODEC_AV1;
     return false;
 }
 
-static bool platform_container(Container c) {
+static bool platform_container(avb_backend backend, Container c) {
+    if (backend == AVB_BACKEND_MEDIAFOUNDATION &&
+        (c == Container::ivf || c == Container::wav ||
+         c == Container::flac || c == Container::mp3))
+        return true;
     return mp4_style_container(c);
+}
+
+static bool platform_audio_codec(avb_backend backend, Container c,
+                                 avb_audio_codec codec) {
+    if (codec == AVB_AUDIO_CODEC_AAC) return mp4_style_container(c);
+    if (backend == AVB_BACKEND_MEDIAFOUNDATION)
+        return (c == Container::wav &&
+               (codec == AVB_AUDIO_CODEC_PCM_S16 ||
+                 codec == AVB_AUDIO_CODEC_PCM_F32)) ||
+               (c == Container::flac && codec == AVB_AUDIO_CODEC_FLAC) ||
+               (c == Container::mp3 && codec == AVB_AUDIO_CODEC_MP3);
+    return false;
 }
 
 static bool has_custom_video_encoder(const avb_encode_options &options) {
@@ -207,9 +227,9 @@ avb_result avb_encoder_validate_options(const char *path,
 
         case AVB_BACKEND_AVFOUNDATION:
         case AVB_BACKEND_MEDIAFOUNDATION:
-            if (!platform_container(container)) {
+            if (!platform_container(out->backend, container)) {
                 set_result(*out, AVB_ERROR_INVALID_ARGUMENT,
-                           "The platform backend only validates MP4/MOV/M4A-style outputs.");
+                           "The platform backend does not validate this output container.");
                 return AVB_OK;
             }
             if (options->video.enable && !custom_video &&
@@ -218,16 +238,44 @@ avb_result avb_encoder_validate_options(const char *path,
                            "The platform backend supports only H.264/HEVC built-in video encoding.");
                 return AVB_OK;
             }
-            if (options->audio.enable && audio_codec != AVB_AUDIO_CODEC_AAC) {
+            if (out->backend == AVB_BACKEND_MEDIAFOUNDATION &&
+                container == Container::ivf) {
+                if (!options->video.enable ||
+                    (video_codec != AVB_VIDEO_CODEC_VP8 &&
+                     video_codec != AVB_VIDEO_CODEC_VP9 &&
+                     video_codec != AVB_VIDEO_CODEC_AV1) ||
+                    options->audio.enable) {
+                    set_result(*out, AVB_ERROR_INVALID_ARGUMENT,
+                               "Media Foundation IVF output supports video-only VP8/VP9/AV1.");
+                    return AVB_OK;
+                }
+                break;
+            }
+            if (options->audio.enable &&
+                !platform_audio_codec(out->backend, container, audio_codec)) {
                 set_result(*out, AVB_ERROR_INVALID_ARGUMENT,
-                           "The platform backend supports only AAC built-in audio encoding.");
+                           "The platform backend does not support this built-in audio codec/container.");
                 return AVB_OK;
             }
             if (options->video.enable &&
-                (options->video.input_memory != AVB_VIDEO_MEMORY_CPU ||
-                 options->video.hardware_policy == AVB_HARDWARE_REQUIRE)) {
+                options->video.input_memory != AVB_VIDEO_MEMORY_CPU &&
+                (out->backend != AVB_BACKEND_MEDIAFOUNDATION ||
+                 options->video.input_memory != AVB_VIDEO_MEMORY_NATIVE ||
+                 options->video.input_format != AVB_PIXEL_FORMAT_NV12 ||
+                 (container != Container::ivf &&
+                  container != Container::mp4 &&
+                  container != Container::mov))) {
                 set_result(*out, AVB_ERROR_OPEN_FAILED,
-                           "The platform backend does not implement native hardware video input yet.");
+                           "The platform backend cannot consume the requested native video input.");
+                return AVB_OK;
+            }
+            if (out->backend == AVB_BACKEND_MEDIAFOUNDATION &&
+                options->video.enable &&
+                options->video.input_memory == AVB_VIDEO_MEMORY_NATIVE &&
+                container != Container::ivf &&
+                !options->video.hardware_context) {
+                set_result(*out, AVB_ERROR_INVALID_ARGUMENT,
+                           "Media Foundation native MP4/MOV input requires an ID3D11Device hardware_context.");
                 return AVB_OK;
             }
             break;

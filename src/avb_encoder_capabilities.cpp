@@ -25,6 +25,18 @@ static void add_audio_codec(avb_encoder_capabilities &out, avb_audio_codec codec
     out.audio_codecs[out.audio_codec_count++] = codec;
 }
 
+static void add_audio_codec_unchecked(avb_encoder_capabilities &out,
+                                      avb_audio_codec codec) {
+    if (out.audio_codec_count >= AVB_MAX_CODEC_CAPS) return;
+    out.audio_codecs[out.audio_codec_count++] = codec;
+}
+
+static bool mediafoundation_video_container(Container c) {
+    return c == Container::any || c == Container::mp4 ||
+           c == Container::mov || c == Container::ivf ||
+           c == Container::unknown;
+}
+
 static void add_memory(avb_encoder_capabilities &out, avb_video_memory_type memory) {
     if (out.video_memory_count >= AVB_MAX_VIDEO_MEMORY_CAPS) return;
     out.video_memory[out.video_memory_count++] = memory;
@@ -96,6 +108,52 @@ static void fill_platform(avb_encoder_capabilities &out, Container c) {
     add_device(out, AVB_HW_DEVICE_AUTO);
 }
 
+static void fill_mediafoundation(avb_encoder_capabilities &out, Container c) {
+    if (mediafoundation_video_container(c)) {
+        add_video_codec(out, AVB_VIDEO_CODEC_H264, c);
+        add_video_codec(out, AVB_VIDEO_CODEC_HEVC, c);
+        add_video_codec(out, AVB_VIDEO_CODEC_VP8, c);
+        add_video_codec(out, AVB_VIDEO_CODEC_VP9, c);
+        if (c == Container::any || c == Container::ivf)
+            add_video_codec(out, AVB_VIDEO_CODEC_AV1, c);
+    }
+    switch (c) {
+        case Container::any:
+            add_audio_codec_unchecked(out, AVB_AUDIO_CODEC_AAC);
+            add_audio_codec_unchecked(out, AVB_AUDIO_CODEC_MP3);
+            add_audio_codec_unchecked(out, AVB_AUDIO_CODEC_FLAC);
+            add_audio_codec_unchecked(out, AVB_AUDIO_CODEC_PCM_S16);
+            add_audio_codec_unchecked(out, AVB_AUDIO_CODEC_PCM_F32);
+            break;
+        case Container::mp4:
+        case Container::mov:
+        case Container::m4a:
+        case Container::unknown:
+            add_audio_codec_unchecked(out, AVB_AUDIO_CODEC_AAC);
+            break;
+        case Container::mp3:
+            add_audio_codec_unchecked(out, AVB_AUDIO_CODEC_MP3);
+            break;
+        case Container::flac:
+            add_audio_codec_unchecked(out, AVB_AUDIO_CODEC_FLAC);
+            break;
+        case Container::wav:
+            add_audio_codec_unchecked(out, AVB_AUDIO_CODEC_PCM_S16);
+            add_audio_codec_unchecked(out, AVB_AUDIO_CODEC_PCM_F32);
+            break;
+        default:
+            break;
+    }
+    add_memory(out, AVB_VIDEO_MEMORY_CPU);
+    if (c == Container::any || c == Container::ivf ||
+        c == Container::mp4 || c == Container::mov)
+        add_memory(out, AVB_VIDEO_MEMORY_NATIVE);
+    add_device(out, AVB_HW_DEVICE_AUTO);
+    if (c == Container::any || c == Container::ivf ||
+        c == Container::mp4 || c == Container::mov)
+        add_device(out, AVB_HW_DEVICE_D3D11VA);
+}
+
 } // namespace
 
 extern "C" {
@@ -124,8 +182,10 @@ avb_result avb_encoder_query_capabilities(avb_backend backend, const char *path,
         case AVB_BACKEND_GSTREAMER:
             fill_gstreamer(*out, container);
             break;
-        case AVB_BACKEND_AVFOUNDATION:
         case AVB_BACKEND_MEDIAFOUNDATION:
+            fill_mediafoundation(*out, container);
+            break;
+        case AVB_BACKEND_AVFOUNDATION:
             fill_platform(*out, container);
             break;
         default:

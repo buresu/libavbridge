@@ -150,11 +150,19 @@ avb_result avb_decoder_validate_options(const avb_decode_options *options,
                    "Native/DMABUF video output requires hardware_policy PREFER or REQUIRE.");
         return AVB_OK;
     }
+    const bool mediafoundation_native =
+        out->backend == AVB_BACKEND_MEDIAFOUNDATION &&
+        options->video_memory == AVB_VIDEO_MEMORY_NATIVE &&
+        options->video_format == AVB_PIXEL_FORMAT_NV12 &&
+        (options->hardware_device == AVB_HW_DEVICE_AUTO ||
+         options->hardware_device == AVB_HW_DEVICE_D3D11VA);
     if (platform_backend(out->backend) &&
-        (options->video_memory != AVB_VIDEO_MEMORY_CPU ||
-         options->hardware_policy == AVB_HARDWARE_REQUIRE)) {
+        ((options->video_memory != AVB_VIDEO_MEMORY_CPU &&
+          !mediafoundation_native) ||
+         (options->hardware_policy == AVB_HARDWARE_REQUIRE &&
+          !mediafoundation_native))) {
         set_result(*out, AVB_ERROR_OPEN_FAILED,
-                   "The platform backend does not implement native hardware video output yet.");
+                   "The platform backend cannot produce the requested native video output.");
         return AVB_OK;
     }
     if (out->backend == AVB_BACKEND_GSTREAMER &&
