@@ -30,6 +30,12 @@ GUID mf_encode_video_subtype(
     avb_video_codec codec,
     std::uint32_t codec_tag);
 
+HRESULT mf_encode_set_mpeg4_video_sample_description(
+    IMFMediaType *type,
+    std::uint32_t codec_tag,
+    unsigned int width,
+    unsigned int height);
+
 const char *mf_encode_video_codec_name(avb_video_codec codec);
 bool mf_encode_is_ivf_codec(avb_video_codec codec);
 

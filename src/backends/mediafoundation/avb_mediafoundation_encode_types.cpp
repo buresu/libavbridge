@@ -140,6 +140,55 @@ GUID mf_encode_video_subtype(
     }
 }
 
+HRESULT mf_encode_set_mpeg4_video_sample_description(
+    IMFMediaType *type,
+    std::uint32_t codec_tag,
+    unsigned int width,
+    unsigned int height) {
+    if (!type) return E_POINTER;
+    if (codec_tag == 0 || width == 0 || height == 0 ||
+        width > 0xffff || height > 0xffff) {
+        return E_INVALIDARG;
+    }
+
+    std::vector<unsigned char> box(102, 0);
+    auto write_be16 = [&box](std::size_t offset, std::uint16_t value) {
+        box[offset] = static_cast<unsigned char>(value >> 8);
+        box[offset + 1] = static_cast<unsigned char>(value);
+    };
+    auto write_be32 = [&box](std::size_t offset, std::uint32_t value) {
+        box[offset] = static_cast<unsigned char>(value >> 24);
+        box[offset + 1] = static_cast<unsigned char>(value >> 16);
+        box[offset + 2] = static_cast<unsigned char>(value >> 8);
+        box[offset + 3] = static_cast<unsigned char>(value);
+    };
+
+    write_be32(0, static_cast<std::uint32_t>(box.size()));
+    std::memcpy(box.data() + 4, "stsd", 4);
+    write_be32(12, 1);
+
+    write_be32(16, 86);
+    box[20] = static_cast<unsigned char>(codec_tag);
+    box[21] = static_cast<unsigned char>(codec_tag >> 8);
+    box[22] = static_cast<unsigned char>(codec_tag >> 16);
+    box[23] = static_cast<unsigned char>(codec_tag >> 24);
+    write_be16(30, 1);
+    write_be16(48, static_cast<std::uint16_t>(width));
+    write_be16(50, static_cast<std::uint16_t>(height));
+    write_be32(52, 0x00480000);
+    write_be32(56, 0x00480000);
+    write_be16(64, 1);
+    write_be16(98, 24);
+    write_be16(100, 0xffff);
+
+    HRESULT hr = type->SetBlob(
+        MF_MT_MPEG4_SAMPLE_DESCRIPTION,
+        box.data(),
+        static_cast<UINT32>(box.size()));
+    if (FAILED(hr)) return hr;
+    return type->SetUINT32(MF_MT_MPEG4_CURRENT_SAMPLE_ENTRY, 0);
+}
+
 const char *mf_encode_video_codec_name(avb_video_codec codec) {
     switch (codec) {
         case AVB_VIDEO_CODEC_H264: return "H264";
