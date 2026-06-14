@@ -14,6 +14,11 @@
 #include <cstdio>
 #include <cstring>
 
+#ifdef _WIN32
+#include <d3d11.h>
+#include <wrl/client.h>
+#endif
+
 static const int AVB_TEST_SKIP = 77;
 
 static bool parse_backend(const char *name, avb_backend *out) {
@@ -96,9 +101,19 @@ int main(int argc, char *argv[]) {
     eopts.video.height = first.height;
     eopts.video.frame_rate = mi.video.frame_rate > 0.0 ? mi.video.frame_rate : 25.0;
     eopts.video.codec = AVB_VIDEO_CODEC_H264;
-    eopts.video.input_format = AVB_PIXEL_FORMAT_UNKNOWN;
+    eopts.video.input_format = first.format;
     eopts.video.input_memory = AVB_VIDEO_MEMORY_NATIVE;
     eopts.video.hardware_policy = AVB_HARDWARE_PREFER;
+
+#ifdef _WIN32
+    Microsoft::WRL::ComPtr<ID3D11Device> d3d_device;
+    if (encode_backend == AVB_BACKEND_MEDIAFOUNDATION &&
+        first.hardware_device == AVB_HW_DEVICE_D3D11VA) {
+        auto *texture = static_cast<ID3D11Texture2D *>(first.native_handle);
+        texture->GetDevice(&d3d_device);
+        eopts.video.hardware_context = d3d_device.Get();
+    }
+#endif
 
     avb_encoder *enc = nullptr;
     if (avb_encoder_open(&enc, out_path, &eopts) != AVB_OK) {

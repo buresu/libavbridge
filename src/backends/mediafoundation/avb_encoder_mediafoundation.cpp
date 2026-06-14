@@ -667,6 +667,7 @@ avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_op
             return AVB_ERROR_OPEN_FAILED;
         }
         if (options.video.input_memory == AVB_VIDEO_MEMORY_NATIVE &&
+            options.video.input_format != AVB_PIXEL_FORMAT_UNKNOWN &&
             options.video.input_format != AVB_PIXEL_FORMAT_NV12) {
             m_last_error = "Media Foundation D3D11 native input requires NV12 textures.";
             return AVB_ERROR_INVALID_ARGUMENT;
@@ -759,6 +760,14 @@ avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_op
                 m_impl->input_format = AVB_PIXEL_FORMAT_NV12;
                 m_impl->video_is_nv12 = true;
                 break;
+            case AVB_PIXEL_FORMAT_UNKNOWN:
+                if (options.video.input_memory == AVB_VIDEO_MEMORY_NATIVE) {
+                    m_impl->input_format = AVB_PIXEL_FORMAT_NV12;
+                    m_impl->video_is_nv12 = true;
+                } else {
+                    m_impl->input_format = AVB_PIXEL_FORMAT_BGRA8;
+                }
+                break;
             case AVB_PIXEL_FORMAT_I420:
                 m_impl->input_format = AVB_PIXEL_FORMAT_I420;
                 m_impl->video_is_i420 = true;
@@ -768,7 +777,6 @@ avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_op
                 m_impl->swizzle_rgba = true;
                 break;
             case AVB_PIXEL_FORMAT_BGRA8:
-            case AVB_PIXEL_FORMAT_UNKNOWN:
             default:
                 m_impl->input_format = AVB_PIXEL_FORMAT_BGRA8;
                 break;
@@ -885,15 +893,15 @@ avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_op
         // Sink Writer inserts the color converter to whatever the encoder wants.
         // RGBA is swizzled to BGRA on copy.
         GUID input_subtype;
-        if (options.video.input_format == AVB_PIXEL_FORMAT_NV12) {
+        if (m_impl->input_format == AVB_PIXEL_FORMAT_NV12) {
             m_impl->input_format  = AVB_PIXEL_FORMAT_NV12;
             m_impl->video_is_nv12 = true;
             input_subtype         = MFVideoFormat_NV12;
-        } else if (options.video.input_format == AVB_PIXEL_FORMAT_I420) {
+        } else if (m_impl->input_format == AVB_PIXEL_FORMAT_I420) {
             m_impl->input_format  = AVB_PIXEL_FORMAT_I420;
             m_impl->video_is_i420 = true;
             input_subtype         = MFVideoFormat_I420;
-        } else if (options.video.input_format == AVB_PIXEL_FORMAT_RGBA8) {
+        } else if (m_impl->input_format == AVB_PIXEL_FORMAT_RGBA8) {
             m_impl->input_format = AVB_PIXEL_FORMAT_RGBA8;
             m_impl->swizzle_rgba = true;
             input_subtype        = MFVideoFormat_RGB32;

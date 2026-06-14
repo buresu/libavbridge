@@ -261,7 +261,8 @@ avb_result avb_encoder_validate_options(const char *path,
                 const bool mf_native_in =
                     out->backend == AVB_BACKEND_MEDIAFOUNDATION &&
                     options->video.input_memory == AVB_VIDEO_MEMORY_NATIVE &&
-                    options->video.input_format == AVB_PIXEL_FORMAT_NV12 &&
+                    (options->video.input_format == AVB_PIXEL_FORMAT_UNKNOWN ||
+                     options->video.input_format == AVB_PIXEL_FORMAT_NV12) &&
                     (container == Container::ivf ||
                      container == Container::mp4 ||
                      container == Container::mov);

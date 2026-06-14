@@ -549,7 +549,8 @@ avb_result AvbDecoderMediaFoundation::open_ivf(
     m_impl->ivf_native_output =
         options.video_memory == AVB_VIDEO_MEMORY_NATIVE;
     if (m_impl->ivf_native_output) {
-        if (options.video_format != AVB_PIXEL_FORMAT_NV12) {
+        if (options.video_format != AVB_PIXEL_FORMAT_UNKNOWN &&
+            options.video_format != AVB_PIXEL_FORMAT_NV12) {
             fclose(file);
             m_last_error = "Media Foundation native IVF decode requires NV12 output.";
             return AVB_ERROR_INVALID_ARGUMENT;
@@ -676,7 +677,8 @@ avb_result AvbDecoderMediaFoundation::open_file(const char *path, const avb_deco
         path_len >= 4 && _stricmp(path + path_len - 4, ".ivf") == 0;
     const bool native_d3d11 =
         options.video_memory == AVB_VIDEO_MEMORY_NATIVE &&
-        options.video_format == AVB_PIXEL_FORMAT_NV12 &&
+        (options.video_format == AVB_PIXEL_FORMAT_UNKNOWN ||
+         options.video_format == AVB_PIXEL_FORMAT_NV12) &&
         (options.hardware_device == AVB_HW_DEVICE_AUTO ||
          options.hardware_device == AVB_HW_DEVICE_D3D11VA);
     if (options.video_memory != AVB_VIDEO_MEMORY_CPU && !native_d3d11) {
@@ -806,7 +808,9 @@ avb_result AvbDecoderMediaFoundation::open_file(const char *path, const avb_deco
         // NV12 is emitted as two planes (Y + interleaved CbCr); ARGB32 is a
         // packed 32-bit BGRA buffer, optionally swizzled to RGBA after the copy.
         GUID want_subtype;
-        if (options.video_format == AVB_PIXEL_FORMAT_NV12) {
+        if (options.video_format == AVB_PIXEL_FORMAT_NV12 ||
+            (m_impl->source_native_output &&
+             options.video_format == AVB_PIXEL_FORMAT_UNKNOWN)) {
             m_impl->video_avb_fmt = AVB_PIXEL_FORMAT_NV12;
             m_impl->video_is_nv12 = true;
             m_impl->swizzle_rgba  = false;

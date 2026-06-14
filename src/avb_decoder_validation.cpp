@@ -153,7 +153,8 @@ avb_result avb_decoder_validate_options(const avb_decode_options *options,
     const bool mediafoundation_native =
         out->backend == AVB_BACKEND_MEDIAFOUNDATION &&
         options->video_memory == AVB_VIDEO_MEMORY_NATIVE &&
-        options->video_format == AVB_PIXEL_FORMAT_NV12 &&
+        (options->video_format == AVB_PIXEL_FORMAT_UNKNOWN ||
+         options->video_format == AVB_PIXEL_FORMAT_NV12) &&
         (options->hardware_device == AVB_HW_DEVICE_AUTO ||
          options->hardware_device == AVB_HW_DEVICE_D3D11VA);
     // AVFoundation hands back the decoder's IOSurface-backed CVPixelBuffer for

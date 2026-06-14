@@ -55,6 +55,9 @@ endif()
 
 add_executable(avb_native_roundtrip native_roundtrip.cpp)
 target_link_libraries(avb_native_roundtrip PRIVATE avbridge)
+if(WIN32)
+    target_link_libraries(avb_native_roundtrip PRIVATE d3d11)
+endif()
 if(AVB_BUILD_SHARED)
     target_compile_definitions(avb_native_roundtrip PRIVATE AVB_USING_SHARED)
 endif()
@@ -241,6 +244,11 @@ if(FFMPEG_EXECUTABLE)
                          "${AVB_OUT}/runtime_codecs_mediafoundation_hevc.mp4"
                          ${AVB_MF_RUNTIME_CODEC_ARGS})
         set_tests_properties(runtime_codecs_mediafoundation PROPERTIES SKIP_RETURN_CODE 77)
+        add_test(NAME native_roundtrip_mediafoundation
+                 COMMAND avb_native_roundtrip "${AVB_FIXTURE}"
+                         "${AVB_OUT}/native_roundtrip_mediafoundation.mp4"
+                         mediafoundation mediafoundation)
+        set_tests_properties(native_roundtrip_mediafoundation PROPERTIES SKIP_RETURN_CODE 77)
     endif()
     add_test(NAME custom_encoder_ffmpeg
              COMMAND avb_custom_encoder "${AVB_OUT}/custom_encoder_ffmpeg.mov" ffmpeg)
