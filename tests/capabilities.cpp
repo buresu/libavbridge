@@ -24,6 +24,83 @@ bool values_are_unique(const T (&values)[N], int count) {
     return true;
 }
 
+int reject_decode(
+    const avb_video_stream_info *,
+    const avb_decode_options *) {
+    return 0;
+}
+
+avb_result open_decoder(
+    void **,
+    const avb_video_stream_info *,
+    const avb_decode_options *) {
+    return AVB_ERROR_OPEN_FAILED;
+}
+
+avb_result decode_packet(
+    void *,
+    const avb_encoded_packet *,
+    avb_video_frame *) {
+    return AVB_ERROR_DECODE_FAILED;
+}
+
+int reject_encode(const avb_video_encode_info *) {
+    return 0;
+}
+
+avb_result open_encoder(
+    void **,
+    const avb_video_encode_info *,
+    avb_encoded_video_stream *) {
+    return AVB_ERROR_OPEN_FAILED;
+}
+
+avb_result encode_frame(
+    void *,
+    const avb_video_frame *,
+    double,
+    avb_encoded_packet *) {
+    return AVB_ERROR_ENCODE_FAILED;
+}
+
+void check_plugin_registry() {
+    avb_video_decoder_plugin decoder{};
+    check(
+        avb_register_video_decoder(&decoder) == AVB_ERROR_INVALID_ARGUMENT,
+        "decoder registry accepted an incomplete plugin");
+    decoder.struct_size = sizeof(decoder);
+    decoder.can_decode = reject_decode;
+    decoder.open = open_decoder;
+    decoder.decode_packet = decode_packet;
+    check(
+        avb_register_video_decoder(&decoder) == AVB_OK &&
+            avb_register_video_decoder(&decoder) == AVB_OK,
+        "decoder registry rejected duplicate registration");
+    check(
+        avb_unregister_video_decoder(&decoder) == AVB_OK &&
+            avb_unregister_video_decoder(&decoder) ==
+                AVB_ERROR_INVALID_ARGUMENT,
+        "decoder registry did not remove a duplicate registration once");
+
+    avb_video_encoder_plugin encoder{};
+    check(
+        avb_register_video_encoder(&encoder) == AVB_ERROR_INVALID_ARGUMENT,
+        "encoder registry accepted an incomplete plugin");
+    encoder.struct_size = sizeof(encoder);
+    encoder.can_encode = reject_encode;
+    encoder.open = open_encoder;
+    encoder.encode_frame = encode_frame;
+    check(
+        avb_register_video_encoder(&encoder) == AVB_OK &&
+            avb_register_video_encoder(&encoder) == AVB_OK,
+        "encoder registry rejected duplicate registration");
+    check(
+        avb_unregister_video_encoder(&encoder) == AVB_OK &&
+            avb_unregister_video_encoder(&encoder) ==
+                AVB_ERROR_INVALID_ARGUMENT,
+        "encoder registry did not remove a duplicate registration once");
+}
+
 void check_decoder(
     avb_result (*query)(
         avb_backend,
@@ -124,6 +201,8 @@ void check_encoder(
 }  // namespace
 
 int main() {
+    check_plugin_registry();
+
     avb_decoder_capabilities auto_caps{};
     check(
         avb_decoder_query_capabilities(

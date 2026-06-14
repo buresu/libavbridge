@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../../avb_decoder_impl.hpp"
+#include "avb_decoder_impl.hpp"
 #include "avb_ffmpeg_loader.hpp"
 
 #include <deque>

@@ -1,6 +1,6 @@
 #include "avbridge.h"
 #include "avb_capability_common.hpp"
-#include "avb_video_codec_registry.hpp"
+#include "avb_video_plugins.hpp"
 
 namespace {
 

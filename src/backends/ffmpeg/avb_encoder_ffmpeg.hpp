@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../../avb_encoder_impl.hpp"
+#include "avb_encoder_impl.hpp"
 #include "avb_ffmpeg_loader.hpp"
 
 #include <string>

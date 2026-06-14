@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../../avb_encoder_impl.hpp"
+#include "avb_encoder_impl.hpp"
 #include <string>
 #include <vector>
 

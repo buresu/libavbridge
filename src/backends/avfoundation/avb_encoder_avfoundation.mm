@@ -1,5 +1,5 @@
 #include "avb_encoder_avfoundation.hh"
-#include "../../avb_video_codec_registry.hpp"
+#include "avb_video_plugins.hpp"
 
 #ifdef __APPLE__
 

@@ -1,5 +1,5 @@
 #include "avb_decoder_gstreamer.hpp"
-#include "../../avb_video_codec_registry.hpp"
+#include "avb_video_plugins.hpp"
 
 #include <cstdarg>
 #include <cstdint>
