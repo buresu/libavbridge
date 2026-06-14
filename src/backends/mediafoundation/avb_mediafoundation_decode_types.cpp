@@ -5,6 +5,7 @@
 #include "avb_video_plugins.hpp"
 
 #include <mfapi.h>
+#include <mferror.h>
 #include <wrl/client.h>
 
 #include <cstring>
@@ -135,6 +136,137 @@ std::string mf_decode_native_codec_name(
         if (name != "pcm" && name != "pcm_f32") return name;
     }
     return first;
+}
+
+HRESULT mf_decode_configure_audio(
+    IMFSourceReader *reader,
+    unsigned long stream,
+    const avb_decode_options &options,
+    MfDecodeAudioFormat *format) {
+    if (!reader || !format) return E_POINTER;
+    *format = {};
+
+    ComPtr<IMFMediaType> requested;
+    HRESULT hr = MFCreateMediaType(&requested);
+    if (FAILED(hr)) return hr;
+    requested->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+    requested->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_Float);
+    if (options.audio_sample_rate > 0) {
+        requested->SetUINT32(
+            MF_MT_AUDIO_SAMPLES_PER_SECOND,
+            static_cast<UINT32>(options.audio_sample_rate));
+    }
+    if (options.audio_channels > 0) {
+        requested->SetUINT32(
+            MF_MT_AUDIO_NUM_CHANNELS,
+            static_cast<UINT32>(options.audio_channels));
+    }
+
+    hr = reader->SetCurrentMediaType(stream, nullptr, requested.Get());
+    if (FAILED(hr)) return hr;
+    reader->SetStreamSelection(stream, TRUE);
+
+    ComPtr<IMFMediaType> current;
+    reader->GetCurrentMediaType(stream, &current);
+    if (current) {
+        UINT32 sample_rate = 0;
+        UINT32 channels = 0;
+        current->GetUINT32(
+            MF_MT_AUDIO_SAMPLES_PER_SECOND, &sample_rate);
+        current->GetUINT32(MF_MT_AUDIO_NUM_CHANNELS, &channels);
+        format->sample_rate = static_cast<int>(sample_rate);
+        format->channels = static_cast<int>(channels);
+    }
+    return S_OK;
+}
+
+HRESULT mf_decode_refresh_video_format(
+    IMFSourceReader *reader,
+    unsigned long stream,
+    bool native_output,
+    MfDecodeVideoFormat *format) {
+    if (!reader || !format) return E_POINTER;
+
+    ComPtr<IMFMediaType> current;
+    HRESULT hr = reader->GetCurrentMediaType(stream, &current);
+    if (FAILED(hr) || !current) return FAILED(hr) ? hr : E_FAIL;
+
+    GUID subtype = GUID_NULL;
+    hr = current->GetGUID(MF_MT_SUBTYPE, &subtype);
+    if (FAILED(hr)) return hr;
+    if (native_output && !IsEqualGUID(subtype, MFVideoFormat_NV12))
+        return MF_E_INVALIDMEDIATYPE;
+
+    UINT32 width = 0;
+    UINT32 height = 0;
+    hr = MFGetAttributeSize(
+        current.Get(), MF_MT_FRAME_SIZE, &width, &height);
+    if (FAILED(hr) || width == 0 || height == 0)
+        return FAILED(hr) ? hr : E_FAIL;
+    format->width = static_cast<int>(width);
+    format->height = static_cast<int>(height);
+
+    UINT32 numerator = 0;
+    UINT32 denominator = 1;
+    if (SUCCEEDED(MFGetAttributeRatio(
+            current.Get(), MF_MT_FRAME_RATE,
+            &numerator, &denominator)) &&
+        denominator != 0) {
+        format->frame_rate =
+            static_cast<double>(numerator) / denominator;
+    }
+
+    UINT32 stride_raw = 0;
+    if (SUCCEEDED(
+            current->GetUINT32(MF_MT_DEFAULT_STRIDE, &stride_raw))) {
+        INT32 stride = static_cast<INT32>(stride_raw);
+        format->bottom_up = stride < 0;
+        format->stride = stride < 0 ? -stride : stride;
+    } else {
+        format->bottom_up = false;
+        format->stride = IsEqualGUID(subtype, MFVideoFormat_ARGB32)
+            ? static_cast<int>(width) * 4
+            : static_cast<int>(width);
+    }
+    return S_OK;
+}
+
+HRESULT mf_decode_configure_video(
+    IMFSourceReader *reader,
+    unsigned long stream,
+    avb_pixel_format requested_format,
+    bool native_output,
+    MfDecodeVideoFormat *format) {
+    if (!reader || !format) return E_POINTER;
+    *format = {};
+
+    GUID subtype = MFVideoFormat_ARGB32;
+    if (requested_format == AVB_PIXEL_FORMAT_NV12 ||
+        (native_output &&
+         requested_format == AVB_PIXEL_FORMAT_UNKNOWN)) {
+        format->pixel_format = AVB_PIXEL_FORMAT_NV12;
+        subtype = MFVideoFormat_NV12;
+    } else if (requested_format == AVB_PIXEL_FORMAT_I420) {
+        format->pixel_format = AVB_PIXEL_FORMAT_I420;
+        subtype = MFVideoFormat_I420;
+    } else {
+        format->pixel_format =
+            requested_format == AVB_PIXEL_FORMAT_RGBA8
+            ? AVB_PIXEL_FORMAT_RGBA8
+            : AVB_PIXEL_FORMAT_BGRA8;
+    }
+
+    ComPtr<IMFMediaType> requested;
+    HRESULT hr = MFCreateMediaType(&requested);
+    if (FAILED(hr)) return hr;
+    requested->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+    requested->SetGUID(MF_MT_SUBTYPE, subtype);
+
+    hr = reader->SetCurrentMediaType(stream, nullptr, requested.Get());
+    if (FAILED(hr)) return hr;
+    reader->SetStreamSelection(stream, TRUE);
+    return mf_decode_refresh_video_format(
+        reader, stream, native_output, format);
 }
 
 avb_result mf_decode_open_custom_video(

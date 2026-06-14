@@ -460,33 +460,14 @@ avb_result AvbDecoderMediaFoundation::open_file(const char *path, const avb_deco
         std::string native_audio_codec =
             mf_decode_native_codec_name(
                 m_impl->reader.Get(), (DWORD)found_audio);
-
-        ComPtr<IMFMediaType> want;
-        MFCreateMediaType(&want);
-        want->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
-        want->SetGUID(MF_MT_SUBTYPE,    MFAudioFormat_Float);
-        // Request a target rate/channel count; the Source Reader inserts the
-        // audio resampler as needed. 0 leaves the source value. The effective
-        // values are read back from the negotiated type below.
-        if (options.audio_sample_rate > 0)
-            want->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, (UINT32)options.audio_sample_rate);
-        if (options.audio_channels > 0)
-            want->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, (UINT32)options.audio_channels);
-
-        hr = m_impl->reader->SetCurrentMediaType((DWORD)found_audio, nullptr, want.Get());
+        MfDecodeAudioFormat audio_format{};
+        hr = mf_decode_configure_audio(
+            m_impl->reader.Get(), (DWORD)found_audio, options,
+            &audio_format);
         if (SUCCEEDED(hr)) {
-            m_impl->reader->SetStreamSelection((DWORD)found_audio, TRUE);
             m_impl->audio_stream_idx = found_audio;
-
-            ComPtr<IMFMediaType> cur;
-            m_impl->reader->GetCurrentMediaType((DWORD)found_audio, &cur);
-            if (cur) {
-                UINT32 sr = 0, ch = 0;
-                cur->GetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, &sr);
-                cur->GetUINT32(MF_MT_AUDIO_NUM_CHANNELS, &ch);
-                m_impl->sample_rate = (int)sr;
-                m_impl->channels    = (int)ch;
-            }
+            m_impl->sample_rate = audio_format.sample_rate;
+            m_impl->channels = audio_format.channels;
             m_impl->audio_codec_name = native_audio_codec;
         }
     }
@@ -511,70 +492,25 @@ avb_result AvbDecoderMediaFoundation::open_file(const char *path, const avb_deco
         std::string native_video_codec =
             mf_decode_native_codec_name(
                 m_impl->reader.Get(), (DWORD)found_video);
-
-        // Pick the output subtype the Video Processor MFT should convert to.
-        // NV12 is emitted as two planes (Y + interleaved CbCr); ARGB32 is a
-        // packed 32-bit BGRA buffer, optionally swizzled to RGBA after the copy.
-        GUID want_subtype;
-        if (options.video_format == AVB_PIXEL_FORMAT_NV12 ||
-            (m_impl->source_native_output &&
-             options.video_format == AVB_PIXEL_FORMAT_UNKNOWN)) {
-            m_impl->video_avb_fmt = AVB_PIXEL_FORMAT_NV12;
-            m_impl->video_is_nv12 = true;
-            m_impl->swizzle_rgba  = false;
-            want_subtype          = MFVideoFormat_NV12;
-        } else if (options.video_format == AVB_PIXEL_FORMAT_I420) {
-            // I420 is emitted as three planes (Y + Cb + Cr at half size).
-            m_impl->video_avb_fmt = AVB_PIXEL_FORMAT_I420;
-            m_impl->video_is_i420 = true;
-            m_impl->swizzle_rgba  = false;
-            want_subtype          = MFVideoFormat_I420;
-        } else {
-            m_impl->video_avb_fmt = (options.video_format == AVB_PIXEL_FORMAT_RGBA8)
-                ? AVB_PIXEL_FORMAT_RGBA8 : AVB_PIXEL_FORMAT_BGRA8;
-            m_impl->swizzle_rgba = (options.video_format == AVB_PIXEL_FORMAT_RGBA8);
-            // MFVideoFormat_ARGB32 = D3DFMT_A8R8G8B8; memory layout on LE is BGRA.
-            // RGBA8 is produced by swizzling this BGRA output after the copy.
-            want_subtype = MFVideoFormat_ARGB32;
-        }
-
-        ComPtr<IMFMediaType> want;
-        MFCreateMediaType(&want);
-        want->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-        want->SetGUID(MF_MT_SUBTYPE, want_subtype);
-
-        hr = m_impl->reader->SetCurrentMediaType((DWORD)found_video, nullptr, want.Get());
+        MfDecodeVideoFormat video_format{};
+        hr = mf_decode_configure_video(
+            m_impl->reader.Get(), (DWORD)found_video,
+            options.video_format, m_impl->source_native_output,
+            &video_format);
         if (SUCCEEDED(hr)) {
-            m_impl->reader->SetStreamSelection((DWORD)found_video, TRUE);
             m_impl->video_stream_idx = found_video;
-
-            ComPtr<IMFMediaType> cur;
-            m_impl->reader->GetCurrentMediaType((DWORD)found_video, &cur);
-            if (cur) {
-                UINT32 w = 0, h = 0;
-                MFGetAttributeSize(cur.Get(), MF_MT_FRAME_SIZE, &w, &h);
-                m_impl->width  = (int)w;
-                m_impl->height = (int)h;
-
-                UINT32 num = 0, den = 1;
-                MFGetAttributeRatio(cur.Get(), MF_MT_FRAME_RATE, &num, &den);
-                if (den != 0) m_impl->frame_rate = (double)num / den;
-
-                // MF_MT_DEFAULT_STRIDE is typed UINT32 but semantically INT32;
-                // a negative value indicates bottom-up row order.
-                UINT32 stride_raw = 0;
-                if (SUCCEEDED(cur->GetUINT32(MF_MT_DEFAULT_STRIDE, &stride_raw))) {
-                    INT32 s = (INT32)stride_raw;
-                    if (s < 0) {
-                        m_impl->video_bottom_up = true;
-                        m_impl->video_stride    = -s;
-                    } else {
-                        m_impl->video_stride = (s > 0) ? s : (int)w * 4;
-                    }
-                } else {
-                    m_impl->video_stride = (int)w * 4;
-                }
-            }
+            m_impl->video_avb_fmt = video_format.pixel_format;
+            m_impl->video_is_nv12 =
+                video_format.pixel_format == AVB_PIXEL_FORMAT_NV12;
+            m_impl->video_is_i420 =
+                video_format.pixel_format == AVB_PIXEL_FORMAT_I420;
+            m_impl->swizzle_rgba =
+                video_format.pixel_format == AVB_PIXEL_FORMAT_RGBA8;
+            m_impl->width = video_format.width;
+            m_impl->height = video_format.height;
+            m_impl->video_stride = video_format.stride;
+            m_impl->video_bottom_up = video_format.bottom_up;
+            m_impl->frame_rate = video_format.frame_rate;
             m_impl->video_codec_name = native_video_codec;
         }
         }
@@ -713,41 +649,6 @@ bool AvbDecoderMediaFoundation::fill_audio_buffer() {
         m_impl->audio_buf_pts = (double)ts / 1e7;
         return n > 0;
     }
-}
-
-static HRESULT update_source_video_type(
-    IMFSourceReader *reader, DWORD stream, bool native_output,
-    int *width, int *height, int *stride, bool *bottom_up) {
-    if (!reader || !width || !height || !stride || !bottom_up)
-        return E_POINTER;
-
-    ComPtr<IMFMediaType> current;
-    HRESULT hr = reader->GetCurrentMediaType(stream, &current);
-    if (FAILED(hr) || !current) return FAILED(hr) ? hr : E_FAIL;
-
-    GUID subtype = GUID_NULL;
-    hr = current->GetGUID(MF_MT_SUBTYPE, &subtype);
-    if (FAILED(hr)) return hr;
-    if (native_output && !IsEqualGUID(subtype, MFVideoFormat_NV12))
-        return MF_E_INVALIDMEDIATYPE;
-
-    UINT32 w = 0, h = 0;
-    hr = MFGetAttributeSize(current.Get(), MF_MT_FRAME_SIZE, &w, &h);
-    if (FAILED(hr) || w == 0 || h == 0) return FAILED(hr) ? hr : E_FAIL;
-    *width = (int)w;
-    *height = (int)h;
-
-    UINT32 stride_raw = 0;
-    if (SUCCEEDED(current->GetUINT32(MF_MT_DEFAULT_STRIDE, &stride_raw))) {
-        INT32 signed_stride = (INT32)stride_raw;
-        *bottom_up = signed_stride < 0;
-        *stride = signed_stride < 0 ? -signed_stride : signed_stride;
-    } else {
-        *bottom_up = false;
-        *stride = IsEqualGUID(subtype, MFVideoFormat_ARGB32)
-            ? (int)w * 4 : (int)w;
-    }
-    return S_OK;
 }
 
 int AvbDecoderMediaFoundation::read_audio_f32(float *dst_interleaved, int frames) {
@@ -1159,10 +1060,16 @@ avb_result AvbDecoderMediaFoundation::read_video_frame(avb_video_frame &out_fram
         }
         if (flags & MF_SOURCE_READERF_ENDOFSTREAM) return AVB_ERROR_EOF;
         if (flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) {
-            hr = update_source_video_type(
+            MfDecodeVideoFormat video_format{
+                m_impl->video_avb_fmt,
+                m_impl->width,
+                m_impl->height,
+                m_impl->video_stride,
+                m_impl->video_bottom_up,
+                m_impl->frame_rate};
+            hr = mf_decode_refresh_video_format(
                 m_impl->reader.Get(), (DWORD)m_impl->video_stream_idx,
-                m_impl->source_native_output, &m_impl->width, &m_impl->height,
-                &m_impl->video_stride, &m_impl->video_bottom_up);
+                m_impl->source_native_output, &video_format);
             if (FAILED(hr)) {
                 char buf[160];
                 snprintf(buf, sizeof(buf),
@@ -1171,6 +1078,10 @@ avb_result AvbDecoderMediaFoundation::read_video_frame(avb_video_frame &out_fram
                 m_last_error = buf;
                 return AVB_ERROR_DECODE_FAILED;
             }
+            m_impl->width = video_format.width;
+            m_impl->height = video_format.height;
+            m_impl->video_stride = video_format.stride;
+            m_impl->video_bottom_up = video_format.bottom_up;
         }
         if (!sample) {
             if (m_impl->video_seek_pending ||
