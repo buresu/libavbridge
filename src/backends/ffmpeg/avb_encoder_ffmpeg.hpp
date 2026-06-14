@@ -62,7 +62,7 @@ private:
     int             m_width       = 0;
     int             m_height      = 0;
     double          m_frame_rate  = 30.0;
-    int             m_fps_den     = 30; // encoder time_base = 1 / m_fps_den
+    int             m_fps         = 30; // integer frame rate; time_base = 1 / m_fps
     long            m_video_index = 0;  // for derived PTS
     bool            m_has_video   = false;
     bool            m_custom_video = false;

@@ -364,7 +364,7 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
         m_input_memory = options.video.input_memory;
         m_input_external_type = options.video.input_external_type;
         m_frame_rate = options.video.frame_rate > 0 ? options.video.frame_rate : 30.0;
-        m_fps_den    = std::max(1L, std::lround(m_frame_rate));
+        m_fps    = std::max(1L, std::lround(m_frame_rate));
 
         avb_video_encode_info custom_info{};
         custom_info.width = m_width;
@@ -407,7 +407,7 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
                 memset(m_vstream->codecpar->extradata + stream.extradata_size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
                 m_vstream->codecpar->extradata_size = stream.extradata_size;
             }
-            int tb_den = stream.time_base_den > 0 ? stream.time_base_den : m_fps_den;
+            int tb_den = stream.time_base_den > 0 ? stream.time_base_den : m_fps;
             int tb_num = stream.time_base_num > 0 ? stream.time_base_num : 1;
             m_vstream->time_base = AVRational{tb_num, tb_den};
             m_custom_video_encoder = plugin;
@@ -451,8 +451,8 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
         m_venc->width     = m_width;
         m_venc->height    = m_height;
         m_venc->pix_fmt   = m_hw_upload ? m_hw_pix_fmt : AV_PIX_FMT_YUV420P;
-        m_venc->time_base = AVRational{1, m_fps_den};
-        m_venc->framerate = AVRational{m_fps_den, 1};
+        m_venc->time_base = AVRational{1, m_fps};
+        m_venc->framerate = AVRational{m_fps, 1};
         if (options.video.bitrate > 0) m_venc->bit_rate = options.video.bitrate;
         if (global_header) m_venc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
         if (m_hw_upload) {
@@ -646,7 +646,7 @@ avb_result AvbEncoderFFmpeg::prepare_software_video_frame(
     m_ff.sws_scale(m_sws, src_data, src_lines, 0, m_height,
                    m_vframe->data, m_vframe->linesize);
 
-    m_vframe->pts = std::llround(pts * m_fps_den);
+    m_vframe->pts = std::llround(pts * m_fps);
     *out_frame = m_vframe;
     return AVB_OK;
 }
@@ -671,7 +671,7 @@ avb_result AvbEncoderFFmpeg::prepare_hardware_video_frame(
     if (frame.memory_type == AVB_VIDEO_MEMORY_BACKEND_NATIVE && frame.native_handle) {
         auto *native = static_cast<AVFrame *>(frame.native_handle);
         if ((AVPixelFormat)native->format == m_hw_pix_fmt) {
-            native->pts = std::llround(pts * m_fps_den);
+            native->pts = std::llround(pts * m_fps);
             *out_frame = native;
             return AVB_OK;
         }
@@ -788,7 +788,7 @@ avb_result AvbEncoderFFmpeg::prepare_dmabuf_video_frame(
     double pts = pts_sec >= 0.0        ? pts_sec
                : frame.pts_sec >= 0.0 ? frame.pts_sec
                                        : (double)m_video_index / m_frame_rate;
-    m_hw_vframe->pts = std::llround(pts * m_fps_den);
+    m_hw_vframe->pts = std::llround(pts * m_fps);
     *out_frame = m_hw_vframe;
     return AVB_OK;
 }

@@ -470,44 +470,40 @@ avb_result AvbEncoderGStreamer::open(const char *path, const avb_encode_options 
     // enabled track. max-bytes=0 makes each appsrc queue unbounded so pushing
     // one track far ahead of the other never blocks (and never deadlocks the
     // muxer), mirroring the FFmpeg encoder's unbounded audio FIFO.
-    char desc[1024];
-    int n = snprintf(desc, sizeof(desc), "%s name=mux ! filesink name=sink ", mux);
+    // The video encoder + parser tail (venc/vparse) is identical across the
+    // CPU/native/external/HW variants; only the appsrc and pre-encode elements
+    // differ. Build the shared tail once and reuse it.
+    std::string venc_tail = std::string(venc) + " ! " + vparse + " queue ! mux. ";
+
+    std::string desc = std::string(mux) + " name=mux ! filesink name=sink ";
     if (options.video.enable) {
         if (m_custom_video) {
-            n += snprintf(desc + n, sizeof(desc) - n,
-                "appsrc name=vsrc is-live=false format=time max-bytes=0 ! queue ! mux. ");
+            desc += "appsrc name=vsrc is-live=false format=time max-bytes=0 ! queue ! mux. ";
         } else if (m_hw_video && m_input_memory == AVB_VIDEO_MEMORY_BACKEND_NATIVE) {
-            n += snprintf(desc + n, sizeof(desc) - n,
-                "appsrc name=vsrc is-live=false format=time max-bytes=0 block=true max-buffers=4 ! "
-                "queue max-size-buffers=4 max-size-bytes=0 max-size-time=0 ! %s ! %s queue ! mux. ", venc, vparse);
+            desc += "appsrc name=vsrc is-live=false format=time max-bytes=0 block=true max-buffers=4 ! "
+                    "queue max-size-buffers=4 max-size-bytes=0 max-size-time=0 ! " + venc_tail;
         } else if (m_hw_video && m_input_memory == AVB_VIDEO_MEMORY_EXTERNAL) {
-            n += snprintf(desc + n, sizeof(desc) - n,
-                "appsrc name=vsrc is-live=false format=time max-bytes=0 block=true max-buffers=4 ! "
-                "queue max-size-buffers=4 max-size-bytes=0 max-size-time=0 ! vapostproc ! %s ! %s queue ! mux. ", venc, vparse);
+            desc += "appsrc name=vsrc is-live=false format=time max-bytes=0 block=true max-buffers=4 ! "
+                    "queue max-size-buffers=4 max-size-bytes=0 max-size-time=0 ! vapostproc ! " + venc_tail;
         } else if (m_hw_video) {
-            n += snprintf(desc + n, sizeof(desc) - n,
-                "appsrc name=vsrc is-live=false format=time max-bytes=0 block=true max-buffers=4 ! videoconvert ! "
-                "vapostproc ! %s ! %s queue ! mux. ", venc, vparse);
+            desc += "appsrc name=vsrc is-live=false format=time max-bytes=0 block=true max-buffers=4 ! videoconvert ! "
+                    "vapostproc ! " + venc_tail;
         } else {
-            n += snprintf(desc + n, sizeof(desc) - n,
-                "appsrc name=vsrc is-live=false format=time max-bytes=0 ! videoconvert ! "
-                "%s ! %s queue ! mux. ", venc, vparse);
+            desc += "appsrc name=vsrc is-live=false format=time max-bytes=0 ! videoconvert ! " + venc_tail;
         }
     }
     if (options.audio.enable) {
+        desc += "appsrc name=asrc is-live=false format=time max-bytes=0 ! audioconvert ! audioresample ";
+        desc += audio_caps;
         if (audio_encoded_by_mux) {
-            n += snprintf(desc + n, sizeof(desc) - n,
-                "appsrc name=asrc is-live=false format=time max-bytes=0 ! audioconvert ! "
-                "audioresample %s ! queue ! mux. ", audio_caps);
+            desc += " ! queue ! mux. ";
         } else {
-            n += snprintf(desc + n, sizeof(desc) - n,
-                "appsrc name=asrc is-live=false format=time max-bytes=0 ! audioconvert ! "
-                "audioresample %s ! %s ! queue ! mux. ", audio_caps, aenc);
+            desc += std::string(" ! ") + aenc + " ! queue ! mux. ";
         }
     }
 
     GError *err = nullptr;
-    m_pipeline = m_gst.gst_parse_launch(desc, &err);
+    m_pipeline = m_gst.gst_parse_launch(desc.c_str(), &err);
     if (err) {
         char err_msg[512];
         snprintf(err_msg, sizeof(err_msg), "gst_parse_launch failed: %s",
