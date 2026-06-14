@@ -964,35 +964,48 @@ avb_result AvbDecoderGStreamer::read_video_frame(avb_video_frame &out_frame) {
             return AVB_ERROR_DECODE_FAILED;
         }
 
-        // GStreamer raw video uses GST_ROUND_UP_4 plane strides when no
-        // GstVideoMeta is attached. (Non-default strides via GstVideoMeta are a
-        // known limitation.) Lay out planes per output format:
+        // Plane layout. When the buffer carries a GstVideoMeta, honour its
+        // per-plane stride/offset (decoders may use non-default strides); the
+        // whole mapped buffer is copied verbatim so those offsets stay valid.
+        // Otherwise GStreamer raw video uses GST_ROUND_UP_4 plane strides laid
+        // out tightly per output format:
         //   RGBA/BGRA: 1 plane; NV12: 2 (Y, CbCr); I420: 3 (Y, Cb, Cr).
         int    plane_count = 1;
         int    stride[AVB_MAX_PLANES] = {0, 0, 0};
-        int    rows[AVB_MAX_PLANES]   = {0, 0, 0};
-        switch (m_video_format) {
-            case AVB_PIXEL_FORMAT_NV12:
-                plane_count = 2;
-                stride[0] = round_up_4(w);     rows[0] = h;
-                stride[1] = round_up_4(w);     rows[1] = h / 2;
-                break;
-            case AVB_PIXEL_FORMAT_I420:
-                plane_count = 3;
-                stride[0] = round_up_4(w);     rows[0] = h;
-                stride[1] = round_up_4(w / 2); rows[1] = h / 2;
-                stride[2] = round_up_4(w / 2); rows[2] = h / 2;
-                break;
-            default:
-                plane_count = 1;
-                stride[0] = round_up_4(w * 4); rows[0] = h;
-                break;
-        }
-
-        size_t off[AVB_MAX_PLANES] = {0, 0, 0};
+        size_t off[AVB_MAX_PLANES]    = {0, 0, 0};
         size_t total = 0;
-        for (int p = 0; p < plane_count; ++p) { off[p] = total; total += (size_t)stride[p] * rows[p]; }
-        if (total > map.size) total = map.size; // never read past the buffer
+
+        GstVideoMeta *vmeta = m_gst.gst_buffer_get_video_meta(buf);
+        if (vmeta && vmeta->n_planes > 0) {
+            plane_count = (int)vmeta->n_planes;
+            if (plane_count > AVB_MAX_PLANES) plane_count = AVB_MAX_PLANES;
+            for (int p = 0; p < plane_count; ++p) {
+                stride[p] = (int)vmeta->stride[p];
+                off[p]    = (size_t)vmeta->offset[p];
+            }
+            total = map.size; // copy the whole buffer; offsets index into it
+        } else {
+            int rows[AVB_MAX_PLANES] = {0, 0, 0};
+            switch (m_video_format) {
+                case AVB_PIXEL_FORMAT_NV12:
+                    plane_count = 2;
+                    stride[0] = round_up_4(w);     rows[0] = h;
+                    stride[1] = round_up_4(w);     rows[1] = h / 2;
+                    break;
+                case AVB_PIXEL_FORMAT_I420:
+                    plane_count = 3;
+                    stride[0] = round_up_4(w);     rows[0] = h;
+                    stride[1] = round_up_4(w / 2); rows[1] = h / 2;
+                    stride[2] = round_up_4(w / 2); rows[2] = h / 2;
+                    break;
+                default:
+                    plane_count = 1;
+                    stride[0] = round_up_4(w * 4); rows[0] = h;
+                    break;
+            }
+            for (int p = 0; p < plane_count; ++p) { off[p] = total; total += (size_t)stride[p] * rows[p]; }
+            if (total > map.size) total = map.size; // never read past the buffer
+        }
 
         m_video_out_buf.resize(total);
         memcpy(m_video_out_buf.data(), map.data, total);
