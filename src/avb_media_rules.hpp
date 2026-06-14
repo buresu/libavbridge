@@ -286,4 +286,20 @@ void add_device(Capabilities &out, avb_hardware_device device) {
         out.hardware_devices, out.hardware_device_count, device);
 }
 
+template <typename Capabilities>
+void add_portable_capabilities(
+    Capabilities &out,
+    detail::Container container) {
+    if (!detail::audio_only_container(container))
+        add_common_video_codecs(out, container);
+    add_common_audio_codecs(out, container);
+    add_memory(out, AVB_VIDEO_MEMORY_CPU);
+    add_memory(out, AVB_VIDEO_MEMORY_NATIVE);
+#if defined(__linux__)
+    add_memory(out, AVB_VIDEO_MEMORY_DMABUF);
+#endif
+    add_device(out, AVB_HW_DEVICE_AUTO);
+    add_device(out, AVB_HW_DEVICE_VAAPI);
+}
+
 }  // namespace avb::capability
