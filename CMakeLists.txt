@@ -113,6 +113,16 @@ if(AVB_ENABLE_AVFOUNDATION)
     )
 endif()
 
+if(AVB_ENABLE_GSTREAMER)
+    target_compile_definitions(avbridge PRIVATE AVB_ENABLE_GSTREAMER)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(GST REQUIRED gstreamer-1.0 gstreamer-app-1.0
+                                   gstreamer-pbutils-1.0 gstreamer-video-1.0
+                                   gstreamer-allocators-1.0 gobject-2.0 glib-2.0)
+    target_include_directories(avbridge PRIVATE ${GST_INCLUDE_DIRS})
+    target_link_libraries(avbridge PRIVATE ${CMAKE_DL_LIBS})
+endif()
+
 if(AVB_ENABLE_FFMPEG)
     target_compile_definitions(avbridge PRIVATE AVB_ENABLE_FFMPEG)
 
@@ -133,27 +143,9 @@ if(AVB_ENABLE_FFMPEG)
     else()
         message(WARNING "FFmpeg headers not found. FFmpeg backend may not compile correctly.")
     endif()
-
-    # Link only dl for runtime loading — no FFmpeg libraries at build time.
-    # Windows resolves symbols via LoadLibrary/GetProcAddress (no libdl).
     if(NOT WIN32)
         target_link_libraries(avbridge PRIVATE ${CMAKE_DL_LIBS})
     endif()
-endif()
-
-if(AVB_ENABLE_GSTREAMER)
-    target_compile_definitions(avbridge PRIVATE AVB_ENABLE_GSTREAMER)
-
-    # GStreamer/GLib headers for compilation only. The shared objects are loaded
-    # at runtime via dlopen (see avb_gstreamer_loader.cpp); we never link them.
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(GST REQUIRED gstreamer-1.0 gstreamer-app-1.0
-                                   gstreamer-pbutils-1.0 gstreamer-video-1.0
-                                   gstreamer-allocators-1.0 gobject-2.0 glib-2.0)
-    target_include_directories(avbridge PRIVATE ${GST_INCLUDE_DIRS})
-
-    # Link only dl for runtime loading — no GStreamer libraries at build time.
-    target_link_libraries(avbridge PRIVATE ${CMAKE_DL_LIBS})
 endif()
 
 set_target_properties(avbridge PROPERTIES
