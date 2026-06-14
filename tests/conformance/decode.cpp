@@ -168,6 +168,13 @@ void check_cpu_frame_layout(Context &test, const avb_video_frame &frame,
                "every frame plane has data");
     test.check(frame.plane_stride[plane] > 0,
                "every frame plane has a positive stride");
+    test.check(frame.plane_offset[plane] >= 0,
+               "every frame plane has a non-negative offset");
+    test.check(frame.plane_data[plane] ==
+                   frame.data + frame.plane_offset[plane],
+               "plane offset locates its data within the CPU buffer");
+    test.check(frame.plane_offset[plane] < frame.data_size,
+               "plane offset is within the CPU buffer");
   }
 
   long long expected_size = 0;

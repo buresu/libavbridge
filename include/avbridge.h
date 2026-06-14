@@ -194,7 +194,8 @@ typedef struct avb_video_frame {
     avb_hardware_device hardware_device;
 
     /* Valid planes: 1 for packed (RGBA8/BGRA8), 2 for NV12 (Y, CbCr),
-     * 3 for I420 (Y, Cb, Cr). */
+     * 3 for I420 (Y, Cb, Cr). For CPU frames, plane_offset[p] is the byte
+     * offset from data to plane_data[p]. */
     int plane_count;
     unsigned char *plane_data[AVB_MAX_PLANES];
     int plane_stride[AVB_MAX_PLANES];

@@ -711,6 +711,7 @@ avb_result AvbDecoderAVFoundation::read_video_frame(avb_video_frame &out_frame) 
             memcpy(dst + offset, src_base[p], plane_size[p]);
             out_frame.plane_data[p]   = dst + offset;
             out_frame.plane_stride[p] = (int)src_stride[p];
+            out_frame.plane_offset[p] = (int)offset;
             offset += plane_size[p];
         }
 

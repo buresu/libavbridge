@@ -861,8 +861,10 @@ retry_output:
         out_frame.plane_count = 2;
         out_frame.plane_data[0] = m_impl->video_frame_buf.data();
         out_frame.plane_stride[0] = w;
+        out_frame.plane_offset[0] = 0;
         out_frame.plane_data[1] = m_impl->video_frame_buf.data() + y_size;
         out_frame.plane_stride[1] = w;
+        out_frame.plane_offset[1] = (int)y_size;
     } else if (m_impl->video_is_i420) {
         const size_t c_size = y_size / 4;
         m_impl->video_frame_buf.resize(y_size + c_size * 2);
@@ -878,10 +880,13 @@ retry_output:
         out_frame.plane_count = 3;
         out_frame.plane_data[0] = m_impl->video_frame_buf.data();
         out_frame.plane_stride[0] = w;
+        out_frame.plane_offset[0] = 0;
         out_frame.plane_data[1] = u;
         out_frame.plane_stride[1] = w / 2;
+        out_frame.plane_offset[1] = (int)y_size;
         out_frame.plane_data[2] = v;
         out_frame.plane_stride[2] = w / 2;
+        out_frame.plane_offset[2] = (int)(y_size + c_size);
     } else {
         const int row_bytes = w * 4;
         m_impl->video_frame_buf.resize((size_t)row_bytes * h);
@@ -916,6 +921,7 @@ retry_output:
         out_frame.plane_count = 1;
         out_frame.plane_data[0] = m_impl->video_frame_buf.data();
         out_frame.plane_stride[0] = row_bytes;
+        out_frame.plane_offset[0] = 0;
     }
     out_frame.data = out_frame.plane_data[0];
     out_frame.stride = out_frame.plane_stride[0];

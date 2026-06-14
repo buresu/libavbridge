@@ -245,8 +245,10 @@ avb_result mf_decode_copy_cpu_frame(
         output.plane_count = 2;
         output.plane_data[0] = storage.data();
         output.plane_stride[0] = width;
+        output.plane_offset[0] = 0;
         output.plane_data[1] = storage.data() + y_size;
         output.plane_stride[1] = width;
+        output.plane_offset[1] = static_cast<int>(y_size);
     } else if (output_format == AVB_PIXEL_FORMAT_I420) {
         const int chroma_width = width / 2;
         const int chroma_height = height / 2;
@@ -265,11 +267,15 @@ avb_result mf_decode_copy_cpu_frame(
         output.plane_count = 3;
         output.plane_data[0] = storage.data();
         output.plane_stride[0] = width;
+        output.plane_offset[0] = 0;
         output.plane_data[1] = storage.data() + y_size;
         output.plane_stride[1] = chroma_width;
+        output.plane_offset[1] = static_cast<int>(y_size);
         output.plane_data[2] =
             storage.data() + y_size + chroma_size;
         output.plane_stride[2] = chroma_width;
+        output.plane_offset[2] =
+            static_cast<int>(y_size + chroma_size);
     } else {
         const int row_bytes = width * 4;
         storage.resize(static_cast<std::size_t>(row_bytes) * height);
@@ -292,6 +298,7 @@ avb_result mf_decode_copy_cpu_frame(
         output.plane_count = 1;
         output.plane_data[0] = storage.data();
         output.plane_stride[0] = row_bytes;
+        output.plane_offset[0] = 0;
     }
 
     output.data = output.plane_data[0];
