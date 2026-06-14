@@ -141,6 +141,39 @@ int main() {
             AVB_BACKEND_AUTO, nullptr, nullptr) == AVB_ERROR_INVALID_ARGUMENT,
         "encoder runtime query accepted a null output");
 
+    avb_encode_options encode = avb_encode_options_default();
+    encode.video.enable = 1;
+    encode.video.width = 16;
+    encode.video.height = 16;
+    encode.video.input_format = static_cast<avb_pixel_format>(999);
+    avb_encoder_validation validation{};
+    check(
+        avb_encoder_validate_options(
+            "output.mp4", &encode, &validation) == AVB_OK &&
+            validation.result == AVB_ERROR_INVALID_ARGUMENT,
+        "encoder validation accepted an invalid pixel format");
+    encode.video.input_format = AVB_PIXEL_FORMAT_BGRA8;
+    encode.video.input_memory = static_cast<avb_video_memory_type>(999);
+    check(
+        avb_encoder_validate_options(
+            "output.mp4", &encode, &validation) == AVB_OK &&
+            validation.result == AVB_ERROR_INVALID_ARGUMENT,
+        "encoder validation accepted an invalid memory type");
+    encode.video.input_memory = AVB_VIDEO_MEMORY_CPU;
+    encode.video.hardware_policy = static_cast<avb_hardware_policy>(999);
+    check(
+        avb_encoder_validate_options(
+            "output.mp4", &encode, &validation) == AVB_OK &&
+            validation.result == AVB_ERROR_INVALID_ARGUMENT,
+        "encoder validation accepted an invalid hardware policy");
+    encode.video.hardware_policy = AVB_HARDWARE_DISABLED;
+    encode.video.hardware_device = static_cast<avb_hardware_device>(999);
+    check(
+        avb_encoder_validate_options(
+            "output.mp4", &encode, &validation) == AVB_OK &&
+            validation.result == AVB_ERROR_INVALID_ARGUMENT,
+        "encoder validation accepted an invalid hardware device");
+
     const avb_backend backends[] = {
         AVB_BACKEND_AUTO,
         AVB_BACKEND_FFMPEG,
