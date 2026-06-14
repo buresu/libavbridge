@@ -152,7 +152,7 @@ void check_audio_conversion(Context &test, const char *path,
 }
 
 void check_cpu_frame_layout(Context &test, const avb_video_frame &frame,
-                            const FormatCase &format) {
+                            const FormatCase &format, avb_backend backend) {
   test.equal(frame.format, format.format, "requested format is returned");
   test.equal(frame.memory_type, AVB_VIDEO_MEMORY_CPU, "frame is CPU memory");
   test.equal(frame.external_type, AVB_VIDEO_EXTERNAL_NONE,
@@ -162,6 +162,18 @@ void check_cpu_frame_layout(Context &test, const avb_video_frame &frame,
   test.equal(frame.stride, frame.plane_stride[0],
              "stride aliases plane zero stride");
   test.check(frame.data_size > 0, "frame has a positive data size");
+  if (format.format == AVB_PIXEL_FORMAT_NV12 ||
+      format.format == AVB_PIXEL_FORMAT_I420) {
+    test.equal(frame.color_matrix, AVB_COLOR_MATRIX_BT601,
+               "YUV frame preserves the source color matrix");
+    if (backend == AVB_BACKEND_FFMPEG) {
+      test.equal(frame.color_range, AVB_COLOR_RANGE_LIMITED,
+                 "FFmpeg preserves the source color range");
+    } else if (backend == AVB_BACKEND_GSTREAMER) {
+      test.equal(frame.color_range, AVB_COLOR_RANGE_UNKNOWN,
+                 "GStreamer reports an unavailable source color range");
+    }
+  }
 
   for (int plane = 0; plane < frame.plane_count; ++plane) {
     test.check(frame.plane_data[plane] != nullptr,
@@ -254,7 +266,7 @@ void check_video(Context &test, const char *path, avb_backend backend) {
       if (frame_count == 0) {
         test.equal(frame.width, 320, "frame width is 320");
         test.equal(frame.height, 240, "frame height is 240");
-        check_cpu_frame_layout(test, frame, format);
+        check_cpu_frame_layout(test, frame, format, backend);
       }
       avb_decoder_release_video_frame(decoder, &frame);
       ++frame_count;

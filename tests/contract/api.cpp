@@ -131,6 +131,21 @@ void check_names(Context &test) {
 void check_defaults(Context &test) {
   test.section("defaults");
 
+  test.equal(AVB_COLOR_RANGE_UNKNOWN, 0,
+             "unknown color range remains zero-initializable");
+  test.equal(AVB_COLOR_RANGE_LIMITED, 1,
+             "limited color range has a stable ABI value");
+  test.equal(AVB_COLOR_RANGE_FULL, 2,
+             "full color range has a stable ABI value");
+  test.equal(AVB_COLOR_MATRIX_UNKNOWN, 0,
+             "unknown color matrix remains zero-initializable");
+  test.equal(AVB_COLOR_MATRIX_BT601, 1,
+             "BT.601 color matrix has a stable ABI value");
+  test.equal(AVB_COLOR_MATRIX_BT709, 2,
+             "BT.709 color matrix has a stable ABI value");
+  test.equal(AVB_COLOR_MATRIX_BT2020_NCL, 3,
+             "BT.2020 NCL color matrix has a stable ABI value");
+
   const avb_decode_options decode = avb_decode_options_default();
   test.equal(decode.backend, AVB_BACKEND_AUTO, "decode defaults to AUTO");
   test.equal(decode.audio_stream_index, -1, "audio stream defaults to auto");

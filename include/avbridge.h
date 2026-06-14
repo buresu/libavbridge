@@ -159,6 +159,19 @@ typedef enum avb_hardware_device {
     AVB_HW_DEVICE_AMF,
 } avb_hardware_device;
 
+typedef enum avb_color_range {
+    AVB_COLOR_RANGE_UNKNOWN = 0,
+    AVB_COLOR_RANGE_LIMITED,
+    AVB_COLOR_RANGE_FULL,
+} avb_color_range;
+
+typedef enum avb_color_matrix {
+    AVB_COLOR_MATRIX_UNKNOWN = 0,
+    AVB_COLOR_MATRIX_BT601,
+    AVB_COLOR_MATRIX_BT709,
+    AVB_COLOR_MATRIX_BT2020_NCL,
+} avb_color_matrix;
+
 /* ------------------------------------------------------------------------- *
  * Shared media types
  * ------------------------------------------------------------------------- */
@@ -192,6 +205,10 @@ typedef struct avb_video_frame {
     avb_video_memory_type memory_type;
     avb_video_external_type external_type;
     avb_hardware_device hardware_device;
+    /* Source YUV encoding metadata. UNKNOWN means the backend/container did
+     * not provide it. Consumers should choose a resolution-based fallback. */
+    avb_color_range color_range;
+    avb_color_matrix color_matrix;
 
     /* Valid planes: 1 for packed (RGBA8/BGRA8), 2 for NV12 (Y, CbCr),
      * 3 for I420 (Y, Cb, Cr). For CPU frames, plane_offset[p] is the byte

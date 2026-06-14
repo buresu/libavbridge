@@ -62,6 +62,66 @@ static bool parse_gst_drm_format(const char *text, uint32_t &fourcc, uint64_t &m
     return true;
 }
 
+static void fill_gst_color_metadata(
+    const AvbGstFuncs &gst,
+    const GstCaps *caps,
+    avb_video_frame &frame
+) {
+    frame.color_range = AVB_COLOR_RANGE_UNKNOWN;
+    frame.color_matrix = AVB_COLOR_MATRIX_UNKNOWN;
+    if (!caps) return;
+
+    const GstStructure *s = gst.gst_caps_get_structure(caps, 0);
+    const char *colorimetry = s
+        ? gst.gst_structure_get_string(s, "colorimetry")
+        : nullptr;
+    if (!colorimetry) return;
+
+    if (strcmp(colorimetry, "bt709") == 0) {
+        frame.color_range = AVB_COLOR_RANGE_LIMITED;
+        frame.color_matrix = AVB_COLOR_MATRIX_BT709;
+        return;
+    }
+    if (strcmp(colorimetry, "bt601") == 0 ||
+        strcmp(colorimetry, "smpte240m") == 0) {
+        frame.color_range = AVB_COLOR_RANGE_LIMITED;
+        frame.color_matrix = AVB_COLOR_MATRIX_BT601;
+        return;
+    }
+    if (strcmp(colorimetry, "bt2020") == 0) {
+        frame.color_range = AVB_COLOR_RANGE_LIMITED;
+        frame.color_matrix = AVB_COLOR_MATRIX_BT2020_NCL;
+        return;
+    }
+    if (strcmp(colorimetry, "sRGB") == 0) {
+        frame.color_range = AVB_COLOR_RANGE_FULL;
+        frame.color_matrix = AVB_COLOR_MATRIX_BT709;
+        return;
+    }
+
+    int range = 0;
+    int matrix = 0;
+    if (sscanf(colorimetry, "%d:%d:", &range, &matrix) == 2) {
+        if (range == 1) frame.color_range = AVB_COLOR_RANGE_FULL;
+        if (range == 2) frame.color_range = AVB_COLOR_RANGE_LIMITED;
+        switch (matrix) {
+            case 2:
+            case 4:
+            case 5:
+                frame.color_matrix = AVB_COLOR_MATRIX_BT601;
+                break;
+            case 3:
+                frame.color_matrix = AVB_COLOR_MATRIX_BT709;
+                break;
+            case 6:
+                frame.color_matrix = AVB_COLOR_MATRIX_BT2020_NCL;
+                break;
+            default:
+                break;
+        }
+    }
+}
+
 // Map a GStreamer source-stream caps name to the same short codec name the
 // ffmpeg backend reports, so avb_*_info::codec_name is consistent across
 // backends. Unknown types fall back to the caps media type minus prefix.
@@ -825,6 +885,7 @@ avb_result AvbDecoderGStreamer::fill_dmabuf_video_frame(
     out_frame.height = h;
     out_frame.format = AVB_PIXEL_FORMAT_UNKNOWN;
     out_frame.pts_sec = pts_sec;
+    fill_gst_color_metadata(m_gst, caps, out_frame);
     out_frame.memory_type = AVB_VIDEO_MEMORY_EXTERNAL;
     out_frame.external_type = AVB_VIDEO_EXTERNAL_DMABUF;
     out_frame.hardware_device = m_hw_device;
@@ -902,6 +963,7 @@ avb_result AvbDecoderGStreamer::read_video_frame(avb_video_frame &out_frame) {
             out_frame.height = h;
             out_frame.format = m_video_format;
             out_frame.pts_sec = pts_sec;
+            fill_gst_color_metadata(m_gst, caps, out_frame);
             out_frame.memory_type = AVB_VIDEO_MEMORY_BACKEND_NATIVE;
             out_frame.hardware_device = m_hw_device;
             out_frame.native_handle = buf;
@@ -961,6 +1023,7 @@ avb_result AvbDecoderGStreamer::read_video_frame(avb_video_frame &out_frame) {
         out_frame.height      = h;
         out_frame.format      = m_video_format;
         out_frame.pts_sec     = pts_sec;
+        fill_gst_color_metadata(m_gst, caps, out_frame);
         out_frame.memory_type = AVB_VIDEO_MEMORY_CPU;
         out_frame.hardware_device = AVB_HW_DEVICE_AUTO;
         out_frame.plane_count = plane_count;

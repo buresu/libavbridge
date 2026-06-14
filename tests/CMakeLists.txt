@@ -83,6 +83,8 @@ if(FFMPEG_EXECUTABLE)
                 -f lavfi -i "testsrc=duration=3:size=320x240:rate=25"
                 -f lavfi -i "sine=frequency=440:duration=3"
                 -c:v libx264 -c:a aac -pix_fmt yuv420p -ar 44100 -ac 1
+                -color_range tv -colorspace smpte170m
+                -color_primaries smpte170m -color_trc smpte170m
                 "${AVB_FIXTURE}"
         COMMENT "Generating conformance fixture with ffmpeg"
         VERBATIM

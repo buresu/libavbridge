@@ -18,6 +18,36 @@ static uint32_t avb_infer_drm_frame_format(const AVDRMFrameDescriptor *drm) {
     return drm->layers[0].format;
 }
 
+static avb_color_range avb_color_range_from_ffmpeg(AVColorRange range) {
+    switch (range) {
+        case AVCOL_RANGE_MPEG: return AVB_COLOR_RANGE_LIMITED;
+        case AVCOL_RANGE_JPEG: return AVB_COLOR_RANGE_FULL;
+        default:               return AVB_COLOR_RANGE_UNKNOWN;
+    }
+}
+
+static avb_color_matrix avb_color_matrix_from_ffmpeg(AVColorSpace space) {
+    switch (space) {
+        case AVCOL_SPC_BT709:
+            return AVB_COLOR_MATRIX_BT709;
+        case AVCOL_SPC_BT470BG:
+        case AVCOL_SPC_SMPTE170M:
+        case AVCOL_SPC_FCC:
+        case AVCOL_SPC_SMPTE240M:
+            return AVB_COLOR_MATRIX_BT601;
+        case AVCOL_SPC_BT2020_NCL:
+        case AVCOL_SPC_BT2020_CL:
+            return AVB_COLOR_MATRIX_BT2020_NCL;
+        default:
+            return AVB_COLOR_MATRIX_UNKNOWN;
+    }
+}
+
+static void avb_fill_ffmpeg_color(const AVFrame *frame, avb_video_frame &out) {
+    out.color_range = avb_color_range_from_ffmpeg(frame->color_range);
+    out.color_matrix = avb_color_matrix_from_ffmpeg(frame->colorspace);
+}
+
 AvbDecoderFFmpeg::AvbDecoderFFmpeg() {
     char err_buf[512];
     m_libs_loaded = avb_ffmpeg_load(m_ff, err_buf, sizeof(err_buf));
@@ -778,6 +808,7 @@ avb_result AvbDecoderFFmpeg::fill_native_video_frame(
     out_frame.height = frame->height;
     out_frame.format = m_video_format;
     out_frame.pts_sec = pts_sec;
+    avb_fill_ffmpeg_color(frame, out_frame);
     out_frame.memory_type = AVB_VIDEO_MEMORY_BACKEND_NATIVE;
     out_frame.hardware_device = m_hw_device;
     out_frame.plane_count = 0;
@@ -822,6 +853,7 @@ avb_result AvbDecoderFFmpeg::fill_dmabuf_video_frame(
     out_frame.height = frame->height;
     out_frame.format = AVB_PIXEL_FORMAT_UNKNOWN;
     out_frame.pts_sec = pts_sec;
+    avb_fill_ffmpeg_color(frame, out_frame);
     out_frame.memory_type = AVB_VIDEO_MEMORY_EXTERNAL;
     out_frame.external_type = AVB_VIDEO_EXTERNAL_DMABUF;
     out_frame.hardware_device = m_hw_device;
@@ -895,6 +927,7 @@ avb_result AvbDecoderFFmpeg::fill_cpu_video_frame(
     out_frame.height      = h;
     out_frame.format      = m_video_format;
     out_frame.pts_sec     = pts_sec;
+    avb_fill_ffmpeg_color(frame, out_frame);
     out_frame.memory_type = AVB_VIDEO_MEMORY_CPU;
     out_frame.hardware_device = AVB_HW_DEVICE_AUTO;
     out_frame.plane_count = plane_count;
