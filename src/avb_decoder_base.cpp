@@ -1,5 +1,4 @@
 #include "avb_decoder_impl.hpp"
-#include "avb_backend_internal.hpp"
 
 #include <cstring>
 #include <cstdio>
@@ -11,22 +10,6 @@
 #else
 #  include <cstdlib>
 #  include <unistd.h>
-#endif
-
-#if defined(AVB_ENABLE_FFMPEG)
-#include "backends/ffmpeg/avb_decoder_ffmpeg.hpp"
-#endif
-
-#if defined(AVB_ENABLE_MEDIAFOUNDATION)
-#include "backends/mediafoundation/avb_decoder_mediafoundation.hpp"
-#endif
-
-#if defined(AVB_ENABLE_AVFOUNDATION)
-#include "backends/avfoundation/avb_decoder_avfoundation.hh"
-#endif
-
-#if defined(AVB_ENABLE_GSTREAMER)
-#include "backends/gstreamer/avb_decoder_gstreamer.hpp"
 #endif
 
 AvbDecoderImpl::~AvbDecoderImpl() {
@@ -111,25 +94,3 @@ avb_result AvbDecoderImpl::open_io(const avb_io_callbacks &cb, void *user,
     return open_file(path.c_str(), options);
 }
 
-AvbDecoderImpl *avb_create_decoder_impl(avb_backend backend) {
-    switch (avb::detail::resolve_backend(backend)) {
-#if defined(AVB_ENABLE_GSTREAMER)
-        case AVB_BACKEND_GSTREAMER:
-            return new AvbDecoderGStreamer();
-#endif
-#if defined(AVB_ENABLE_FFMPEG)
-        case AVB_BACKEND_FFMPEG:
-            return new AvbDecoderFFmpeg();
-#endif
-#if defined(AVB_ENABLE_MEDIAFOUNDATION)
-        case AVB_BACKEND_MEDIAFOUNDATION:
-            return new AvbDecoderMediaFoundation();
-#endif
-#if defined(AVB_ENABLE_AVFOUNDATION)
-        case AVB_BACKEND_AVFOUNDATION:
-            return new AvbDecoderAVFoundation();
-#endif
-        default:
-            return nullptr;
-    }
-}

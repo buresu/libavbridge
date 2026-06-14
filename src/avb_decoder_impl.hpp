@@ -2,6 +2,7 @@
 
 #include "avbridge.h"
 
+#include <memory>
 #include <string>
 
 class AvbDecoderImpl {
@@ -36,4 +37,4 @@ protected:
     std::string m_spill_path;
 };
 
-AvbDecoderImpl *avb_create_decoder_impl(avb_backend backend);
+std::unique_ptr<AvbDecoderImpl> avb_create_decoder_backend(avb_backend backend);

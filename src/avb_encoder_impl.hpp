@@ -2,6 +2,8 @@
 
 #include "avbridge.h"
 
+#include <memory>
+
 class AvbEncoderImpl {
 public:
     virtual ~AvbEncoderImpl() = default;
@@ -13,4 +15,4 @@ public:
     virtual const char *get_last_error() const = 0;
 };
 
-AvbEncoderImpl *avb_create_encoder_impl(avb_backend backend);
+std::unique_ptr<AvbEncoderImpl> avb_create_encoder_backend(avb_backend backend);

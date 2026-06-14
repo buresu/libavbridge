@@ -4,6 +4,7 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <utility>
 
 struct avb_decoder {
     std::unique_ptr<AvbDecoderImpl> impl;
@@ -88,13 +89,13 @@ avb_decode_options avb_decode_options_default(void) {
 static avb_result decoder_create(avb_decoder **out_dec, avb_backend be,
                                  avb_decoder **dec_out) {
     auto *dec = new avb_decoder();
-    AvbDecoderImpl *impl = avb_create_decoder_impl(be);
+    auto impl = avb_create_decoder_backend(be);
     if (!impl) {
         dec->set_error("Requested backend is not available on this platform.");
         *out_dec = dec;
         return AVB_ERROR_BACKEND_NOT_AVAILABLE;
     }
-    dec->impl.reset(impl);
+    dec->impl = std::move(impl);
     *dec_out = dec;
     return AVB_OK;
 }

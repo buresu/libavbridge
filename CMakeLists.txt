@@ -27,11 +27,11 @@ elseif(UNIX AND NOT APPLE)
 endif()
 
 set(AVB_SOURCES
+    src/avb_backend_factory.cpp
     src/avb_decoder.cpp
+    src/avb_decoder_base.cpp
     src/avb_core.cpp
-    src/avb_decoder_impl.cpp
     src/avb_encoder.cpp
-    src/avb_encoder_impl.cpp
     src/avb_capabilities.cpp
     src/avb_validation.cpp
     src/avb_probe.cpp

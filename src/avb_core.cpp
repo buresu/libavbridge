@@ -1,5 +1,5 @@
 #include "avbridge.h"
-#include "avb_backend_internal.hpp"
+#include "avb_backend.hpp"
 
 #include <cstring>
 

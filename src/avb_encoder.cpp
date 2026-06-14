@@ -3,6 +3,7 @@
 
 #include <memory>
 #include <string>
+#include <utility>
 
 struct avb_encoder {
     std::unique_ptr<AvbEncoderImpl> impl;
@@ -45,13 +46,13 @@ avb_result avb_encoder_open(avb_encoder **out_enc, const char *path,
         return validation.result;
     }
 
-    AvbEncoderImpl *impl = avb_create_encoder_impl(options->backend);
+    auto impl = avb_create_encoder_backend(options->backend);
     if (!impl) {
         enc->set_error("Requested encoder backend is not available on this platform.");
         *out_enc = enc;
         return AVB_ERROR_BACKEND_NOT_AVAILABLE;
     }
-    enc->impl.reset(impl);
+    enc->impl = std::move(impl);
 
     avb_result res = enc->impl->open(path, *options);
     if (res != AVB_OK) {
