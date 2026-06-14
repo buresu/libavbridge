@@ -1,4 +1,5 @@
 #include "avb_runtime_mediafoundation.hpp"
+#include "avb_runtime_capability_builder.hpp"
 
 #if defined(AVB_ENABLE_MEDIAFOUNDATION)
 
@@ -11,59 +12,15 @@
 
 using Microsoft::WRL::ComPtr;
 using avb::detail::Container;
-using avb::detail::add_unique;
 using avb::detail::audio_only_container;
-using avb::detail::container_accepts_audio;
-using avb::detail::container_accepts_video;
+using avb::runtime::add_audio_codec;
+using avb::runtime::add_audio_codec_unchecked;
+using avb::runtime::add_device;
+using avb::runtime::add_memory;
+using avb::runtime::add_software_pixel_formats;
+using avb::runtime::add_video_codec;
 
 namespace {
-
-void add_video_codec(
-    avb_decoder_capabilities &out,
-    avb_video_codec codec,
-    Container container) {
-    if (container_accepts_video(container, codec))
-        add_unique(out.video_codecs, out.video_codec_count, codec);
-}
-
-void add_video_codec(
-    avb_encoder_capabilities &out,
-    avb_video_codec codec,
-    Container container) {
-    if (container_accepts_video(container, codec))
-        add_unique(out.video_codecs, out.video_codec_count, codec);
-}
-
-void add_audio_codec(
-    avb_decoder_capabilities &out,
-    avb_audio_codec codec,
-    Container container) {
-    if (container_accepts_audio(container, codec))
-        add_unique(out.audio_codecs, out.audio_codec_count, codec);
-}
-
-void add_audio_codec_unchecked(
-    avb_encoder_capabilities &out,
-    avb_audio_codec codec) {
-    add_unique(out.audio_codecs, out.audio_codec_count, codec);
-}
-
-void add_software_pixel_formats(avb_decoder_capabilities &out) {
-    add_unique(out.pixel_formats, out.pixel_format_count, AVB_PIXEL_FORMAT_BGRA8);
-    add_unique(out.pixel_formats, out.pixel_format_count, AVB_PIXEL_FORMAT_RGBA8);
-    add_unique(out.pixel_formats, out.pixel_format_count, AVB_PIXEL_FORMAT_NV12);
-    add_unique(out.pixel_formats, out.pixel_format_count, AVB_PIXEL_FORMAT_I420);
-}
-
-template <typename Capabilities>
-void add_memory(Capabilities &out, avb_video_memory_type memory) {
-    add_unique(out.video_memory, out.video_memory_count, memory);
-}
-
-template <typename Capabilities>
-void add_device(Capabilities &out, avb_hardware_device device) {
-    add_unique(out.hardware_devices, out.hardware_device_count, device);
-}
 
 bool video_container(Container container) {
     return container == Container::any ||
