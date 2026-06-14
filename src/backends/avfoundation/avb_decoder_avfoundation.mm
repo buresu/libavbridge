@@ -351,7 +351,7 @@ avb_result AvbDecoderAVFoundation::open_file(const char *path, const avb_decode_
                         (NSString *)kCVPixelBufferPixelFormatTypeKey:
                             @(m_impl->cv_pixel_format),
                     } mutableCopy];
-                    if (native)
+                    if (external)
                         settings[(NSString *)kCVPixelBufferIOSurfacePropertiesKey] = @{};
 
                     m_impl->video_output = [AVAssetReaderTrackOutput
