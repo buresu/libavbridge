@@ -460,13 +460,19 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
             if (m_hw_frames_ctx) m_venc->hw_frames_ctx = m_ff.av_buffer_ref(m_hw_frames_ctx);
         }
 
-        // Speed knobs for the common encoders. avcodec_open2 silently ignores
-        // options a given encoder doesn't recognise, so it is safe to set the
-        // x264/x265 "preset" and the libvpx "deadline"/"cpu-used" together.
         AVDictionary *vopts = nullptr;
-        m_ff.av_dict_set(&vopts, "preset",   "veryfast", 0);
-        m_ff.av_dict_set(&vopts, "deadline", "realtime", 0);
-        m_ff.av_dict_set(&vopts, "cpu-used", "8",        0);
+        const char *encoder_name = vcodec->name ? vcodec->name : "";
+        if (strcmp(encoder_name, "libx264") == 0 ||
+            strcmp(encoder_name, "libx265") == 0) {
+            m_ff.av_dict_set(&vopts, "preset", "veryfast", 0);
+        } else if (strcmp(encoder_name, "libvpx") == 0 ||
+                   strcmp(encoder_name, "libvpx-vp9") == 0) {
+            m_ff.av_dict_set(&vopts, "deadline", "realtime", 0);
+            m_ff.av_dict_set(&vopts, "cpu-used", "8", 0);
+        } else if (strcmp(encoder_name, "libsvtav1") == 0) {
+            // SVT-AV1 presets are integer levels, not x264-style names.
+            m_ff.av_dict_set(&vopts, "preset", "8", 0);
+        }
         ret = m_ff.avcodec_open2(m_venc, vcodec, &vopts);
         m_ff.av_dict_free(&vopts);
         if (ret < 0) { set_ff_error("avcodec_open2 (video)", ret); return AVB_ERROR_OPEN_FAILED; }
@@ -540,6 +546,8 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
             m_aenc->bit_rate = options.audio.bitrate > 0 ? options.audio.bitrate : 128000;
         m_aenc->time_base   = AVRational{1, m_sample_rate};
         if (global_header) m_aenc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+        if (acodec->name && strcmp(acodec->name, "vorbis") == 0)
+            m_aenc->strict_std_compliance = FF_COMPLIANCE_EXPERIMENTAL;
 
         ret = m_ff.avcodec_open2(m_aenc, acodec, nullptr);
         if (ret < 0) { set_ff_error("avcodec_open2 (audio)", ret); return AVB_ERROR_OPEN_FAILED; }
