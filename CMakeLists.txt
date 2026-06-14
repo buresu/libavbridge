@@ -10,26 +10,17 @@ option(AVB_BUILD_SHARED "Build shared library" ON)
 option(AVB_BUILD_EXAMPLES "Build examples" ON)
 option(AVB_BUILD_TESTS "Build tests" OFF)
 
-# Native platform backends (each only builds on its own OS).
 option(AVB_ENABLE_MEDIAFOUNDATION "Enable Windows Media Foundation backend" ON)
 option(AVB_ENABLE_AVFOUNDATION "Enable Apple AVFoundation backend" ON)
-
-# GStreamer is the default backend on Linux; available (opt-in) elsewhere.
-if(UNIX AND NOT APPLE)
-    option(AVB_ENABLE_GSTREAMER "Enable GStreamer runtime backend" ON)
-else()
-    option(AVB_ENABLE_GSTREAMER "Enable GStreamer runtime backend" OFF)
-endif()
-
-# FFmpeg is an optional, cross-platform runtime backend (dynamically loaded).
-# Off by default everywhere; enable it explicitly on Windows/macOS/Linux.
+option(AVB_ENABLE_GSTREAMER "Enable GStreamer runtime backend" ON)
 option(AVB_ENABLE_FFMPEG "Enable FFmpeg runtime backend" OFF)
 
-# The native backends are OS-bound: force them off where they cannot build.
 if(WIN32)
     set(AVB_ENABLE_AVFOUNDATION OFF CACHE BOOL "" FORCE)
+    set(AVB_ENABLE_GSTREAMER OFF CACHE BOOL "" FORCE)
 elseif(APPLE)
     set(AVB_ENABLE_MEDIAFOUNDATION OFF CACHE BOOL "" FORCE)
+    set(AVB_ENABLE_GSTREAMER OFF CACHE BOOL "" FORCE)
 elseif(UNIX AND NOT APPLE)
     set(AVB_ENABLE_MEDIAFOUNDATION OFF CACHE BOOL "" FORCE)
     set(AVB_ENABLE_AVFOUNDATION OFF CACHE BOOL "" FORCE)
@@ -64,8 +55,6 @@ if(AVB_ENABLE_AVFOUNDATION)
         src/backends/avfoundation/avb_decoder_avfoundation.mm
         src/backends/avfoundation/avb_encoder_avfoundation.mm
     )
-    # The Objective-C++ backends rely on ARC for memory management of the
-    # AVFoundation objects they retain across calls.
     set_source_files_properties(
         src/backends/avfoundation/avb_decoder_avfoundation.mm
         src/backends/avfoundation/avb_encoder_avfoundation.mm
