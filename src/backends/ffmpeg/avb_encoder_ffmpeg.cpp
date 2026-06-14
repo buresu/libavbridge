@@ -1,13 +1,16 @@
 #include "avb_encoder_ffmpeg.hpp"
-#include "avb_dmabuf_util.hpp"
 #include "avb_video_plugins.hpp"
+
+#if defined(__linux__)
+#include "avb_dmabuf_util.hpp"
+#include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
-#include <unistd.h>
 
 static AVCodecID avb_ff_video_codec_id(avb_video_codec codec) {
     switch (codec) {
@@ -168,6 +171,7 @@ static const char *const *avb_ff_hw_encoder_names(avb_video_codec codec,
     }
 }
 
+#if defined(__linux__)
 static void avb_free_drm_descriptor(void *, uint8_t *data) {
     auto *drm = reinterpret_cast<AVDRMFrameDescriptor *>(data);
     if (!drm) return;
@@ -176,6 +180,7 @@ static void avb_free_drm_descriptor(void *, uint8_t *data) {
     }
     delete drm;
 }
+#endif
 
 AvbEncoderFFmpeg::AvbEncoderFFmpeg() {
     char err_buf[512];
@@ -710,6 +715,13 @@ avb_result AvbEncoderFFmpeg::prepare_dmabuf_video_frame(
     double pts_sec,
     AVFrame **out_frame
 ) {
+#if !defined(__linux__)
+    (void)frame;
+    (void)pts_sec;
+    (void)out_frame;
+    set_error("FFmpeg DMABUF input is only supported on Linux.");
+    return AVB_ERROR_INVALID_ARGUMENT;
+#else
     if (!m_hw_video || m_hw_device != AVB_HW_DEVICE_VAAPI || !m_drm_import_frame) {
         set_error("FFmpeg DMABUF import currently requires the VAAPI hardware encoder path.");
         return AVB_ERROR_INVALID_ARGUMENT;
@@ -799,6 +811,7 @@ avb_result AvbEncoderFFmpeg::prepare_dmabuf_video_frame(
     m_hw_vframe->pts = std::llround(pts * m_fps);
     *out_frame = m_hw_vframe;
     return AVB_OK;
+#endif
 }
 
 avb_result AvbEncoderFFmpeg::write_video(const avb_video_frame &frame, double pts_sec) {
