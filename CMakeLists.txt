@@ -30,10 +30,11 @@ set(AVB_SOURCES
     src/avb_backend_factory.cpp
     src/avb_decoder.cpp
     src/avb_decoder_base.cpp
+    src/avb_decoder_validation.cpp
     src/avb_core.cpp
     src/avb_encoder.cpp
+    src/avb_encoder_validation.cpp
     src/avb_capabilities.cpp
-    src/avb_validation.cpp
     src/avb_probe.cpp
     src/avb_runtime_capabilities.cpp
     src/avb_video_plugins.cpp
