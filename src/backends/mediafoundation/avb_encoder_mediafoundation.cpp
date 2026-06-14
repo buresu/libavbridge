@@ -428,6 +428,20 @@ avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_op
                 out_type->SetBlob(MF_MT_MPEG_SEQUENCE_HEADER,
                                   stream.extradata, (UINT32)stream.extradata_size);
             }
+            if (stream.codec_tag != 0 &&
+                (stream.codec == AVB_VIDEO_CODEC_HAP ||
+                 options.video.codec == AVB_VIDEO_CODEC_HAP)) {
+                hr = mf_encode_set_mpeg4_video_sample_description(
+                    out_type.Get(), stream.codec_tag,
+                    static_cast<unsigned int>(m_impl->width),
+                    static_cast<unsigned int>(m_impl->height));
+                if (FAILED(hr)) {
+                    if (plugin->close && ctx) plugin->close(ctx);
+                    m_last_error =
+                        "Creating the custom video sample description failed.";
+                    return AVB_ERROR_OPEN_FAILED;
+                }
+            }
 
             hr = m_impl->writer->AddStream(out_type.Get(), &m_impl->video_stream);
             if (FAILED(hr)) {
@@ -960,9 +974,11 @@ avb_result AvbEncoderMediaFoundation::write_video(const avb_video_frame &frame, 
         avb_result res = m_impl->custom_video_encoder->encode_frame(
             m_impl->custom_video_ctx, &frame, pts_sec, &packet);
         if (res != AVB_OK) return res;
+        AvbVideoEncoderPacketScope packet_scope(
+            m_impl->custom_video_encoder,
+            m_impl->custom_video_ctx,
+            packet);
         if (!packet.data || packet.size <= 0) {
-            if (m_impl->custom_video_encoder->release_packet)
-                m_impl->custom_video_encoder->release_packet(m_impl->custom_video_ctx, &packet);
             m_last_error = "Custom video encoder returned an empty packet.";
             return AVB_ERROR_ENCODE_FAILED;
         }
@@ -977,15 +993,11 @@ avb_result AvbEncoderMediaFoundation::write_video(const avb_video_frame &frame, 
         ComPtr<IMFMediaBuffer> buf;
         HRESULT hr = MFCreateMemoryBuffer((DWORD)packet.size, &buf);
         if (FAILED(hr)) {
-            if (m_impl->custom_video_encoder->release_packet)
-                m_impl->custom_video_encoder->release_packet(m_impl->custom_video_ctx, &packet);
             m_last_error = "MFCreateMemoryBuffer (custom video) failed.";
             return AVB_ERROR_ENCODE_FAILED;
         }
         BYTE *data = nullptr;
         if (FAILED(buf->Lock(&data, nullptr, nullptr))) {
-            if (m_impl->custom_video_encoder->release_packet)
-                m_impl->custom_video_encoder->release_packet(m_impl->custom_video_ctx, &packet);
             m_last_error = "Lock (custom video buffer) failed.";
             return AVB_ERROR_ENCODE_FAILED;
         }
@@ -997,8 +1009,6 @@ avb_result AvbEncoderMediaFoundation::write_video(const avb_video_frame &frame, 
             (DWORD)packet.size,
             mf_encode_seconds_to_hns(pts),
             mf_encode_seconds_to_hns(dur));
-        if (m_impl->custom_video_encoder->release_packet)
-            m_impl->custom_video_encoder->release_packet(m_impl->custom_video_ctx, &packet);
         if (FAILED(hr)) {
             char b[144];
             snprintf(b, sizeof(b), "WriteSample (custom video) failed: 0x%08lx", hr);
@@ -1289,6 +1299,10 @@ avb_result AvbEncoderMediaFoundation::finish() {
                 m_impl->custom_video_ctx, &packet);
             if (r == AVB_ERROR_EOF || r == AVB_ERROR_AGAIN) break;
             if (r != AVB_OK) return r;
+            AvbVideoEncoderPacketScope packet_scope(
+                m_impl->custom_video_encoder,
+                m_impl->custom_video_ctx,
+                packet);
             if (packet.data && packet.size > 0) {
                 double pts = packet.pts_sec >= 0.0
                     ? packet.pts_sec : (double)m_impl->video_index / m_impl->frame_rate;
@@ -1309,8 +1323,6 @@ avb_result AvbEncoderMediaFoundation::finish() {
                 if (FAILED(bhr)) return AVB_ERROR_ENCODE_FAILED;
                 m_impl->video_index++;
             }
-            if (m_impl->custom_video_encoder->release_packet)
-                m_impl->custom_video_encoder->release_packet(m_impl->custom_video_ctx, &packet);
         }
     }
 

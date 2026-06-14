@@ -146,12 +146,6 @@ avb_result avb_encoder_validate_options(const char *path,
     }
 #endif
 
-    if (!out->backend_name || !avb_backend_is_available(out->backend)) {
-        set_result(*out, AVB_ERROR_BACKEND_NOT_AVAILABLE,
-                   "Requested encoder backend is not available in this build.");
-        return AVB_OK;
-    }
-
     bool custom_video = has_custom_video_encoder(*options);
     avb_video_codec video_codec = out->video_codec;
     avb_audio_codec audio_codec = out->audio_codec;
@@ -170,6 +164,12 @@ avb_result avb_encoder_validate_options(const char *path,
     if (options->audio.enable && !container_accepts_audio(container, audio_codec)) {
         set_result(*out, AVB_ERROR_INVALID_ARGUMENT,
                    "The output container does not support the requested audio codec.");
+        return AVB_OK;
+    }
+
+    if (!out->backend_name || !avb_backend_is_available(out->backend)) {
+        set_result(*out, AVB_ERROR_BACKEND_NOT_AVAILABLE,
+                   "Requested encoder backend is not available in this build.");
         return AVB_OK;
     }
 
