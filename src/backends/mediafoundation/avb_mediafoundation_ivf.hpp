@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <mfidl.h>
 #include <vector>
 
 struct MfIvfHeader {
@@ -30,6 +31,23 @@ MfIvfReadResult mf_ivf_read_frame(
     FILE *file,
     std::vector<unsigned char> &packet,
     uint64_t &timestamp);
+
+GUID mf_ivf_codec_subtype(avb_video_codec codec);
+
+HRESULT mf_ivf_configure_decoder_types(
+    IMFTransform *decoder,
+    const MfIvfHeader &header,
+    DWORD *output_size,
+    DWORD *output_flags);
+
+HRESULT mf_ivf_select_decoder_output(
+    IMFTransform *decoder,
+    int *width,
+    int *height,
+    uint32_t rate,
+    uint32_t scale,
+    DWORD *output_size,
+    DWORD *output_flags);
 
 bool mf_ivf_write_header(FILE *file, const MfIvfHeader &header);
 bool mf_ivf_write_frame(

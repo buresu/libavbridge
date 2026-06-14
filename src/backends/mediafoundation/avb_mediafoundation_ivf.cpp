@@ -4,7 +4,13 @@
 
 #include "avb_mediafoundation_common.hpp"
 
+#include <mfapi.h>
+#include <mferror.h>
+#include <wrl/client.h>
+
 #include <cstring>
+
+using Microsoft::WRL::ComPtr;
 
 namespace {
 
@@ -25,6 +31,19 @@ uint32_t fourcc_from_codec(avb_video_codec codec) {
 }
 
 } // namespace
+
+GUID mf_ivf_codec_subtype(avb_video_codec codec) {
+    switch (codec) {
+        case AVB_VIDEO_CODEC_VP8:
+            return MFVideoFormat_VP80;
+        case AVB_VIDEO_CODEC_VP9:
+            return mf_video_subtype_from_fourcc(mf_fourcc("VP90"));
+        case AVB_VIDEO_CODEC_AV1:
+            return MFVideoFormat_AV1;
+        default:
+            return GUID_NULL;
+    }
+}
 
 MfIvfReadResult mf_ivf_read_header(FILE *file, MfIvfHeader &out) {
     if (!file) return MfIvfReadResult::invalid;
@@ -55,6 +74,137 @@ MfIvfReadResult mf_ivf_read_header(FILE *file, MfIvfHeader &out) {
         return MfIvfReadResult::invalid;
     }
     return MfIvfReadResult::ok;
+}
+
+HRESULT mf_ivf_select_decoder_output(
+    IMFTransform *decoder,
+    int *width,
+    int *height,
+    uint32_t rate,
+    uint32_t scale,
+    DWORD *output_size,
+    DWORD *output_flags) {
+    if (!decoder || !width || !height ||
+        !output_size || !output_flags) {
+        return E_POINTER;
+    }
+
+    HRESULT result = MF_E_INVALIDMEDIATYPE;
+    for (DWORD index = 0;; ++index) {
+        ComPtr<IMFMediaType> candidate;
+        HRESULT hr =
+            decoder->GetOutputAvailableType(0, index, &candidate);
+        if (hr == MF_E_NO_MORE_TYPES) break;
+        if (FAILED(hr) || !candidate) continue;
+
+        GUID subtype = GUID_NULL;
+        candidate->GetGUID(MF_MT_SUBTYPE, &subtype);
+        if (!IsEqualGUID(subtype, MFVideoFormat_NV12)) continue;
+
+        if (*width > 0 && *height > 0) {
+            MFSetAttributeSize(
+                candidate.Get(), MF_MT_FRAME_SIZE,
+                static_cast<UINT32>(*width),
+                static_cast<UINT32>(*height));
+        }
+        if (rate > 0 && scale > 0) {
+            MFSetAttributeRatio(
+                candidate.Get(), MF_MT_FRAME_RATE, rate, scale);
+        }
+        result = decoder->SetOutputType(0, candidate.Get(), 0);
+        if (FAILED(result)) continue;
+
+        UINT32 selected_width = 0;
+        UINT32 selected_height = 0;
+        if (SUCCEEDED(MFGetAttributeSize(
+                candidate.Get(), MF_MT_FRAME_SIZE,
+                &selected_width, &selected_height)) &&
+            selected_width > 0 && selected_height > 0) {
+            *width = static_cast<int>(selected_width);
+            *height = static_cast<int>(selected_height);
+        }
+        break;
+    }
+    if (FAILED(result)) return result;
+
+    MFT_OUTPUT_STREAM_INFO info{};
+    if (SUCCEEDED(decoder->GetOutputStreamInfo(0, &info))) {
+        *output_size = info.cbSize;
+        *output_flags = info.dwFlags;
+    }
+    if (*output_size == 0 && *width > 0 && *height > 0) {
+        *output_size = static_cast<DWORD>(
+            static_cast<std::size_t>(*width) * *height * 3 / 2);
+    }
+    return S_OK;
+}
+
+HRESULT mf_ivf_configure_decoder_types(
+    IMFTransform *decoder,
+    const MfIvfHeader &header,
+    DWORD *output_size,
+    DWORD *output_flags) {
+    if (!decoder || !output_size || !output_flags) return E_POINTER;
+
+    const GUID input_subtype = mf_ivf_codec_subtype(header.codec);
+    if (IsEqualGUID(input_subtype, GUID_NULL))
+        return MF_E_INVALIDMEDIATYPE;
+
+    ComPtr<IMFMediaType> input_type;
+    HRESULT hr = MFCreateMediaType(&input_type);
+    if (FAILED(hr)) return hr;
+    input_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+    input_type->SetGUID(MF_MT_SUBTYPE, input_subtype);
+    input_type->SetUINT32(
+        MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+    MFSetAttributeSize(
+        input_type.Get(), MF_MT_FRAME_SIZE,
+        static_cast<UINT32>(header.width),
+        static_cast<UINT32>(header.height));
+    MFSetAttributeRatio(
+        input_type.Get(), MF_MT_FRAME_RATE,
+        header.rate, header.scale);
+    MFSetAttributeRatio(
+        input_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+    hr = decoder->SetInputType(0, input_type.Get(), 0);
+    if (FAILED(hr)) return hr;
+
+    ComPtr<IMFMediaType> output_type;
+    hr = MFCreateMediaType(&output_type);
+    if (FAILED(hr)) return hr;
+    output_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+    output_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
+    output_type->SetUINT32(
+        MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+    MFSetAttributeSize(
+        output_type.Get(), MF_MT_FRAME_SIZE,
+        static_cast<UINT32>(header.width),
+        static_cast<UINT32>(header.height));
+    MFSetAttributeRatio(
+        output_type.Get(), MF_MT_FRAME_RATE,
+        header.rate, header.scale);
+    MFSetAttributeRatio(
+        output_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+    hr = decoder->SetOutputType(0, output_type.Get(), 0);
+    if (FAILED(hr)) {
+        int width = header.width;
+        int height = header.height;
+        return mf_ivf_select_decoder_output(
+            decoder, &width, &height, header.rate, header.scale,
+            output_size, output_flags);
+    }
+
+    MFT_OUTPUT_STREAM_INFO info{};
+    if (SUCCEEDED(decoder->GetOutputStreamInfo(0, &info))) {
+        *output_size = info.cbSize;
+        *output_flags = info.dwFlags;
+    }
+    if (*output_size == 0) {
+        *output_size = static_cast<DWORD>(
+            static_cast<std::size_t>(header.width) *
+            header.height * 3 / 2);
+    }
+    return S_OK;
 }
 
 MfIvfReadResult mf_ivf_read_frame(

@@ -223,11 +223,7 @@ avb_result AvbDecoderMediaFoundation::open_ivf(
     m_impl->ivf_frame_count = header.frame_count;
     m_impl->ivf_data_offset = header.data_offset;
 
-    GUID input_subtype = header.codec == AVB_VIDEO_CODEC_VP8
-        ? MFVideoFormat_VP80
-        : header.codec == AVB_VIDEO_CODEC_VP9
-            ? mf_video_subtype_from_fourcc(mf_fourcc("VP90"))
-            : MFVideoFormat_AV1;
+    GUID input_subtype = mf_ivf_codec_subtype(header.codec);
     MFT_REGISTER_TYPE_INFO decoder_type{
         MFMediaType_Video, input_subtype};
     HRESULT hr = mf_create_transform(
@@ -281,70 +277,18 @@ avb_result AvbDecoderMediaFoundation::open_ivf(
         }
     }
 
-    ComPtr<IMFMediaType> input_type;
-    MFCreateMediaType(&input_type);
-    input_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-    input_type->SetGUID(MF_MT_SUBTYPE, input_subtype);
-    input_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-    MFSetAttributeSize(input_type.Get(), MF_MT_FRAME_SIZE,
-                       m_impl->width, m_impl->height);
-    MFSetAttributeRatio(input_type.Get(), MF_MT_FRAME_RATE,
-                        m_impl->ivf_rate, m_impl->ivf_scale);
-    MFSetAttributeRatio(input_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-    hr = m_impl->ivf_decoder->SetInputType(0, input_type.Get(), 0);
+    hr = mf_ivf_configure_decoder_types(
+        m_impl->ivf_decoder.Get(), header,
+        &m_impl->ivf_output_size, &m_impl->ivf_output_flags);
     if (FAILED(hr)) {
         fclose(file);
         char buf[160];
-        snprintf(buf, sizeof(buf), "SetInputType (IVF decoder) failed: 0x%08lx", hr);
+        snprintf(
+            buf, sizeof(buf),
+            "Configuring IVF decoder media types failed: 0x%08lx", hr);
         m_last_error = buf;
         return AVB_ERROR_OPEN_FAILED;
     }
-
-    ComPtr<IMFMediaType> output_type;
-    MFCreateMediaType(&output_type);
-    output_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-    output_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
-    output_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-    MFSetAttributeSize(output_type.Get(), MF_MT_FRAME_SIZE,
-                       m_impl->width, m_impl->height);
-    MFSetAttributeRatio(output_type.Get(), MF_MT_FRAME_RATE,
-                        m_impl->ivf_rate, m_impl->ivf_scale);
-    MFSetAttributeRatio(output_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-    hr = m_impl->ivf_decoder->SetOutputType(0, output_type.Get(), 0);
-    if (FAILED(hr)) {
-        for (DWORD i = 0; ; ++i) {
-            ComPtr<IMFMediaType> candidate;
-            HRESULT type_hr = m_impl->ivf_decoder->GetOutputAvailableType(
-                0, i, &candidate);
-            if (type_hr == MF_E_NO_MORE_TYPES) break;
-            if (FAILED(type_hr) || !candidate) continue;
-            GUID subtype = GUID_NULL;
-            candidate->GetGUID(MF_MT_SUBTYPE, &subtype);
-            if (!IsEqualGUID(subtype, MFVideoFormat_NV12)) continue;
-            MFSetAttributeSize(candidate.Get(), MF_MT_FRAME_SIZE,
-                               m_impl->width, m_impl->height);
-            MFSetAttributeRatio(candidate.Get(), MF_MT_FRAME_RATE,
-                                m_impl->ivf_rate, m_impl->ivf_scale);
-            hr = m_impl->ivf_decoder->SetOutputType(0, candidate.Get(), 0);
-            if (SUCCEEDED(hr)) break;
-        }
-    }
-    if (FAILED(hr)) {
-        fclose(file);
-        char buf[160];
-        snprintf(buf, sizeof(buf), "SetOutputType (IVF decoder) failed: 0x%08lx", hr);
-        m_last_error = buf;
-        return AVB_ERROR_OPEN_FAILED;
-    }
-
-    MFT_OUTPUT_STREAM_INFO osi{};
-    if (SUCCEEDED(m_impl->ivf_decoder->GetOutputStreamInfo(0, &osi))) {
-        m_impl->ivf_output_size = osi.cbSize;
-        m_impl->ivf_output_flags = osi.dwFlags;
-    }
-    if (m_impl->ivf_output_size == 0)
-        m_impl->ivf_output_size =
-            (DWORD)((size_t)m_impl->width * m_impl->height * 3 / 2);
 
     m_impl->video_avb_fmt =
         m_impl->ivf_native_output ? AVB_PIXEL_FORMAT_NV12 :
@@ -720,36 +664,12 @@ retry_output:
         HRESULT hr = m_impl->ivf_decoder->ProcessOutput(0, 1, &output, &status);
         if (output.pEvents) output.pEvents->Release();
         if (hr == MF_E_TRANSFORM_STREAM_CHANGE) {
-            HRESULT type_result = MF_E_INVALIDMEDIATYPE;
-            for (DWORD i = 0; ; ++i) {
-                ComPtr<IMFMediaType> candidate;
-                HRESULT type_hr = m_impl->ivf_decoder->GetOutputAvailableType(
-                    0, i, &candidate);
-                if (type_hr == MF_E_NO_MORE_TYPES) break;
-                if (FAILED(type_hr) || !candidate) continue;
-                GUID subtype = GUID_NULL;
-                candidate->GetGUID(MF_MT_SUBTYPE, &subtype);
-                if (!IsEqualGUID(subtype, MFVideoFormat_NV12)) continue;
-                type_result = m_impl->ivf_decoder->SetOutputType(
-                    0, candidate.Get(), 0);
-                if (SUCCEEDED(type_result)) {
-                    UINT32 width = 0, height = 0;
-                    if (SUCCEEDED(MFGetAttributeSize(
-                            candidate.Get(), MF_MT_FRAME_SIZE,
-                            &width, &height)) &&
-                        width > 0 && height > 0) {
-                        m_impl->width = (int)width;
-                        m_impl->height = (int)height;
-                    }
-                    MFT_OUTPUT_STREAM_INFO osi{};
-                    if (SUCCEEDED(m_impl->ivf_decoder->GetOutputStreamInfo(
-                            0, &osi))) {
-                        m_impl->ivf_output_size = osi.cbSize;
-                        m_impl->ivf_output_flags = osi.dwFlags;
-                    }
-                    break;
-                }
-            }
+            HRESULT type_result = mf_ivf_select_decoder_output(
+                m_impl->ivf_decoder.Get(),
+                &m_impl->width, &m_impl->height,
+                m_impl->ivf_rate, m_impl->ivf_scale,
+                &m_impl->ivf_output_size,
+                &m_impl->ivf_output_flags);
             if (FAILED(type_result)) {
                 m_last_error = "IVF decoder output format change was not NV12.";
                 return AVB_ERROR_DECODE_FAILED;
