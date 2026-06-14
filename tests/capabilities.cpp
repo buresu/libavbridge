@@ -101,6 +101,59 @@ void check_plugin_registry() {
         "encoder registry did not remove a duplicate registration once");
 }
 
+void check_capability_messages() {
+    avb_decoder_capabilities decoder{};
+    check(
+        avb_decoder_query_capabilities(
+            static_cast<avb_backend>(AVB_BACKEND_COUNT),
+            nullptr,
+            &decoder) == AVB_OK &&
+            decoder.result == AVB_ERROR_BACKEND_NOT_AVAILABLE &&
+            decoder.message &&
+            std::strcmp(
+                decoder.message,
+                "Requested decoder backend is not available in this build.") ==
+                0,
+        "decoder unavailable message changed");
+
+    avb_encoder_capabilities encoder{};
+    check(
+        avb_encoder_probe_runtime_capabilities(
+            static_cast<avb_backend>(AVB_BACKEND_COUNT),
+            nullptr,
+            &encoder) == AVB_OK &&
+            encoder.result == AVB_ERROR_BACKEND_NOT_AVAILABLE &&
+            encoder.message &&
+            std::strcmp(
+                encoder.message,
+                "Requested encoder backend is not available in this build.") ==
+                0,
+        "encoder unavailable message changed");
+
+    if (avb_decoder_query_capabilities(
+            AVB_BACKEND_AUTO, nullptr, &decoder) == AVB_OK &&
+        decoder.result == AVB_OK) {
+        check(
+            decoder.message &&
+                std::strcmp(
+                decoder.message,
+                "Decoder capabilities are statically available.") == 0,
+            "decoder static success message changed");
+    }
+
+    if (avb_encoder_probe_runtime_capabilities(
+            AVB_BACKEND_AUTO, nullptr, &encoder) == AVB_OK &&
+        encoder.result == AVB_OK) {
+        check(
+            encoder.message &&
+                std::strcmp(
+                encoder.message,
+                "Encoder capabilities are available in the current runtime.") ==
+                0,
+            "encoder runtime success message changed");
+    }
+}
+
 void check_decoder(
     avb_result (*query)(
         avb_backend,
@@ -202,6 +255,7 @@ void check_encoder(
 
 int main() {
     check_plugin_registry();
+    check_capability_messages();
 
     avb_decoder_capabilities auto_caps{};
     check(

@@ -1,5 +1,5 @@
 #include "avbridge.h"
-#include "avb_media_rules.hpp"
+#include "avb_capability_query.hpp"
 
 #if defined(AVB_ENABLE_FFMPEG)
 #include "backends/ffmpeg/avb_runtime_ffmpeg.hpp"
@@ -18,40 +18,10 @@
 #endif
 
 using avb::detail::Container;
-using avb::detail::container_from_path;
-using avb::detail::container_name;
-using avb::detail::resolve_backend;
+using avb::capability::QueryTraits;
+using avb::capability::run_query;
 
 namespace {
-
-template <typename Capabilities>
-struct ProbeTraits;
-
-template <>
-struct ProbeTraits<avb_decoder_capabilities> {
-    static constexpr const char *unavailable_message =
-        "Requested decoder backend is not available in this build.";
-    static constexpr const char *success_message =
-        "Decoder capabilities are available in the current runtime.";
-
-    static void finish(avb_decoder_capabilities &out) {
-        out.can_decode_video = out.video_codec_count > 0 ? 1 : 0;
-        out.can_decode_audio = out.audio_codec_count > 0 ? 1 : 0;
-    }
-};
-
-template <>
-struct ProbeTraits<avb_encoder_capabilities> {
-    static constexpr const char *unavailable_message =
-        "Requested encoder backend is not available in this build.";
-    static constexpr const char *success_message =
-        "Encoder capabilities are available in the current runtime.";
-
-    static void finish(avb_encoder_capabilities &out) {
-        out.can_encode_video = out.video_codec_count > 0 ? 1 : 0;
-        out.can_encode_audio = out.audio_codec_count > 0 ? 1 : 0;
-    }
-};
 
 #if defined(AVB_ENABLE_FFMPEG)
 bool probe_ffmpeg(avb_decoder_capabilities &out, Container container) {
@@ -150,32 +120,18 @@ avb_result probe_runtime_capabilities(
     avb_backend backend,
     const char *path,
     Capabilities *out) {
-    if (!out) return AVB_ERROR_INVALID_ARGUMENT;
-
-    *out = {};
-    Container container = container_from_path(path, Container::any);
-    out->result = AVB_OK;
-    out->backend = resolve_backend(backend);
-    out->backend_name = avb_backend_name(out->backend);
-    out->container_name = container_name(container);
-
-    if (!out->backend_name || !avb_backend_is_available(out->backend)) {
-        out->result = AVB_ERROR_BACKEND_NOT_AVAILABLE;
-        out->message = ProbeTraits<Capabilities>::unavailable_message;
-        return AVB_OK;
-    }
-
-    const char *failure_message =
-        ProbeTraits<Capabilities>::unavailable_message;
-    if (!probe_backend(out->backend, *out, container, failure_message)) {
-        out->result = AVB_ERROR_BACKEND_NOT_AVAILABLE;
-        out->message = failure_message;
-        return AVB_OK;
-    }
-
-    ProbeTraits<Capabilities>::finish(*out);
-    out->message = ProbeTraits<Capabilities>::success_message;
-    return AVB_OK;
+    return run_query(
+        backend,
+        path,
+        out,
+        QueryTraits<Capabilities>::runtime_success_message,
+        [](avb_backend resolved,
+           Capabilities &caps,
+           Container container,
+           const char *&failure_message) {
+            return probe_backend(
+                resolved, caps, container, failure_message);
+        });
 }
 
 }  // namespace
