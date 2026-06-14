@@ -49,6 +49,14 @@ HRESULT mf_ivf_select_decoder_output(
     DWORD *output_size,
     DWORD *output_flags);
 
+HRESULT mf_ivf_configure_encoder_types(
+    IMFTransform *encoder,
+    const MfIvfHeader &header,
+    int bitrate,
+    bool *input_nv12,
+    DWORD *output_size,
+    DWORD *output_flags);
+
 bool mf_ivf_write_header(FILE *file, const MfIvfHeader &header);
 bool mf_ivf_write_frame(
     FILE *file,

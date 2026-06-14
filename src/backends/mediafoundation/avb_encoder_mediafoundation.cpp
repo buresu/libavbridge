@@ -204,88 +204,22 @@ avb_result AvbEncoderMediaFoundation::open_ivf_video(
         }
     }
 
-    ComPtr<IMFMediaType> out_type;
-    MFCreateMediaType(&out_type);
-    out_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-    out_type->SetGUID(MF_MT_SUBTYPE, out_subtype);
-    out_type->SetUINT32(MF_MT_AVG_BITRATE,
-                        (UINT32)(options.video.bitrate > 0
-                            ? options.video.bitrate : 2000000));
-    out_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-    if (codec == AVB_VIDEO_CODEC_VP9)
-        out_type->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncVP9VProfile_420_8);
-    if (codec == AVB_VIDEO_CODEC_AV1)
-        out_type->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncAV1VProfile_Main_420_8);
-    MFSetAttributeSize(out_type.Get(), MF_MT_FRAME_SIZE,
-                       m_impl->width, m_impl->height);
-    MFSetAttributeRatio(out_type.Get(), MF_MT_FRAME_RATE,
-                        m_impl->fps_num, m_impl->fps_den);
-    MFSetAttributeRatio(out_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-
-    ComPtr<IMFMediaType> in_type;
-    MFCreateMediaType(&in_type);
-    in_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-    in_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
-    in_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-    MFSetAttributeSize(in_type.Get(), MF_MT_FRAME_SIZE,
-                       m_impl->width, m_impl->height);
-    MFSetAttributeRatio(in_type.Get(), MF_MT_FRAME_RATE,
-                        m_impl->fps_num, m_impl->fps_den);
-    MFSetAttributeRatio(in_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-    in_type->SetUINT32(MF_MT_DEFAULT_STRIDE, (UINT32)m_impl->width);
-
-    bool input_type_set = false;
-    hr = mf_encode_select_video_output_type(
-        m_impl->video_encoder.Get(), out_type.Get(), out_subtype,
-        (UINT32)m_impl->width, (UINT32)m_impl->height,
-        m_impl->fps_num, m_impl->fps_den);
+    MfIvfHeader header{
+        codec, m_impl->width, m_impl->height,
+        m_impl->fps_num, m_impl->fps_den, 0, 32};
+    hr = mf_ivf_configure_encoder_types(
+        m_impl->video_encoder.Get(), header, options.video.bitrate,
+        &m_impl->ivf_mft_input_nv12,
+        &m_impl->video_encoder_out_size,
+        &m_impl->video_encoder_out_flags);
     if (FAILED(hr)) {
-        bool ignored_nv12 = true;
-        HRESULT input_first = mf_encode_select_video_input_type(
-            m_impl->video_encoder.Get(), in_type.Get(),
-            (UINT32)m_impl->width, (UINT32)m_impl->height,
-            m_impl->fps_num, m_impl->fps_den, &ignored_nv12);
-        if (SUCCEEDED(input_first)) {
-            hr = mf_encode_select_video_output_type(
-                m_impl->video_encoder.Get(), out_type.Get(), out_subtype,
-                (UINT32)m_impl->width, (UINT32)m_impl->height,
-                m_impl->fps_num, m_impl->fps_den);
-            if (SUCCEEDED(hr)) {
-                m_impl->ivf_mft_input_nv12 = ignored_nv12;
-                input_type_set = true;
-            }
-        }
-        if (FAILED(hr)) {
-            char buf[160];
-            snprintf(buf, sizeof(buf), "SetOutputType (%s encoder) failed: 0x%08lx",
-                     mf_encode_video_codec_name(codec), hr);
-            m_last_error = buf;
-            return AVB_ERROR_OPEN_FAILED;
-        }
-    }
-
-    if (!input_type_set) {
-        hr = mf_encode_select_video_input_type(
-            m_impl->video_encoder.Get(), in_type.Get(),
-            (UINT32)m_impl->width, (UINT32)m_impl->height,
-            m_impl->fps_num, m_impl->fps_den, &m_impl->ivf_mft_input_nv12);
-        if (FAILED(hr)) {
-            char buf[160];
-            snprintf(buf, sizeof(buf), "SetInputType (%s encoder) failed: 0x%08lx",
-                     mf_encode_video_codec_name(codec), hr);
-            m_last_error = buf;
-            return AVB_ERROR_OPEN_FAILED;
-        }
-    }
-
-    MFT_OUTPUT_STREAM_INFO osi{};
-    if (SUCCEEDED(m_impl->video_encoder->GetOutputStreamInfo(0, &osi))) {
-        m_impl->video_encoder_out_size = osi.cbSize;
-        m_impl->video_encoder_out_flags = osi.dwFlags;
-    }
-    if (m_impl->video_encoder_out_size == 0) {
-        m_impl->video_encoder_out_size =
-            (DWORD)std::max(65536, m_impl->width * m_impl->height * 2);
+        char buf[160];
+        snprintf(
+            buf, sizeof(buf),
+            "Configuring %s IVF encoder media types failed: 0x%08lx",
+            mf_encode_video_codec_name(codec), hr);
+        m_last_error = buf;
+        return AVB_ERROR_OPEN_FAILED;
     }
 
     m_impl->ivf_file = fopen(path, "wb");
@@ -293,9 +227,6 @@ avb_result AvbEncoderMediaFoundation::open_ivf_video(
         m_last_error = "Opening IVF output file failed.";
         return AVB_ERROR_OPEN_FAILED;
     }
-    MfIvfHeader header{
-        codec, m_impl->width, m_impl->height,
-        m_impl->fps_num, m_impl->fps_den, 0, 32};
     if (!mf_ivf_write_header(m_impl->ivf_file, header)) {
         m_last_error = "Writing IVF header failed.";
         return AVB_ERROR_OPEN_FAILED;

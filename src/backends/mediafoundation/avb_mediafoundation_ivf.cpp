@@ -3,7 +3,9 @@
 #ifdef _WIN32
 
 #include "avb_mediafoundation_common.hpp"
+#include "avb_mediafoundation_encode_types.hpp"
 
+#include <codecapi.h>
 #include <mfapi.h>
 #include <mferror.h>
 #include <wrl/client.h>
@@ -203,6 +205,116 @@ HRESULT mf_ivf_configure_decoder_types(
         *output_size = static_cast<DWORD>(
             static_cast<std::size_t>(header.width) *
             header.height * 3 / 2);
+    }
+    return S_OK;
+}
+
+HRESULT mf_ivf_configure_encoder_types(
+    IMFTransform *encoder,
+    const MfIvfHeader &header,
+    int bitrate,
+    bool *input_nv12,
+    DWORD *output_size,
+    DWORD *output_flags) {
+    if (!encoder || !input_nv12 || !output_size || !output_flags)
+        return E_POINTER;
+
+    const GUID output_subtype = mf_ivf_codec_subtype(header.codec);
+    if (IsEqualGUID(output_subtype, GUID_NULL))
+        return MF_E_INVALIDMEDIATYPE;
+
+    ComPtr<IMFMediaType> output_type;
+    HRESULT hr = MFCreateMediaType(&output_type);
+    if (FAILED(hr)) return hr;
+    output_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+    output_type->SetGUID(MF_MT_SUBTYPE, output_subtype);
+    output_type->SetUINT32(
+        MF_MT_AVG_BITRATE,
+        static_cast<UINT32>(bitrate > 0 ? bitrate : 2000000));
+    output_type->SetUINT32(
+        MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+    if (header.codec == AVB_VIDEO_CODEC_VP9) {
+        output_type->SetUINT32(
+            MF_MT_MPEG2_PROFILE, eAVEncVP9VProfile_420_8);
+    }
+    if (header.codec == AVB_VIDEO_CODEC_AV1) {
+        output_type->SetUINT32(
+            MF_MT_MPEG2_PROFILE, eAVEncAV1VProfile_Main_420_8);
+    }
+    MFSetAttributeSize(
+        output_type.Get(), MF_MT_FRAME_SIZE,
+        static_cast<UINT32>(header.width),
+        static_cast<UINT32>(header.height));
+    MFSetAttributeRatio(
+        output_type.Get(), MF_MT_FRAME_RATE,
+        header.rate, header.scale);
+    MFSetAttributeRatio(
+        output_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+
+    ComPtr<IMFMediaType> input_type;
+    hr = MFCreateMediaType(&input_type);
+    if (FAILED(hr)) return hr;
+    input_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+    input_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
+    input_type->SetUINT32(
+        MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+    MFSetAttributeSize(
+        input_type.Get(), MF_MT_FRAME_SIZE,
+        static_cast<UINT32>(header.width),
+        static_cast<UINT32>(header.height));
+    MFSetAttributeRatio(
+        input_type.Get(), MF_MT_FRAME_RATE,
+        header.rate, header.scale);
+    MFSetAttributeRatio(
+        input_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+    input_type->SetUINT32(
+        MF_MT_DEFAULT_STRIDE, static_cast<UINT32>(header.width));
+
+    bool input_type_set = false;
+    hr = mf_encode_select_video_output_type(
+        encoder, output_type.Get(), output_subtype,
+        static_cast<UINT32>(header.width),
+        static_cast<UINT32>(header.height),
+        header.rate, header.scale);
+    if (FAILED(hr)) {
+        bool selected_nv12 = true;
+        HRESULT input_first = mf_encode_select_video_input_type(
+            encoder, input_type.Get(),
+            static_cast<UINT32>(header.width),
+            static_cast<UINT32>(header.height),
+            header.rate, header.scale, &selected_nv12);
+        if (SUCCEEDED(input_first)) {
+            hr = mf_encode_select_video_output_type(
+                encoder, output_type.Get(), output_subtype,
+                static_cast<UINT32>(header.width),
+                static_cast<UINT32>(header.height),
+                header.rate, header.scale);
+            if (SUCCEEDED(hr)) {
+                *input_nv12 = selected_nv12;
+                input_type_set = true;
+            }
+        }
+        if (FAILED(hr)) return hr;
+    }
+
+    if (!input_type_set) {
+        hr = mf_encode_select_video_input_type(
+            encoder, input_type.Get(),
+            static_cast<UINT32>(header.width),
+            static_cast<UINT32>(header.height),
+            header.rate, header.scale, input_nv12);
+        if (FAILED(hr)) return hr;
+    }
+
+    MFT_OUTPUT_STREAM_INFO info{};
+    if (SUCCEEDED(encoder->GetOutputStreamInfo(0, &info))) {
+        *output_size = info.cbSize;
+        *output_flags = info.dwFlags;
+    }
+    if (*output_size == 0) {
+        const int estimated_size = header.width * header.height * 2;
+        *output_size = static_cast<DWORD>(
+            estimated_size > 65536 ? estimated_size : 65536);
     }
     return S_OK;
 }
