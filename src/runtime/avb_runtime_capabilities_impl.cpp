@@ -10,6 +10,7 @@
 #endif
 
 #if defined(AVB_ENABLE_MEDIAFOUNDATION)
+#include "backends/mediafoundation/avb_mediafoundation_common.hpp"
 #include <mfapi.h>
 #include <mfidl.h>
 #include <codecapi.h>
@@ -129,17 +130,6 @@ static void fill_platform_encoder(avb_encoder_capabilities &out, Container c) {
 // container filter above keeps obviously incompatible file extensions out.
 // SourceReader/SinkWriter can still reject a concrete session later because of
 // profile, bitrate, resolution, or media-sink limits.
-struct MfStartupScope {
-    bool started = false;
-
-    MfStartupScope() {
-        started = SUCCEEDED(MFStartup(MF_VERSION, MFSTARTUP_LITE));
-    }
-
-    ~MfStartupScope() {
-        if (started) MFShutdown();
-    }
-};
 
 static uint32_t mf_fourcc(const char (&s)[5]) {
     return ((uint32_t)(unsigned char)s[0]) |
@@ -1020,7 +1010,7 @@ avb_result avb_runtime_probe_decoder_impl(
 #if defined(AVB_ENABLE_MEDIAFOUNDATION)
         {
             MfStartupScope mf;
-            if (!mf.started) {
+            if (!mf.started()) {
                 out->result = AVB_ERROR_BACKEND_NOT_AVAILABLE;
                 out->message = "Media Foundation runtime is not available.";
                 return AVB_OK;
@@ -1118,7 +1108,7 @@ avb_result avb_runtime_probe_encoder_impl(
 #if defined(AVB_ENABLE_MEDIAFOUNDATION)
         {
             MfStartupScope mf;
-            if (!mf.started) {
+            if (!mf.started()) {
                 out->result = AVB_ERROR_BACKEND_NOT_AVAILABLE;
                 out->message = "Media Foundation runtime is not available.";
                 return AVB_OK;

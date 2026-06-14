@@ -53,6 +53,7 @@ set(AVB_SOURCES
 if(AVB_ENABLE_MEDIAFOUNDATION)
     list(APPEND AVB_SOURCES
         src/backends/mediafoundation/avb_mediafoundation_common.cpp
+        src/backends/mediafoundation/avb_mediafoundation_ivf.cpp
         src/backends/mediafoundation/avb_decoder_mediafoundation.cpp
         src/backends/mediafoundation/avb_encoder_mediafoundation.cpp
     )

@@ -1,5 +1,6 @@
 #include "avb_encoder_mediafoundation.hpp"
 #include "avb_mediafoundation_common.hpp"
+#include "avb_mediafoundation_ivf.hpp"
 #include "../../avb_capability_common.hpp"
 #include "../../avb_video_codec_registry.hpp"
 
@@ -288,97 +289,6 @@ static bool mf_ivf_codec(avb_video_codec codec) {
            codec == AVB_VIDEO_CODEC_AV1;
 }
 
-static uint32_t ivf_fourcc(avb_video_codec codec) {
-    switch (codec) {
-        case AVB_VIDEO_CODEC_VP8: return mf_fourcc("VP80");
-        case AVB_VIDEO_CODEC_VP9: return mf_fourcc("VP90");
-        case AVB_VIDEO_CODEC_AV1: return mf_fourcc("AV01");
-        default: return 0;
-    }
-}
-
-static bool write_ivf_header(FILE *f, avb_video_codec codec, int width, int height,
-                             UINT32 fps_num, UINT32 fps_den, uint32_t frames) {
-    if (!f) return false;
-    unsigned char h[32] = {};
-    h[0] = 'D'; h[1] = 'K'; h[2] = 'I'; h[3] = 'F';
-    mf_write_le16(h + 4, 0);
-    mf_write_le16(h + 6, 32);
-    mf_write_le32(h + 8, ivf_fourcc(codec));
-    mf_write_le16(h + 12, (uint16_t)width);
-    mf_write_le16(h + 14, (uint16_t)height);
-    mf_write_le32(h + 16, fps_num ? fps_num : 30);
-    mf_write_le32(h + 20, fps_den ? fps_den : 1);
-    mf_write_le32(h + 24, frames);
-    mf_write_le32(h + 28, 0);
-    return fwrite(h, 1, sizeof(h), f) == sizeof(h);
-}
-
-static bool write_ivf_frame(FILE *f, const unsigned char *data, DWORD size,
-                            uint64_t timestamp) {
-    if (!f || !data || size == 0) return false;
-    unsigned char h[12] = {};
-    mf_write_le32(h, (uint32_t)size);
-    mf_write_le64(h + 4, timestamp);
-    return fwrite(h, 1, sizeof(h), f) == sizeof(h) &&
-           fwrite(data, 1, size, f) == size;
-}
-
-static HRESULT create_video_encoder_mft(const GUID &out_subtype,
-                                        IMFTransform **out,
-                                        bool *is_async) {
-    if (!out || !is_async) return E_POINTER;
-    *out = nullptr;
-    *is_async = false;
-
-    MFT_REGISTER_TYPE_INFO type{};
-    type.guidMajorType = MFMediaType_Video;
-    type.guidSubtype = out_subtype;
-
-    IMFActivate **activates = nullptr;
-    UINT32 count = 0;
-    HRESULT hr = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_ALL,
-                           nullptr, &type, &activates, &count);
-    if (SUCCEEDED(hr) && count == 0) hr = MF_E_TOPO_CODEC_NOT_FOUND;
-    if (SUCCEEDED(hr)) {
-        hr = MF_E_TOPO_CODEC_NOT_FOUND;
-        for (UINT32 i = 0; i < count; ++i) {
-            ComPtr<IMFTransform> candidate;
-            HRESULT activate_hr = activates[i]->ActivateObject(
-                IID_PPV_ARGS(&candidate));
-            if (FAILED(activate_hr) || !candidate) {
-                hr = activate_hr;
-                continue;
-            }
-
-            ComPtr<IMFAttributes> attributes;
-            UINT32 async_flag = FALSE;
-            if (SUCCEEDED(candidate->GetAttributes(&attributes)) && attributes)
-                attributes->GetUINT32(MF_TRANSFORM_ASYNC, &async_flag);
-            if (async_flag) {
-                HRESULT unlock_hr = attributes->SetUINT32(
-                    MF_TRANSFORM_ASYNC_UNLOCK, TRUE);
-                if (FAILED(unlock_hr)) {
-                    hr = unlock_hr;
-                    activates[i]->ShutdownObject();
-                    continue;
-                }
-            }
-
-            hr = candidate.CopyTo(out);
-            *is_async = async_flag != FALSE;
-            break;
-        }
-    }
-    if (activates) {
-        for (UINT32 i = 0; i < count; ++i) {
-            if (activates[i]) activates[i]->Release();
-        }
-        CoTaskMemFree(activates);
-    }
-    return hr;
-}
-
 static HRESULT select_video_output_type(IMFTransform *encoder,
                                         IMFMediaType *preferred,
                                         const GUID &subtype,
@@ -470,8 +380,11 @@ avb_result AvbEncoderMediaFoundation::open_ivf_video(
     }
 
     GUID out_subtype = mf_video_subtype_from_codec(codec, 0);
-    HRESULT hr = create_video_encoder_mft(
-        out_subtype, &m_impl->video_encoder, &m_impl->video_encoder_async);
+    MFT_REGISTER_TYPE_INFO encoder_type{
+        MFMediaType_Video, out_subtype};
+    HRESULT hr = mf_create_transform(
+        MFT_CATEGORY_VIDEO_ENCODER, nullptr, &encoder_type,
+        &m_impl->video_encoder, &m_impl->video_encoder_async);
     if (FAILED(hr) || !m_impl->video_encoder) {
         char buf[160];
         snprintf(buf, sizeof(buf), "Create %s encoder MFT failed: 0x%08lx",
@@ -576,8 +489,10 @@ avb_result AvbEncoderMediaFoundation::open_ivf_video(
         m_last_error = "Opening IVF output file failed.";
         return AVB_ERROR_OPEN_FAILED;
     }
-    if (!write_ivf_header(m_impl->ivf_file, codec, m_impl->width, m_impl->height,
-                          m_impl->fps_num, m_impl->fps_den, 0)) {
+    MfIvfHeader header{
+        codec, m_impl->width, m_impl->height,
+        m_impl->fps_num, m_impl->fps_den, 0, 32};
+    if (!mf_ivf_write_header(m_impl->ivf_file, header)) {
         m_last_error = "Writing IVF header failed.";
         return AVB_ERROR_OPEN_FAILED;
     }
@@ -1174,7 +1089,7 @@ avb_result AvbEncoderMediaFoundation::process_video_mft_output() {
             m_last_error = "Lock (IVF encoded buffer) failed.";
             return AVB_ERROR_ENCODE_FAILED;
         }
-        bool ok = write_ivf_frame(
+        bool ok = mf_ivf_write_frame(
             m_impl->ivf_file, data, cur_len, m_impl->ivf_frame_count);
         encoded->Unlock();
         if (!ok) {
@@ -1678,11 +1593,12 @@ avb_result AvbEncoderMediaFoundation::finish() {
         if (drained != AVB_OK) return drained;
 
         if (m_impl->ivf_file) {
+            MfIvfHeader header{
+                m_impl->ivf_codec, m_impl->width, m_impl->height,
+                m_impl->fps_num, m_impl->fps_den,
+                m_impl->ivf_frame_count, 32};
             if (fseek(m_impl->ivf_file, 0, SEEK_SET) != 0 ||
-                !write_ivf_header(m_impl->ivf_file, m_impl->ivf_codec,
-                                  m_impl->width, m_impl->height,
-                                  m_impl->fps_num, m_impl->fps_den,
-                                  m_impl->ivf_frame_count)) {
+                !mf_ivf_write_header(m_impl->ivf_file, header)) {
                 m_last_error = "Updating IVF header failed.";
                 return AVB_ERROR_ENCODE_FAILED;
             }

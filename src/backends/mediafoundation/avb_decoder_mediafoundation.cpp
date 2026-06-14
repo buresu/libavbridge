@@ -1,5 +1,6 @@
 #include "avb_decoder_mediafoundation.hpp"
 #include "avb_mediafoundation_common.hpp"
+#include "avb_mediafoundation_ivf.hpp"
 #include "../../avb_video_codec_registry.hpp"
 
 #ifdef _WIN32
@@ -283,55 +284,6 @@ static std::string mf_native_codec_name(IMFSourceReader *reader, DWORD stream) {
     return first;
 }
 
-static HRESULT create_video_decoder_mft(const GUID &input_subtype,
-                                        IMFTransform **out,
-                                        bool *is_async) {
-    if (!out || !is_async) return E_POINTER;
-    *out = nullptr;
-    *is_async = false;
-
-    MFT_REGISTER_TYPE_INFO type{};
-    type.guidMajorType = MFMediaType_Video;
-    type.guidSubtype = input_subtype;
-    IMFActivate **activates = nullptr;
-    UINT32 count = 0;
-    HRESULT hr = MFTEnumEx(MFT_CATEGORY_VIDEO_DECODER, MFT_ENUM_FLAG_ALL,
-                           &type, nullptr, &activates, &count);
-    if (SUCCEEDED(hr) && count == 0) hr = MF_E_TOPO_CODEC_NOT_FOUND;
-    if (SUCCEEDED(hr)) {
-        hr = MF_E_TOPO_CODEC_NOT_FOUND;
-        for (UINT32 i = 0; i < count; ++i) {
-            ComPtr<IMFTransform> candidate;
-            HRESULT activate_hr = activates[i]->ActivateObject(
-                IID_PPV_ARGS(&candidate));
-            if (FAILED(activate_hr) || !candidate) {
-                hr = activate_hr;
-                continue;
-            }
-            ComPtr<IMFAttributes> attributes;
-            UINT32 async_flag = FALSE;
-            if (SUCCEEDED(candidate->GetAttributes(&attributes)) && attributes)
-                attributes->GetUINT32(MF_TRANSFORM_ASYNC, &async_flag);
-            if (async_flag &&
-                (!attributes ||
-                 FAILED(attributes->SetUINT32(MF_TRANSFORM_ASYNC_UNLOCK, TRUE)))) {
-                activates[i]->ShutdownObject();
-                continue;
-            }
-            hr = candidate.CopyTo(out);
-            *is_async = async_flag != FALSE;
-            break;
-        }
-    }
-    if (activates) {
-        for (UINT32 i = 0; i < count; ++i) {
-            if (activates[i]) activates[i]->Release();
-        }
-        CoTaskMemFree(activates);
-    }
-    return hr;
-}
-
 static uint32_t mf_fourcc_from_subtype(const GUID &sub) {
     return sub.Data1;
 }
@@ -426,47 +378,36 @@ avb_result AvbDecoderMediaFoundation::open_ivf(
         m_last_error = "Opening IVF input failed.";
         return AVB_ERROR_OPEN_FAILED;
     }
-    unsigned char header[32] = {};
-    if (fread(header, 1, sizeof(header), file) != sizeof(header) ||
-        memcmp(header, "DKIF", 4) != 0 ||
-        mf_read_le16(header + 6) < 32) {
+    MfIvfHeader header{};
+    MfIvfReadResult header_result = mf_ivf_read_header(file, header);
+    if (header_result == MfIvfReadResult::unsupported) {
+        fclose(file);
+        m_last_error = "IVF codec is not VP8, VP9, or AV1.";
+        return AVB_ERROR_STREAM_NOT_FOUND;
+    }
+    if (header_result != MfIvfReadResult::ok) {
         fclose(file);
         m_last_error = "Invalid IVF header.";
         return AVB_ERROR_OPEN_FAILED;
     }
 
-    uint32_t fourcc = mf_read_le32(header + 8);
-    const uint32_t vp80 = mf_read_le32((const unsigned char *)"VP80");
-    const uint32_t vp90 = mf_read_le32((const unsigned char *)"VP90");
-    const uint32_t av01 = mf_read_le32((const unsigned char *)"AV01");
-    if (fourcc != vp80 && fourcc != vp90 && fourcc != av01) {
-        fclose(file);
-        m_last_error = "IVF codec is not VP8, VP9, or AV1.";
-        return AVB_ERROR_STREAM_NOT_FOUND;
-    }
+    m_impl->width = header.width;
+    m_impl->height = header.height;
+    m_impl->ivf_rate = header.rate;
+    m_impl->ivf_scale = header.scale;
+    m_impl->ivf_frame_count = header.frame_count;
+    m_impl->ivf_data_offset = header.data_offset;
 
-    m_impl->width = (int)mf_read_le16(header + 12);
-    m_impl->height = (int)mf_read_le16(header + 14);
-    m_impl->ivf_rate = mf_read_le32(header + 16);
-    m_impl->ivf_scale = mf_read_le32(header + 20);
-    m_impl->ivf_frame_count = mf_read_le32(header + 24);
-    m_impl->ivf_data_offset = mf_read_le16(header + 6);
-    if (m_impl->width <= 0 || m_impl->height <= 0 ||
-        m_impl->ivf_rate == 0 || m_impl->ivf_scale == 0) {
-        fclose(file);
-        m_last_error = "Invalid IVF dimensions or time base.";
-        return AVB_ERROR_OPEN_FAILED;
-    }
-    if (m_impl->ivf_data_offset > 32 &&
-        fseek(file, m_impl->ivf_data_offset, SEEK_SET) != 0) {
-        fclose(file);
-        m_last_error = "Seeking to IVF frame data failed.";
-        return AVB_ERROR_OPEN_FAILED;
-    }
-
-    GUID input_subtype = mf_video_subtype_from_fourcc(fourcc);
-    HRESULT hr = create_video_decoder_mft(
-        input_subtype, &m_impl->ivf_decoder, &m_impl->ivf_async);
+    GUID input_subtype = header.codec == AVB_VIDEO_CODEC_VP8
+        ? MFVideoFormat_VP80
+        : header.codec == AVB_VIDEO_CODEC_VP9
+            ? mf_video_subtype_from_fourcc(mf_fourcc("VP90"))
+            : MFVideoFormat_AV1;
+    MFT_REGISTER_TYPE_INFO decoder_type{
+        MFMediaType_Video, input_subtype};
+    HRESULT hr = mf_create_transform(
+        MFT_CATEGORY_VIDEO_DECODER, &decoder_type, nullptr,
+        &m_impl->ivf_decoder, &m_impl->ivf_async);
     if (FAILED(hr) || !m_impl->ivf_decoder) {
         fclose(file);
         char buf[160];
@@ -592,8 +533,7 @@ avb_result AvbDecoderMediaFoundation::open_ivf(
         (double)m_impl->ivf_rate / (double)m_impl->ivf_scale;
     m_impl->duration_sec = m_impl->ivf_frame_count > 0
         ? (double)m_impl->ivf_frame_count / m_impl->frame_rate : 0.0;
-    m_impl->video_codec_name =
-        fourcc == vp80 ? "vp8" : fourcc == vp90 ? "vp9" : "av1";
+    m_impl->video_codec_name = avb_video_codec_name(header.codec);
     m_impl->video_stream_idx = 0;
     m_impl->ivf_file = file;
     m_impl->ivf_mode = true;
@@ -1146,24 +1086,19 @@ retry_output:
             continue;
         }
 
-        unsigned char frame_header[12] = {};
-        if (fread(frame_header, 1, sizeof(frame_header), m_impl->ivf_file) !=
-            sizeof(frame_header)) {
+        uint64_t timestamp = 0;
+        MfIvfReadResult read_result = mf_ivf_read_frame(
+            m_impl->ivf_file, m_impl->ivf_packet, timestamp);
+        if (read_result == MfIvfReadResult::eof) {
             m_impl->ivf_eof = true;
             continue;
         }
-        uint32_t packet_size = mf_read_le32(frame_header);
-        uint64_t timestamp = mf_read_le64(frame_header + 4);
-        if (packet_size == 0 || packet_size > 256u * 1024u * 1024u) {
-            m_last_error = "Invalid IVF frame size.";
+        if (read_result != MfIvfReadResult::ok) {
+            m_last_error = "Invalid or truncated IVF frame.";
             return AVB_ERROR_DECODE_FAILED;
         }
-        m_impl->ivf_packet.resize(packet_size);
-        if (fread(m_impl->ivf_packet.data(), 1, packet_size, m_impl->ivf_file) !=
-            packet_size) {
-            m_last_error = "Truncated IVF frame.";
-            return AVB_ERROR_DECODE_FAILED;
-        }
+        uint32_t packet_size =
+            static_cast<uint32_t>(m_impl->ivf_packet.size());
 
         ComPtr<IMFMediaBuffer> buffer;
         HRESULT hr = MFCreateMemoryBuffer(packet_size, &buffer);

@@ -13,6 +13,14 @@
 
 using Microsoft::WRL::ComPtr;
 
+MfStartupScope::MfStartupScope(ULONG flags) {
+    m_started = SUCCEEDED(MFStartup(MF_VERSION, flags));
+}
+
+MfStartupScope::~MfStartupScope() {
+    if (m_started) MFShutdown();
+}
+
 HRESULT mf_create_d3d11_device_manager(
     ID3D11Device *input_device,
     ID3D11Device **device,
@@ -58,6 +66,60 @@ HRESULT mf_get_event_with_timeout(
             return HRESULT_FROM_WIN32(WAIT_TIMEOUT);
         Sleep(1);
     }
+}
+
+HRESULT mf_create_transform(
+    const GUID &category,
+    const MFT_REGISTER_TYPE_INFO *input_type,
+    const MFT_REGISTER_TYPE_INFO *output_type,
+    IMFTransform **out,
+    bool *is_async) {
+    if (!out || !is_async) return E_POINTER;
+    *out = nullptr;
+    *is_async = false;
+
+    IMFActivate **activates = nullptr;
+    UINT32 count = 0;
+    HRESULT hr = MFTEnumEx(
+        category, MFT_ENUM_FLAG_ALL,
+        input_type, output_type, &activates, &count);
+    if (SUCCEEDED(hr) && count == 0) hr = MF_E_TOPO_CODEC_NOT_FOUND;
+    if (SUCCEEDED(hr)) {
+        hr = MF_E_TOPO_CODEC_NOT_FOUND;
+        for (UINT32 i = 0; i < count; ++i) {
+            ComPtr<IMFTransform> candidate;
+            HRESULT activate_hr = activates[i]->ActivateObject(
+                IID_PPV_ARGS(&candidate));
+            if (FAILED(activate_hr) || !candidate) {
+                hr = activate_hr;
+                continue;
+            }
+
+            ComPtr<IMFAttributes> attributes;
+            UINT32 async_flag = FALSE;
+            if (SUCCEEDED(candidate->GetAttributes(&attributes)) && attributes)
+                attributes->GetUINT32(MF_TRANSFORM_ASYNC, &async_flag);
+            if (async_flag &&
+                (!attributes ||
+                 FAILED(attributes->SetUINT32(
+                     MF_TRANSFORM_ASYNC_UNLOCK, TRUE)))) {
+                activates[i]->ShutdownObject();
+                continue;
+            }
+
+            hr = candidate.CopyTo(out);
+            *is_async = async_flag != FALSE;
+            break;
+        }
+    }
+
+    if (activates) {
+        for (UINT32 i = 0; i < count; ++i) {
+            if (activates[i]) activates[i]->Release();
+        }
+        CoTaskMemFree(activates);
+    }
+    return hr;
 }
 
 #endif

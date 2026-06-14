@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <d3d11.h>
+#include <mfapi.h>
 #include <mfidl.h>
 
 inline uint32_t mf_fourcc(const char (&s)[5]) {
@@ -58,6 +59,20 @@ inline void mf_write_le64(unsigned char *p, uint64_t value) {
         p[i] = static_cast<unsigned char>((value >> (i * 8)) & 0xff);
 }
 
+class MfStartupScope {
+public:
+    explicit MfStartupScope(ULONG flags = MFSTARTUP_LITE);
+    ~MfStartupScope();
+
+    MfStartupScope(const MfStartupScope &) = delete;
+    MfStartupScope &operator=(const MfStartupScope &) = delete;
+
+    bool started() const { return m_started; }
+
+private:
+    bool m_started = false;
+};
+
 HRESULT mf_create_d3d11_device_manager(
     ID3D11Device *input_device,
     ID3D11Device **device,
@@ -67,5 +82,12 @@ HRESULT mf_get_event_with_timeout(
     IMFMediaEventGenerator *events,
     DWORD timeout_ms,
     IMFMediaEvent **out);
+
+HRESULT mf_create_transform(
+    const GUID &category,
+    const MFT_REGISTER_TYPE_INFO *input_type,
+    const MFT_REGISTER_TYPE_INFO *output_type,
+    IMFTransform **out,
+    bool *is_async);
 
 #endif
