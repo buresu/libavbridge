@@ -10,11 +10,7 @@
 #endif
 
 #if defined(AVB_ENABLE_MEDIAFOUNDATION)
-#include "backends/mediafoundation/avb_mediafoundation_common.hpp"
-#include <mfapi.h>
-#include <mfidl.h>
-#include <codecapi.h>
-#include <wrl/client.h>
+#include "avb_runtime_mediafoundation.hpp"
 #endif
 
 #if defined(AVB_ENABLE_AVFOUNDATION)
@@ -34,10 +30,6 @@ using avb::detail::container_accepts_video;
 using avb::detail::container_from_path;
 using avb::detail::container_name;
 using avb::detail::resolve_backend;
-
-#if defined(AVB_ENABLE_MEDIAFOUNDATION)
-using Microsoft::WRL::ComPtr;
-#endif
 
 static void add_video_codec(avb_decoder_capabilities &out, avb_video_codec codec,
                             Container c) {
@@ -66,12 +58,6 @@ static void add_audio_codec(avb_encoder_capabilities &out, avb_audio_codec codec
 static void add_audio_codec_unchecked(avb_encoder_capabilities &out,
                                       avb_audio_codec codec) {
     add_unique(out.audio_codecs, out.audio_codec_count, codec);
-}
-
-static bool mediafoundation_video_container(Container c) {
-    return c == Container::any || c == Container::mp4 ||
-           c == Container::mov || c == Container::ivf ||
-           c == Container::unknown;
 }
 
 static void add_pixel_format(avb_decoder_capabilities &out,
@@ -123,350 +109,6 @@ static void fill_platform_encoder(avb_encoder_capabilities &out, Container c) {
     add_memory(out, AVB_VIDEO_MEMORY_CPU);
     add_device(out, AVB_HW_DEVICE_AUTO);
 }
-
-#if defined(AVB_ENABLE_MEDIAFOUNDATION)
-// Media Foundation runtime probing is intentionally MFT-based. It answers
-// "does this Windows runtime advertise a transform for this subtype?" while the
-// container filter above keeps obviously incompatible file extensions out.
-// SourceReader/SinkWriter can still reject a concrete session later because of
-// profile, bitrate, resolution, or media-sink limits.
-
-static uint32_t mf_fourcc(const char (&s)[5]) {
-    return ((uint32_t)(unsigned char)s[0]) |
-           ((uint32_t)(unsigned char)s[1] << 8) |
-           ((uint32_t)(unsigned char)s[2] << 16) |
-           ((uint32_t)(unsigned char)s[3] << 24);
-}
-
-static GUID mf_subtype_from_fourcc(const char (&s)[5]) {
-    GUID g = { mf_fourcc(s), 0x0000, 0x0010,
-        { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
-    return g;
-}
-
-static GUID mf_subtype_from_wave_tag(uint32_t tag) {
-    GUID g = { tag, 0x0000, 0x0010,
-        { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
-    return g;
-}
-
-static GUID mf_vorbis_subtype() {
-    GUID g = { 0x8d2fd10b, 0x5841, 0x4a6b,
-        { 0x89, 0x05, 0x58, 0x8f, 0xec, 0x1a, 0xde, 0xd9 } };
-    return g;
-}
-
-static bool mf_has_mft(const GUID &category, const GUID &major,
-                       const GUID &subtype, bool encoder) {
-    MFT_REGISTER_TYPE_INFO type{};
-    type.guidMajorType = major;
-    type.guidSubtype = subtype;
-
-    IMFActivate **activates = nullptr;
-    UINT32 count = 0;
-    HRESULT hr = MFTEnumEx(category, MFT_ENUM_FLAG_ALL,
-                           encoder ? nullptr : &type,
-                           encoder ? &type : nullptr,
-                           &activates, &count);
-    if (activates) {
-        for (UINT32 i = 0; i < count; ++i) {
-            if (activates[i]) activates[i]->Release();
-        }
-        CoTaskMemFree(activates);
-    }
-    return SUCCEEDED(hr) && count > 0;
-}
-
-static bool mf_has_any_mft(const GUID &category, const GUID &major,
-                           const GUID *subtypes, int subtype_count,
-                           bool encoder) {
-    for (int i = 0; i < subtype_count; ++i) {
-        if (mf_has_mft(category, major, subtypes[i], encoder)) return true;
-    }
-    return false;
-}
-
-static int mf_video_subtypes(avb_video_codec codec, GUID *out, int max_count) {
-    if (!out || max_count <= 0) return 0;
-    switch (codec) {
-        case AVB_VIDEO_CODEC_H264:
-            out[0] = MFVideoFormat_H264;
-            return 1;
-        case AVB_VIDEO_CODEC_HEVC:
-            if (max_count < 2) return 0;
-            out[0] = MFVideoFormat_HEVC;
-            out[1] = mf_subtype_from_fourcc("H265");
-            return 2;
-        case AVB_VIDEO_CODEC_VP8:
-            out[0] = mf_subtype_from_fourcc("VP80");
-            return 1;
-        case AVB_VIDEO_CODEC_VP9:
-            out[0] = mf_subtype_from_fourcc("VP90");
-            return 1;
-        case AVB_VIDEO_CODEC_AV1:
-            out[0] = mf_subtype_from_fourcc("AV01");
-            return 1;
-        default:
-            return 0;
-    }
-}
-
-static bool mf_has_video_decoder(avb_video_codec codec) {
-    GUID subtypes[2] = {};
-    int count = mf_video_subtypes(codec, subtypes, 2);
-    return mf_has_any_mft(MFT_CATEGORY_VIDEO_DECODER, MFMediaType_Video,
-                          subtypes, count, false);
-}
-
-static bool mf_has_video_encoder(avb_video_codec codec) {
-    GUID subtypes[2] = {};
-    int count = mf_video_subtypes(codec, subtypes, 2);
-    return mf_has_any_mft(MFT_CATEGORY_VIDEO_ENCODER, MFMediaType_Video,
-                          subtypes, count, true);
-}
-
-static bool mf_can_configure_video_encoder(avb_video_codec codec) {
-    GUID subtypes[2] = {};
-    int count = mf_video_subtypes(codec, subtypes, 2);
-    if (count <= 0) return false;
-
-    MFT_REGISTER_TYPE_INFO type{};
-    type.guidMajorType = MFMediaType_Video;
-    type.guidSubtype = subtypes[0];
-
-    IMFActivate **activates = nullptr;
-    UINT32 activate_count = 0;
-    HRESULT hr = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_ALL,
-                           nullptr, &type, &activates, &activate_count);
-    if (FAILED(hr) || activate_count == 0) {
-        if (activates) CoTaskMemFree(activates);
-        return false;
-    }
-
-    bool ok = false;
-    for (UINT32 i = 0; i < activate_count && !ok; ++i) {
-        ComPtr<IMFTransform> encoder;
-        if (!activates[i] ||
-            FAILED(activates[i]->ActivateObject(IID_PPV_ARGS(&encoder))) ||
-            !encoder) {
-            continue;
-        }
-
-        ComPtr<IMFAttributes> attributes;
-        UINT32 is_async = FALSE;
-        if (SUCCEEDED(encoder->GetAttributes(&attributes)) && attributes)
-            attributes->GetUINT32(MF_TRANSFORM_ASYNC, &is_async);
-        if (is_async) {
-            if (!attributes ||
-                FAILED(attributes->SetUINT32(MF_TRANSFORM_ASYNC_UNLOCK, TRUE))) {
-                activates[i]->ShutdownObject();
-                continue;
-            }
-        }
-
-        ComPtr<IMFMediaType> out_type;
-        MFCreateMediaType(&out_type);
-        out_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-        out_type->SetGUID(MF_MT_SUBTYPE, subtypes[0]);
-        out_type->SetUINT32(MF_MT_AVG_BITRATE, 1000000);
-        out_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-        if (codec == AVB_VIDEO_CODEC_AV1)
-            out_type->SetUINT32(
-                MF_MT_MPEG2_PROFILE, eAVEncAV1VProfile_Main_420_8);
-        MFSetAttributeSize(out_type.Get(), MF_MT_FRAME_SIZE, 320, 240);
-        MFSetAttributeRatio(out_type.Get(), MF_MT_FRAME_RATE, 30, 1);
-        MFSetAttributeRatio(out_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-
-        ComPtr<IMFMediaType> in_type;
-        MFCreateMediaType(&in_type);
-        in_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-        in_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
-        in_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-        MFSetAttributeSize(in_type.Get(), MF_MT_FRAME_SIZE, 320, 240);
-        MFSetAttributeRatio(in_type.Get(), MF_MT_FRAME_RATE, 30, 1);
-        MFSetAttributeRatio(in_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-        in_type->SetUINT32(MF_MT_DEFAULT_STRIDE, 320);
-
-        HRESULT out_hr = encoder->SetOutputType(0, out_type.Get(), 0);
-        HRESULT in_hr = SUCCEEDED(out_hr)
-            ? encoder->SetInputType(0, in_type.Get(), 0)
-            : E_FAIL;
-        if (FAILED(out_hr)) {
-            HRESULT first_in = encoder->SetInputType(0, in_type.Get(), 0);
-            if (SUCCEEDED(first_in)) {
-                out_hr = encoder->SetOutputType(0, out_type.Get(), 0);
-                in_hr = first_in;
-            }
-        }
-        ok = SUCCEEDED(out_hr) && SUCCEEDED(in_hr);
-    }
-
-    for (UINT32 i = 0; i < activate_count; ++i) {
-        if (activates[i]) activates[i]->Release();
-    }
-    CoTaskMemFree(activates);
-    return ok;
-}
-
-static bool mf_has_audio_decoder(avb_audio_codec codec) {
-    switch (codec) {
-        case AVB_AUDIO_CODEC_AAC:
-            return mf_has_mft(MFT_CATEGORY_AUDIO_DECODER, MFMediaType_Audio,
-                              MFAudioFormat_AAC, false);
-        case AVB_AUDIO_CODEC_MP3:
-            return mf_has_mft(MFT_CATEGORY_AUDIO_DECODER, MFMediaType_Audio,
-                              MFAudioFormat_MP3, false);
-        case AVB_AUDIO_CODEC_OPUS:
-            return mf_has_mft(MFT_CATEGORY_AUDIO_DECODER, MFMediaType_Audio,
-                              mf_subtype_from_wave_tag(0x704f), false);
-        case AVB_AUDIO_CODEC_FLAC:
-            return mf_has_mft(MFT_CATEGORY_AUDIO_DECODER, MFMediaType_Audio,
-                              mf_subtype_from_wave_tag(0xf1ac), false);
-        case AVB_AUDIO_CODEC_VORBIS:
-            return mf_has_mft(MFT_CATEGORY_AUDIO_DECODER, MFMediaType_Audio,
-                              mf_vorbis_subtype(), false);
-        case AVB_AUDIO_CODEC_PCM_S16:
-            return mf_has_mft(MFT_CATEGORY_AUDIO_DECODER, MFMediaType_Audio,
-                              MFAudioFormat_PCM, false);
-        case AVB_AUDIO_CODEC_PCM_F32:
-            return mf_has_mft(MFT_CATEGORY_AUDIO_DECODER, MFMediaType_Audio,
-                              MFAudioFormat_Float, false);
-        default:
-            return false;
-    }
-}
-
-static bool mf_has_audio_encoder(avb_audio_codec codec) {
-    switch (codec) {
-        case AVB_AUDIO_CODEC_AAC:
-            return mf_has_mft(MFT_CATEGORY_AUDIO_ENCODER, MFMediaType_Audio,
-                              MFAudioFormat_AAC, true);
-        case AVB_AUDIO_CODEC_MP3:
-            return mf_has_mft(MFT_CATEGORY_AUDIO_ENCODER, MFMediaType_Audio,
-                              MFAudioFormat_MP3, true);
-        case AVB_AUDIO_CODEC_FLAC:
-            return mf_has_mft(MFT_CATEGORY_AUDIO_ENCODER, MFMediaType_Audio,
-                              MFAudioFormat_FLAC, true);
-        case AVB_AUDIO_CODEC_PCM_S16:
-            return mf_has_mft(MFT_CATEGORY_AUDIO_ENCODER, MFMediaType_Audio,
-                              MFAudioFormat_PCM, true);
-        case AVB_AUDIO_CODEC_PCM_F32:
-            return mf_has_mft(MFT_CATEGORY_AUDIO_ENCODER, MFMediaType_Audio,
-                              MFAudioFormat_Float, true);
-        default:
-            return false;
-    }
-}
-
-static void fill_mediafoundation_decoder_runtime(avb_decoder_capabilities &out,
-                                                 Container c) {
-    if (c == Container::ivf) {
-        static const avb_video_codec ivf_video[] = {
-            AVB_VIDEO_CODEC_VP8, AVB_VIDEO_CODEC_VP9, AVB_VIDEO_CODEC_AV1
-        };
-        for (avb_video_codec codec : ivf_video) {
-            if (mf_has_video_decoder(codec)) add_video_codec(out, codec, c);
-        }
-        add_software_pixel_formats(out);
-        add_memory(out, AVB_VIDEO_MEMORY_CPU);
-        add_memory(out, AVB_VIDEO_MEMORY_NATIVE);
-        add_device(out, AVB_HW_DEVICE_AUTO);
-        add_device(out, AVB_HW_DEVICE_D3D11VA);
-        return;
-    }
-    static const avb_video_codec video[] = {
-        AVB_VIDEO_CODEC_H264, AVB_VIDEO_CODEC_HEVC, AVB_VIDEO_CODEC_VP8,
-        AVB_VIDEO_CODEC_VP9, AVB_VIDEO_CODEC_AV1
-    };
-    static const avb_audio_codec audio[] = {
-        AVB_AUDIO_CODEC_AAC, AVB_AUDIO_CODEC_OPUS, AVB_AUDIO_CODEC_MP3,
-        AVB_AUDIO_CODEC_FLAC, AVB_AUDIO_CODEC_VORBIS,
-        AVB_AUDIO_CODEC_PCM_S16, AVB_AUDIO_CODEC_PCM_F32
-    };
-    if (!audio_only_container(c)) {
-        for (avb_video_codec codec : video) {
-            if (mf_has_video_decoder(codec)) add_video_codec(out, codec, c);
-        }
-    }
-    for (avb_audio_codec codec : audio) {
-        if (codec == AVB_AUDIO_CODEC_PCM_S16 ||
-            codec == AVB_AUDIO_CODEC_PCM_F32 ||
-            mf_has_audio_decoder(codec)) {
-            add_audio_codec(out, codec, c);
-        }
-    }
-
-    add_software_pixel_formats(out);
-    add_memory(out, AVB_VIDEO_MEMORY_CPU);
-    if (!audio_only_container(c))
-        add_memory(out, AVB_VIDEO_MEMORY_NATIVE);
-    add_device(out, AVB_HW_DEVICE_AUTO);
-    if (!audio_only_container(c))
-        add_device(out, AVB_HW_DEVICE_D3D11VA);
-}
-
-static void fill_mediafoundation_encoder_runtime(avb_encoder_capabilities &out,
-                                                 Container c) {
-    // VP8/VP9/AV1 are exposed for IVF only; WebM/Matroska still need a separate
-    // muxing path. Async transforms are driven through IMFMediaEventGenerator.
-    static const avb_video_codec video[] = {
-        AVB_VIDEO_CODEC_H264, AVB_VIDEO_CODEC_HEVC, AVB_VIDEO_CODEC_VP8,
-        AVB_VIDEO_CODEC_VP9, AVB_VIDEO_CODEC_AV1
-    };
-    if (mediafoundation_video_container(c)) {
-        for (avb_video_codec codec : video) {
-            if (codec == AVB_VIDEO_CODEC_AV1 &&
-                c != Container::any && c != Container::ivf) {
-                continue;
-            }
-            if (mf_can_configure_video_encoder(codec)) add_video_codec(out, codec, c);
-        }
-    }
-
-    switch (c) {
-        case Container::any:
-            if (mf_has_audio_encoder(AVB_AUDIO_CODEC_AAC))
-                add_audio_codec_unchecked(out, AVB_AUDIO_CODEC_AAC);
-            if (mf_has_audio_encoder(AVB_AUDIO_CODEC_MP3))
-                add_audio_codec_unchecked(out, AVB_AUDIO_CODEC_MP3);
-            if (mf_has_audio_encoder(AVB_AUDIO_CODEC_FLAC))
-                add_audio_codec_unchecked(out, AVB_AUDIO_CODEC_FLAC);
-            add_audio_codec_unchecked(out, AVB_AUDIO_CODEC_PCM_S16);
-            add_audio_codec_unchecked(out, AVB_AUDIO_CODEC_PCM_F32);
-            break;
-        case Container::mp4:
-        case Container::mov:
-        case Container::m4a:
-        case Container::unknown:
-            if (mf_has_audio_encoder(AVB_AUDIO_CODEC_AAC))
-                add_audio_codec_unchecked(out, AVB_AUDIO_CODEC_AAC);
-            break;
-        case Container::mp3:
-            if (mf_has_audio_encoder(AVB_AUDIO_CODEC_MP3))
-                add_audio_codec_unchecked(out, AVB_AUDIO_CODEC_MP3);
-            break;
-        case Container::flac:
-            if (mf_has_audio_encoder(AVB_AUDIO_CODEC_FLAC))
-                add_audio_codec_unchecked(out, AVB_AUDIO_CODEC_FLAC);
-            break;
-        case Container::wav:
-            add_audio_codec_unchecked(out, AVB_AUDIO_CODEC_PCM_S16);
-            add_audio_codec_unchecked(out, AVB_AUDIO_CODEC_PCM_F32);
-            break;
-        default:
-            break;
-    }
-
-    add_memory(out, AVB_VIDEO_MEMORY_CPU);
-    if (c == Container::any || c == Container::ivf ||
-        c == Container::mp4 || c == Container::mov)
-        add_memory(out, AVB_VIDEO_MEMORY_NATIVE);
-    add_device(out, AVB_HW_DEVICE_AUTO);
-    if (c == Container::any || c == Container::ivf ||
-        c == Container::mp4 || c == Container::mov)
-        add_device(out, AVB_HW_DEVICE_D3D11VA);
-}
-#endif
 
 #if defined(AVB_ENABLE_FFMPEG)
 static AVCodecID ff_video_codec_id(avb_video_codec codec) {
@@ -1009,13 +651,11 @@ avb_result avb_runtime_probe_decoder_impl(
         case AVB_BACKEND_MEDIAFOUNDATION:
 #if defined(AVB_ENABLE_MEDIAFOUNDATION)
         {
-            MfStartupScope mf;
-            if (!mf.started()) {
+            if (!avb_probe_mediafoundation_decoder(*out, container)) {
                 out->result = AVB_ERROR_BACKEND_NOT_AVAILABLE;
                 out->message = "Media Foundation runtime is not available.";
                 return AVB_OK;
             }
-            fill_mediafoundation_decoder_runtime(*out, container);
             break;
         }
 #else
@@ -1107,13 +747,11 @@ avb_result avb_runtime_probe_encoder_impl(
         case AVB_BACKEND_MEDIAFOUNDATION:
 #if defined(AVB_ENABLE_MEDIAFOUNDATION)
         {
-            MfStartupScope mf;
-            if (!mf.started()) {
+            if (!avb_probe_mediafoundation_encoder(*out, container)) {
                 out->result = AVB_ERROR_BACKEND_NOT_AVAILABLE;
                 out->message = "Media Foundation runtime is not available.";
                 return AVB_OK;
             }
-            fill_mediafoundation_encoder_runtime(*out, container);
             break;
         }
 #else
