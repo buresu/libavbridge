@@ -14,6 +14,17 @@ struct avb_encoder {
     }
 };
 
+namespace {
+
+// Copy the implementation's last error onto the C handle so it survives even if
+// the impl is later reset (e.g. on close).
+void capture_error(avb_encoder *enc) {
+    const char *err = enc->impl->get_last_error();
+    if (err) enc->set_error(err);
+}
+
+} // namespace
+
 extern "C" {
 
 avb_encode_options avb_encode_options_default(void) {
@@ -56,10 +67,7 @@ avb_result avb_encoder_open(avb_encoder **out_enc, const char *path,
     enc->impl = std::move(impl);
 
     avb_result res = enc->impl->open(path, *options);
-    if (res != AVB_OK) {
-        const char *err = enc->impl->get_last_error();
-        if (err) enc->set_error(err);
-    }
+    if (res != AVB_OK) capture_error(enc);
     *out_enc = enc;
     return res;
 }

@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
@@ -54,6 +55,13 @@ long long mem_size(void *user) {
     return static_cast<MemIo *>(user)->size;
 }
 
+// Copy the implementation's last error onto the C handle so it survives even if
+// the impl is later reset (e.g. on close).
+void capture_error(avb_decoder *dec) {
+    const char *err = dec->impl->get_last_error();
+    if (err) dec->set_error(err);
+}
+
 // After a successful open, cache the bits the C layer needs for seek-clamp and
 // audio-EOF distinction.
 void cache_media(avb_decoder *dec) {
@@ -86,80 +94,51 @@ avb_decode_options avb_decode_options_default(void) {
     return o;
 }
 
-// Allocate a decoder and its selected implementation, or report why not.
-static avb_result decoder_create(avb_decoder **out_dec, avb_backend be,
-                                 avb_decoder **dec_out) {
+// Validate options, allocate the decoder with its selected backend, then run
+// `open` (a backend open call bound to its arguments). On every outcome *out_dec
+// receives a decoder; on failure it carries the error message, on success the
+// cached media info.
+static avb_result open_decoder(avb_decoder **out_dec, const avb_decode_options &options,
+                               const std::function<avb_result(AvbDecoderImpl &)> &open) {
+    avb_decoder_validation validation{};
+    avb_result vres = avb_decoder_validate_options(&options, &validation);
+    if (vres != AVB_OK) return vres;
+    if (!validation.ok) {
+        auto *dec = new avb_decoder();
+        dec->set_error(validation.message);
+        *out_dec = dec;
+        return validation.result;
+    }
+
     auto *dec = new avb_decoder();
-    auto impl = avb_create_decoder_backend(be);
+    *out_dec = dec;
+    auto impl = avb_create_decoder_backend(options.backend);
     if (!impl) {
         dec->set_error("Requested backend is not available on this platform.");
-        *out_dec = dec;
         return AVB_ERROR_BACKEND_NOT_AVAILABLE;
     }
     dec->impl = std::move(impl);
-    *dec_out = dec;
-    return AVB_OK;
-}
 
-static avb_result decoder_validate_for_open(avb_decoder **out_dec,
-                                            const avb_decode_options &options) {
-    avb_decoder_validation validation{};
-    avb_result res = avb_decoder_validate_options(&options, &validation);
-    if (res != AVB_OK) return res;
-    if (validation.ok) return AVB_OK;
-
-    auto *dec = new avb_decoder();
-    dec->set_error(validation.message);
-    *out_dec = dec;
-    return validation.result;
+    avb_result res = open(*dec->impl);
+    if (res != AVB_OK) capture_error(dec);
+    else               cache_media(dec);
+    return res;
 }
 
 avb_result avb_decoder_open(avb_decoder **out_dec, const char *path,
                             const avb_decode_options *options) {
     if (!out_dec || !path) return AVB_ERROR_INVALID_ARGUMENT;
-    avb_decode_options default_opts = avb_decode_options_default();
-    if (!options) options = &default_opts;
-
-    avb_result vres = decoder_validate_for_open(out_dec, *options);
-    if (vres != AVB_OK) return vres;
-
-    avb_decoder *dec = nullptr;
-    avb_result res = decoder_create(out_dec, options->backend, &dec);
-    if (res != AVB_OK) return res;
-
-    res = dec->impl->open_file(path, *options);
-    if (res != AVB_OK) {
-        const char *err = dec->impl->get_last_error();
-        if (err) dec->set_error(err);
-    } else {
-        cache_media(dec);
-    }
-    *out_dec = dec;
-    return res;
+    avb_decode_options opts = options ? *options : avb_decode_options_default();
+    return open_decoder(out_dec, opts,
+        [&](AvbDecoderImpl &impl) { return impl.open_file(path, opts); });
 }
 
 avb_result avb_decoder_open_io(avb_decoder **out_dec, const avb_io_callbacks *cb,
                                void *user, const avb_decode_options *options) {
     if (!out_dec || !cb || !cb->read) return AVB_ERROR_INVALID_ARGUMENT;
-    avb_decode_options default_opts = avb_decode_options_default();
-    if (!options) options = &default_opts;
-
-    avb_result vres = decoder_validate_for_open(out_dec, *options);
-    if (vres != AVB_OK) return vres;
-
-    avb_decoder *dec = nullptr;
-    avb_result res = decoder_create(out_dec, options->backend, &dec);
-    if (res != AVB_OK) return res;
-
-    res = dec->impl->open_io(*cb, user, *options);
-    if (res != AVB_OK) {
-        const char *err = dec->impl->get_last_error();
-        if (err) dec->set_error(err);
-    } else {
-        cache_media(dec);
-    }
-    *out_dec = dec;
-    return res;
+    avb_decode_options opts = options ? *options : avb_decode_options_default();
+    return open_decoder(out_dec, opts,
+        [&](AvbDecoderImpl &impl) { return impl.open_io(*cb, user, opts); });
 }
 
 avb_result avb_decoder_open_memory(avb_decoder **out_dec, const void *data,
@@ -182,10 +161,7 @@ avb_result avb_decoder_open_memory(avb_decoder **out_dec, const void *data,
 avb_result avb_decoder_get_media_info(avb_decoder *dec, avb_media_info *out_info) {
     if (!dec || !out_info || !dec->impl) return AVB_ERROR_INVALID_ARGUMENT;
     avb_result res = dec->impl->get_media_info(*out_info);
-    if (res != AVB_OK) {
-        const char *err = dec->impl->get_last_error();
-        if (err) dec->set_error(err);
-    }
+    if (res != AVB_OK) capture_error(dec);
     return res;
 }
 
@@ -200,8 +176,7 @@ avb_result avb_decoder_seek(avb_decoder *dec, double seconds, double *out_landed
 
     avb_result res = dec->impl->seek(target);
     if (res != AVB_OK) {
-        const char *err = dec->impl->get_last_error();
-        if (err) dec->set_error(err);
+        capture_error(dec);
         return res;
     }
     dec->audio_eof = false;
@@ -229,10 +204,7 @@ int avb_decoder_audio_at_eof(avb_decoder *dec) {
 avb_result avb_decoder_read_video_frame(avb_decoder *dec, avb_video_frame *out_frame) {
     if (!dec || !out_frame || !dec->impl) return AVB_ERROR_INVALID_ARGUMENT;
     avb_result res = dec->impl->read_video_frame(*out_frame);
-    if (res != AVB_OK) {
-        const char *err = dec->impl->get_last_error();
-        if (err) dec->set_error(err);
-    }
+    if (res != AVB_OK) capture_error(dec);
     return res;
 }
 

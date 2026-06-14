@@ -122,6 +122,18 @@ static NSDictionary *avb_audio_settings(int req_rate, int req_channels) {
     return s;
 }
 
+// Build the AVAssetReaderTrackOutput settings for a CVPixelBuffer of the given
+// format. External output requests IOSurface backing so the decoder's buffer
+// can be handed back zero-copy.
+static NSDictionary *avb_video_settings(OSType cv_pixel_format, bool external) {
+    NSMutableDictionary *s = [@{
+        (NSString *)kCVPixelBufferPixelFormatTypeKey: @(cv_pixel_format),
+    } mutableCopy];
+    if (external)
+        s[(NSString *)kCVPixelBufferIOSurfacePropertiesKey] = @{};
+    return s;
+}
+
 // Source-codec FourCC of a track's first format description, or 0 if unavailable.
 static FourCharCode avb_track_codec(AVAssetTrack *track) {
     NSArray *formats = track.formatDescriptions;
@@ -347,16 +359,11 @@ avb_result AvbDecoderAVFoundation::open_file(const char *path, const avb_decode_
                     // possible for a zero-copy external buffer.
                     m_impl->swizzle_rgba = !external &&
                         (options.video_format == AVB_PIXEL_FORMAT_RGBA8);
-                    NSMutableDictionary *settings = [@{
-                        (NSString *)kCVPixelBufferPixelFormatTypeKey:
-                            @(m_impl->cv_pixel_format),
-                    } mutableCopy];
-                    if (external)
-                        settings[(NSString *)kCVPixelBufferIOSurfacePropertiesKey] = @{};
 
                     m_impl->video_output = [AVAssetReaderTrackOutput
                         assetReaderTrackOutputWithTrack:track
-                        outputSettings:settings];
+                        outputSettings:avb_video_settings(m_impl->cv_pixel_format,
+                                                          external)];
                     m_impl->video_output.alwaysCopiesSampleData = NO;
                     [m_impl->reader addOutput:m_impl->video_output];
                 }
@@ -455,13 +462,8 @@ avb_result AvbDecoderAVFoundation::seek(double seconds) {
                 avb_load_tracks(m_impl->asset, AVMediaTypeVideo)[m_impl->video_stream_idx];
             NSDictionary *settings = nil;
             if (!m_impl->custom_video_decoder) {
-                NSMutableDictionary *s = [@{
-                    (NSString *)kCVPixelBufferPixelFormatTypeKey:
-                        @(m_impl->cv_pixel_format),
-                } mutableCopy];
-                if (m_impl->video_memory == AVB_VIDEO_MEMORY_EXTERNAL)
-                    s[(NSString *)kCVPixelBufferIOSurfacePropertiesKey] = @{};
-                settings = s;
+                bool external = m_impl->video_memory == AVB_VIDEO_MEMORY_EXTERNAL;
+                settings = avb_video_settings(m_impl->cv_pixel_format, external);
             }
             m_impl->video_output = [AVAssetReaderTrackOutput
                 assetReaderTrackOutputWithTrack:track
