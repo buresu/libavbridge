@@ -4,6 +4,7 @@
 namespace {
 
 using avb::detail::Container;
+using avb::detail::add_unique;
 using avb::detail::audio_only_container;
 using avb::detail::container_accepts_audio;
 using avb::detail::container_accepts_video;
@@ -14,21 +15,18 @@ using avb::detail::resolve_backend;
 static void add_video_codec(avb_encoder_capabilities &out, avb_video_codec codec,
                             Container container) {
     if (!container_accepts_video(container, codec)) return;
-    if (out.video_codec_count >= AVB_MAX_CODEC_CAPS) return;
-    out.video_codecs[out.video_codec_count++] = codec;
+    add_unique(out.video_codecs, out.video_codec_count, codec);
 }
 
 static void add_audio_codec(avb_encoder_capabilities &out, avb_audio_codec codec,
                             Container container) {
     if (!container_accepts_audio(container, codec)) return;
-    if (out.audio_codec_count >= AVB_MAX_CODEC_CAPS) return;
-    out.audio_codecs[out.audio_codec_count++] = codec;
+    add_unique(out.audio_codecs, out.audio_codec_count, codec);
 }
 
 static void add_audio_codec_unchecked(avb_encoder_capabilities &out,
                                       avb_audio_codec codec) {
-    if (out.audio_codec_count >= AVB_MAX_CODEC_CAPS) return;
-    out.audio_codecs[out.audio_codec_count++] = codec;
+    add_unique(out.audio_codecs, out.audio_codec_count, codec);
 }
 
 static bool mediafoundation_video_container(Container c) {
@@ -38,13 +36,11 @@ static bool mediafoundation_video_container(Container c) {
 }
 
 static void add_memory(avb_encoder_capabilities &out, avb_video_memory_type memory) {
-    if (out.video_memory_count >= AVB_MAX_VIDEO_MEMORY_CAPS) return;
-    out.video_memory[out.video_memory_count++] = memory;
+    add_unique(out.video_memory, out.video_memory_count, memory);
 }
 
 static void add_device(avb_encoder_capabilities &out, avb_hardware_device device) {
-    if (out.hardware_device_count >= AVB_MAX_HARDWARE_DEVICE_CAPS) return;
-    out.hardware_devices[out.hardware_device_count++] = device;
+    add_unique(out.hardware_devices, out.hardware_device_count, device);
 }
 
 static void add_common_software_video(avb_encoder_capabilities &out, Container c) {

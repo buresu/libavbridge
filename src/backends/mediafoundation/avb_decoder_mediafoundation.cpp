@@ -1,4 +1,5 @@
 #include "avb_decoder_mediafoundation.hpp"
+#include "avb_mediafoundation_common.hpp"
 #include "../../avb_video_codec_registry.hpp"
 
 #ifdef _WIN32
@@ -282,41 +283,6 @@ static std::string mf_native_codec_name(IMFSourceReader *reader, DWORD stream) {
     return first;
 }
 
-static uint16_t read_le16(const unsigned char *p) {
-    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
-}
-
-static uint32_t read_le32(const unsigned char *p) {
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-
-static uint64_t read_le64(const unsigned char *p) {
-    uint64_t v = 0;
-    for (int i = 0; i < 8; ++i) v |= (uint64_t)p[i] << (i * 8);
-    return v;
-}
-
-static GUID mf_video_subtype_from_fourcc(uint32_t fcc) {
-    GUID g = { fcc, 0x0000, 0x0010,
-        { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
-    return g;
-}
-
-static HRESULT get_mft_event_with_timeout(IMFMediaEventGenerator *events,
-                                          DWORD timeout_ms,
-                                          IMFMediaEvent **out) {
-    if (!events || !out) return E_POINTER;
-    *out = nullptr;
-    ULONGLONG deadline = GetTickCount64() + timeout_ms;
-    for (;;) {
-        HRESULT hr = events->GetEvent(MF_EVENT_FLAG_NO_WAIT, out);
-        if (hr != MF_E_NO_EVENTS_AVAILABLE) return hr;
-        if (GetTickCount64() >= deadline) return HRESULT_FROM_WIN32(WAIT_TIMEOUT);
-        Sleep(1);
-    }
-}
-
 static HRESULT create_video_decoder_mft(const GUID &input_subtype,
                                         IMFTransform **out,
                                         bool *is_async) {
@@ -363,36 +329,6 @@ static HRESULT create_video_decoder_mft(const GUID &input_subtype,
         }
         CoTaskMemFree(activates);
     }
-    return hr;
-}
-
-static HRESULT create_d3d11_device_manager(
-    ID3D11Device *input_device,
-    ID3D11Device **device, IMFDXGIDeviceManager **manager) {
-    if (!device || !manager) return E_POINTER;
-    *device = nullptr;
-    *manager = nullptr;
-
-    ComPtr<ID3D11Device> created_device = input_device;
-    HRESULT hr = S_OK;
-    if (!created_device) {
-        D3D_FEATURE_LEVEL feature_level{};
-        hr = D3D11CreateDevice(
-            nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
-            D3D11_CREATE_DEVICE_VIDEO_SUPPORT, nullptr, 0,
-            D3D11_SDK_VERSION, &created_device, &feature_level, nullptr);
-        if (FAILED(hr)) return hr;
-    }
-
-    ComPtr<IMFDXGIDeviceManager> created_manager;
-    UINT reset_token = 0;
-    hr = MFCreateDXGIDeviceManager(&reset_token, &created_manager);
-    if (SUCCEEDED(hr))
-        hr = created_manager->ResetDevice(created_device.Get(), reset_token);
-    if (FAILED(hr)) return hr;
-
-    hr = created_device.CopyTo(device);
-    if (SUCCEEDED(hr)) hr = created_manager.CopyTo(manager);
     return hr;
 }
 
@@ -493,28 +429,28 @@ avb_result AvbDecoderMediaFoundation::open_ivf(
     unsigned char header[32] = {};
     if (fread(header, 1, sizeof(header), file) != sizeof(header) ||
         memcmp(header, "DKIF", 4) != 0 ||
-        read_le16(header + 6) < 32) {
+        mf_read_le16(header + 6) < 32) {
         fclose(file);
         m_last_error = "Invalid IVF header.";
         return AVB_ERROR_OPEN_FAILED;
     }
 
-    uint32_t fourcc = read_le32(header + 8);
-    const uint32_t vp80 = read_le32((const unsigned char *)"VP80");
-    const uint32_t vp90 = read_le32((const unsigned char *)"VP90");
-    const uint32_t av01 = read_le32((const unsigned char *)"AV01");
+    uint32_t fourcc = mf_read_le32(header + 8);
+    const uint32_t vp80 = mf_read_le32((const unsigned char *)"VP80");
+    const uint32_t vp90 = mf_read_le32((const unsigned char *)"VP90");
+    const uint32_t av01 = mf_read_le32((const unsigned char *)"AV01");
     if (fourcc != vp80 && fourcc != vp90 && fourcc != av01) {
         fclose(file);
         m_last_error = "IVF codec is not VP8, VP9, or AV1.";
         return AVB_ERROR_STREAM_NOT_FOUND;
     }
 
-    m_impl->width = (int)read_le16(header + 12);
-    m_impl->height = (int)read_le16(header + 14);
-    m_impl->ivf_rate = read_le32(header + 16);
-    m_impl->ivf_scale = read_le32(header + 20);
-    m_impl->ivf_frame_count = read_le32(header + 24);
-    m_impl->ivf_data_offset = read_le16(header + 6);
+    m_impl->width = (int)mf_read_le16(header + 12);
+    m_impl->height = (int)mf_read_le16(header + 14);
+    m_impl->ivf_rate = mf_read_le32(header + 16);
+    m_impl->ivf_scale = mf_read_le32(header + 20);
+    m_impl->ivf_frame_count = mf_read_le32(header + 24);
+    m_impl->ivf_data_offset = mf_read_le16(header + 6);
     if (m_impl->width <= 0 || m_impl->height <= 0 ||
         m_impl->ivf_rate == 0 || m_impl->ivf_scale == 0) {
         fclose(file);
@@ -555,7 +491,7 @@ avb_result AvbDecoderMediaFoundation::open_ivf(
             m_last_error = "Media Foundation native IVF decode requires NV12 output.";
             return AVB_ERROR_INVALID_ARGUMENT;
         }
-        hr = create_d3d11_device_manager(
+        hr = mf_create_d3d11_device_manager(
             static_cast<ID3D11Device *>(options.hardware_context),
             &m_impl->ivf_d3d_device, &m_impl->ivf_device_manager);
         if (FAILED(hr)) {
@@ -702,7 +638,7 @@ avb_result AvbDecoderMediaFoundation::open_file(const char *path, const avb_deco
     // requested output format regardless of what the decoder natively outputs.
     attrs->SetUINT32(MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, TRUE);
     if (native_d3d11) {
-        HRESULT manager_hr = create_d3d11_device_manager(
+        HRESULT manager_hr = mf_create_d3d11_device_manager(
             static_cast<ID3D11Device *>(options.hardware_context),
             &m_impl->ivf_d3d_device, &m_impl->ivf_device_manager);
         if (FAILED(manager_hr)) {
@@ -1168,7 +1104,7 @@ retry_output:
     for (;;) {
         if (m_impl->ivf_async) {
             ComPtr<IMFMediaEvent> event;
-            HRESULT hr = get_mft_event_with_timeout(
+            HRESULT hr = mf_get_event_with_timeout(
                 m_impl->ivf_events.Get(), 10000, &event);
             if (FAILED(hr)) {
                 char buf[160];
@@ -1216,8 +1152,8 @@ retry_output:
             m_impl->ivf_eof = true;
             continue;
         }
-        uint32_t packet_size = read_le32(frame_header);
-        uint64_t timestamp = read_le64(frame_header + 4);
+        uint32_t packet_size = mf_read_le32(frame_header);
+        uint64_t timestamp = mf_read_le64(frame_header + 4);
         if (packet_size == 0 || packet_size > 256u * 1024u * 1024u) {
             m_last_error = "Invalid IVF frame size.";
             return AVB_ERROR_DECODE_FAILED;

@@ -1,4 +1,5 @@
 #include "avb_encoder_mediafoundation.hpp"
+#include "avb_mediafoundation_common.hpp"
 #include "../../avb_capability_common.hpp"
 #include "../../avb_video_codec_registry.hpp"
 
@@ -159,36 +160,6 @@ struct AvbEncoderMediaFoundation::Impl {
     }
 };
 
-static HRESULT create_d3d11_device_manager(
-    ID3D11Device *input_device,
-    ID3D11Device **device, IMFDXGIDeviceManager **manager) {
-    if (!device || !manager) return E_POINTER;
-    *device = nullptr;
-    *manager = nullptr;
-
-    ComPtr<ID3D11Device> created_device = input_device;
-    HRESULT hr = S_OK;
-    if (!created_device) {
-        D3D_FEATURE_LEVEL feature_level{};
-        hr = D3D11CreateDevice(
-            nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
-            D3D11_CREATE_DEVICE_VIDEO_SUPPORT, nullptr, 0,
-            D3D11_SDK_VERSION, &created_device, &feature_level, nullptr);
-        if (FAILED(hr)) return hr;
-    }
-
-    ComPtr<IMFDXGIDeviceManager> created_manager;
-    UINT reset_token = 0;
-    hr = MFCreateDXGIDeviceManager(&reset_token, &created_manager);
-    if (SUCCEEDED(hr))
-        hr = created_manager->ResetDevice(created_device.Get(), reset_token);
-    if (FAILED(hr)) return hr;
-
-    hr = created_device.CopyTo(device);
-    if (SUCCEEDED(hr)) hr = created_manager.CopyTo(manager);
-    return hr;
-}
-
 AvbEncoderMediaFoundation::AvbEncoderMediaFoundation() {
     m_impl = new Impl();
     HRESULT hr = MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET);
@@ -286,19 +257,6 @@ static HRESULT select_mp3_output_type(IMFTransform *encoder,
     return hr;
 }
 
-static GUID mf_video_subtype_from_fourcc(uint32_t fcc) {
-    GUID g = { fcc, 0x0000, 0x0010,
-        { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
-    return g;
-}
-
-static uint32_t mf_fourcc(const char (&s)[5]) {
-    return ((uint32_t)(unsigned char)s[0]) |
-           ((uint32_t)(unsigned char)s[1] << 8) |
-           ((uint32_t)(unsigned char)s[2] << 16) |
-           ((uint32_t)(unsigned char)s[3] << 24);
-}
-
 static GUID mf_video_subtype_from_codec(avb_video_codec codec, uint32_t codec_tag) {
     switch (codec) {
         case AVB_VIDEO_CODEC_H264: return MFVideoFormat_H264;
@@ -339,38 +297,20 @@ static uint32_t ivf_fourcc(avb_video_codec codec) {
     }
 }
 
-static void put_le16(unsigned char *p, uint16_t v) {
-    p[0] = (unsigned char)(v & 0xff);
-    p[1] = (unsigned char)((v >> 8) & 0xff);
-}
-
-static void put_le32(unsigned char *p, uint32_t v) {
-    p[0] = (unsigned char)(v & 0xff);
-    p[1] = (unsigned char)((v >> 8) & 0xff);
-    p[2] = (unsigned char)((v >> 16) & 0xff);
-    p[3] = (unsigned char)((v >> 24) & 0xff);
-}
-
-static void put_le64(unsigned char *p, uint64_t v) {
-    for (int i = 0; i < 8; ++i) {
-        p[i] = (unsigned char)((v >> (i * 8)) & 0xff);
-    }
-}
-
 static bool write_ivf_header(FILE *f, avb_video_codec codec, int width, int height,
                              UINT32 fps_num, UINT32 fps_den, uint32_t frames) {
     if (!f) return false;
     unsigned char h[32] = {};
     h[0] = 'D'; h[1] = 'K'; h[2] = 'I'; h[3] = 'F';
-    put_le16(h + 4, 0);
-    put_le16(h + 6, 32);
-    put_le32(h + 8, ivf_fourcc(codec));
-    put_le16(h + 12, (uint16_t)width);
-    put_le16(h + 14, (uint16_t)height);
-    put_le32(h + 16, fps_num ? fps_num : 30);
-    put_le32(h + 20, fps_den ? fps_den : 1);
-    put_le32(h + 24, frames);
-    put_le32(h + 28, 0);
+    mf_write_le16(h + 4, 0);
+    mf_write_le16(h + 6, 32);
+    mf_write_le32(h + 8, ivf_fourcc(codec));
+    mf_write_le16(h + 12, (uint16_t)width);
+    mf_write_le16(h + 14, (uint16_t)height);
+    mf_write_le32(h + 16, fps_num ? fps_num : 30);
+    mf_write_le32(h + 20, fps_den ? fps_den : 1);
+    mf_write_le32(h + 24, frames);
+    mf_write_le32(h + 28, 0);
     return fwrite(h, 1, sizeof(h), f) == sizeof(h);
 }
 
@@ -378,8 +318,8 @@ static bool write_ivf_frame(FILE *f, const unsigned char *data, DWORD size,
                             uint64_t timestamp) {
     if (!f || !data || size == 0) return false;
     unsigned char h[12] = {};
-    put_le32(h, (uint32_t)size);
-    put_le64(h + 4, timestamp);
+    mf_write_le32(h, (uint32_t)size);
+    mf_write_le64(h + 4, timestamp);
     return fwrite(h, 1, sizeof(h), f) == sizeof(h) &&
            fwrite(data, 1, size, f) == size;
 }
@@ -706,7 +646,7 @@ avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_op
         MFCreateAttributes(&attrs, native_sink ? 3 : 1);
         attrs->SetUINT32(MF_SINK_WRITER_DISABLE_THROTTLING, TRUE);
         if (native_sink) {
-            hr = create_d3d11_device_manager(
+            hr = mf_create_d3d11_device_manager(
                 static_cast<ID3D11Device *>(options.video.hardware_context),
                 &m_impl->d3d_device, &m_impl->d3d_device_manager);
             if (FAILED(hr)) {
@@ -1246,27 +1186,13 @@ avb_result AvbEncoderMediaFoundation::process_video_mft_output() {
     return AVB_OK;
 }
 
-static HRESULT get_mft_event_with_timeout(IMFMediaEventGenerator *events,
-                                          DWORD timeout_ms,
-                                          IMFMediaEvent **out) {
-    if (!events || !out) return E_POINTER;
-    *out = nullptr;
-    ULONGLONG deadline = GetTickCount64() + timeout_ms;
-    for (;;) {
-        HRESULT hr = events->GetEvent(MF_EVENT_FLAG_NO_WAIT, out);
-        if (hr != MF_E_NO_EVENTS_AVAILABLE) return hr;
-        if (GetTickCount64() >= deadline) return HRESULT_FROM_WIN32(WAIT_TIMEOUT);
-        Sleep(1);
-    }
-}
-
 avb_result AvbEncoderMediaFoundation::wait_async_video_input() {
     if (!m_impl || !m_impl->video_event_generator)
         return AVB_ERROR_INVALID_ARGUMENT;
 
     for (;;) {
         ComPtr<IMFMediaEvent> event;
-        HRESULT hr = get_mft_event_with_timeout(
+        HRESULT hr = mf_get_event_with_timeout(
             m_impl->video_event_generator.Get(), 10000, &event);
         if (FAILED(hr)) {
             char b[160];
@@ -1298,7 +1224,7 @@ avb_result AvbEncoderMediaFoundation::drain_async_video_mft() {
 
     for (;;) {
         ComPtr<IMFMediaEvent> event;
-        HRESULT hr = get_mft_event_with_timeout(
+        HRESULT hr = mf_get_event_with_timeout(
             m_impl->video_event_generator.Get(), 10000, &event);
         if (FAILED(hr)) {
             char b[160];

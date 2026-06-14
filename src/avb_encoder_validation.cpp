@@ -10,8 +10,15 @@ using avb::detail::container_accepts_audio;
 using avb::detail::container_accepts_video;
 using avb::detail::container_from_path;
 using avb::detail::container_name;
+using avb::detail::common_video_codec;
 using avb::detail::mp4_style_container;
 using avb::detail::resolve_backend;
+using avb::detail::set_validation_result;
+
+static void set_result(avb_encoder_validation &out, avb_result result,
+                       const char *message) {
+    set_validation_result(out, result, message);
+}
 
 static avb_video_codec resolve_video_codec(avb_video_codec codec) {
     return codec == AVB_VIDEO_CODEC_AUTO ? AVB_VIDEO_CODEC_H264 : codec;
@@ -34,30 +41,16 @@ static avb_audio_codec resolve_audio_codec(avb_audio_codec codec, Container cont
     }
 }
 
-static void set_result(avb_encoder_validation &out, avb_result result, const char *message) {
-    out.ok = result == AVB_OK ? 1 : 0;
-    out.result = result;
-    out.message = message;
-}
-
 static bool ffmpeg_container_accepts_video(Container c, avb_video_codec codec) {
     return c != Container::any && container_accepts_video(c, codec);
 }
 
 static bool ffmpeg_supports_video_codec(avb_video_codec codec) {
-    return codec == AVB_VIDEO_CODEC_H264 ||
-           codec == AVB_VIDEO_CODEC_HEVC ||
-           codec == AVB_VIDEO_CODEC_VP8 ||
-           codec == AVB_VIDEO_CODEC_VP9 ||
-           codec == AVB_VIDEO_CODEC_AV1;
+    return common_video_codec(codec);
 }
 
 static bool gstreamer_supports_video_codec(avb_video_codec codec) {
-    return codec == AVB_VIDEO_CODEC_H264 ||
-           codec == AVB_VIDEO_CODEC_HEVC ||
-           codec == AVB_VIDEO_CODEC_VP8 ||
-           codec == AVB_VIDEO_CODEC_VP9 ||
-           codec == AVB_VIDEO_CODEC_AV1;
+    return common_video_codec(codec);
 }
 
 static bool platform_video_codec(avb_backend backend, avb_video_codec codec) {

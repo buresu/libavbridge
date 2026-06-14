@@ -46,11 +46,13 @@ set(AVB_SOURCES
     src/avb_encoder_validation.cpp
     src/avb_probe.cpp
     src/avb_runtime_capabilities.cpp
+    src/runtime/avb_runtime_capabilities_impl.cpp
     src/avb_video_codec_registry.cpp
 )
 
 if(AVB_ENABLE_MEDIAFOUNDATION)
     list(APPEND AVB_SOURCES
+        src/backends/mediafoundation/avb_mediafoundation_common.cpp
         src/backends/mediafoundation/avb_decoder_mediafoundation.cpp
         src/backends/mediafoundation/avb_encoder_mediafoundation.cpp
     )

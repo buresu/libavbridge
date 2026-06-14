@@ -157,4 +157,76 @@ inline bool container_accepts_audio(Container c, avb_audio_codec codec) {
     return false;
 }
 
+template <typename T, size_t N>
+inline void add_unique(T (&values)[N], int &count, T value) {
+    for (int i = 0; i < count; ++i) {
+        if (values[i] == value) return;
+    }
+    if (count < static_cast<int>(N)) values[count++] = value;
+}
+
+template <typename Validation>
+inline void set_validation_result(Validation &out, avb_result result,
+                                  const char *message) {
+    out.ok = result == AVB_OK ? 1 : 0;
+    out.result = result;
+    out.message = message;
+}
+
+inline bool valid_pixel_format(avb_pixel_format format) {
+    switch (format) {
+        case AVB_PIXEL_FORMAT_UNKNOWN:
+        case AVB_PIXEL_FORMAT_RGBA8:
+        case AVB_PIXEL_FORMAT_BGRA8:
+        case AVB_PIXEL_FORMAT_NV12:
+        case AVB_PIXEL_FORMAT_I420:
+        case AVB_PIXEL_FORMAT_BC1_RGBA:
+        case AVB_PIXEL_FORMAT_BC3_RGBA:
+        case AVB_PIXEL_FORMAT_BC4_R:
+        case AVB_PIXEL_FORMAT_BC5_RG:
+        case AVB_PIXEL_FORMAT_BC7_RGBA:
+            return true;
+    }
+    return false;
+}
+
+inline bool valid_video_memory(avb_video_memory_type memory) {
+    return memory == AVB_VIDEO_MEMORY_CPU ||
+           memory == AVB_VIDEO_MEMORY_NATIVE ||
+           memory == AVB_VIDEO_MEMORY_DMABUF;
+}
+
+inline bool valid_hardware_policy(avb_hardware_policy policy) {
+    return policy == AVB_HARDWARE_DISABLED ||
+           policy == AVB_HARDWARE_PREFER ||
+           policy == AVB_HARDWARE_REQUIRE;
+}
+
+inline bool valid_hardware_device(avb_hardware_device device) {
+    switch (device) {
+        case AVB_HW_DEVICE_AUTO:
+        case AVB_HW_DEVICE_VAAPI:
+        case AVB_HW_DEVICE_CUDA:
+        case AVB_HW_DEVICE_QSV:
+        case AVB_HW_DEVICE_D3D11VA:
+        case AVB_HW_DEVICE_VIDEOTOOLBOX:
+        case AVB_HW_DEVICE_AMF:
+            return true;
+    }
+    return false;
+}
+
+inline bool common_video_codec(avb_video_codec codec) {
+    return codec == AVB_VIDEO_CODEC_H264 ||
+           codec == AVB_VIDEO_CODEC_HEVC ||
+           codec == AVB_VIDEO_CODEC_VP8 ||
+           codec == AVB_VIDEO_CODEC_VP9 ||
+           codec == AVB_VIDEO_CODEC_AV1;
+}
+
+inline bool platform_backend(avb_backend backend) {
+    return backend == AVB_BACKEND_MEDIAFOUNDATION ||
+           backend == AVB_BACKEND_AVFOUNDATION;
+}
+
 } // namespace avb::detail
