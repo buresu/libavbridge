@@ -3,6 +3,24 @@
 
 #include <cstring>
 
+namespace {
+
+// Reverse a name-lookup: return the enum value in [0, count) whose name_of()
+// matches `name`, or AVB_ERROR_INVALID_ARGUMENT if none does. Every avb enum
+// starts its named values at 0 (AUTO) and ends with a COUNT sentinel.
+template <typename Enum>
+avb_result enum_from_name(const char *name, Enum *out, int count,
+                          const char *(*name_of)(Enum)) {
+    if (!name || !out) return AVB_ERROR_INVALID_ARGUMENT;
+    for (int i = 0; i < count; ++i) {
+        const char *n = name_of((Enum)i);
+        if (n && std::strcmp(n, name) == 0) { *out = (Enum)i; return AVB_OK; }
+    }
+    return AVB_ERROR_INVALID_ARGUMENT;
+}
+
+} // namespace
+
 extern "C" {
 
 const char *avb_version_string(void) {
@@ -53,36 +71,15 @@ const char *avb_audio_codec_name(avb_audio_codec codec) {
 }
 
 avb_result avb_backend_from_name(const char *name, avb_backend *out) {
-    if (!name || !out) return AVB_ERROR_INVALID_ARGUMENT;
-    for (int b = AVB_BACKEND_AUTO; b < AVB_BACKEND_COUNT; ++b) {
-        const char *n = avb_backend_name((avb_backend)b);
-        if (n && std::strcmp(n, name) == 0) { *out = (avb_backend)b; return AVB_OK; }
-    }
-    return AVB_ERROR_INVALID_ARGUMENT;
+    return enum_from_name(name, out, AVB_BACKEND_COUNT, avb_backend_name);
 }
 
 avb_result avb_video_codec_from_name(const char *name, avb_video_codec *out) {
-    if (!name || !out) return AVB_ERROR_INVALID_ARGUMENT;
-    for (int c = AVB_VIDEO_CODEC_AUTO; c < AVB_VIDEO_CODEC_COUNT; ++c) {
-        const char *n = avb_video_codec_name((avb_video_codec)c);
-        if (n && std::strcmp(n, name) == 0) {
-            *out = (avb_video_codec)c;
-            return AVB_OK;
-        }
-    }
-    return AVB_ERROR_INVALID_ARGUMENT;
+    return enum_from_name(name, out, AVB_VIDEO_CODEC_COUNT, avb_video_codec_name);
 }
 
 avb_result avb_audio_codec_from_name(const char *name, avb_audio_codec *out) {
-    if (!name || !out) return AVB_ERROR_INVALID_ARGUMENT;
-    for (int c = AVB_AUDIO_CODEC_AUTO; c < AVB_AUDIO_CODEC_COUNT; ++c) {
-        const char *n = avb_audio_codec_name((avb_audio_codec)c);
-        if (n && std::strcmp(n, name) == 0) {
-            *out = (avb_audio_codec)c;
-            return AVB_OK;
-        }
-    }
-    return AVB_ERROR_INVALID_ARGUMENT;
+    return enum_from_name(name, out, AVB_AUDIO_CODEC_COUNT, avb_audio_codec_name);
 }
 
 int avb_backend_is_available(avb_backend backend) {
