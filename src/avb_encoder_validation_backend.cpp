@@ -70,7 +70,9 @@ bool platform_native_input(
     Container container,
     const avb_video_encode_params &video) {
     if (backend == AVB_BACKEND_MEDIAFOUNDATION) {
-        return video.input_memory == AVB_VIDEO_MEMORY_NATIVE &&
+        return video.input_memory == AVB_VIDEO_MEMORY_EXTERNAL &&
+               video.input_external_type ==
+                   AVB_VIDEO_EXTERNAL_D3D11_TEXTURE &&
                (video.input_format == AVB_PIXEL_FORMAT_UNKNOWN ||
                 video.input_format == AVB_PIXEL_FORMAT_NV12) &&
                (container == Container::ivf ||
@@ -78,7 +80,9 @@ bool platform_native_input(
                 container == Container::mov);
     }
     if (backend == AVB_BACKEND_AVFOUNDATION) {
-        return video.input_memory == AVB_VIDEO_MEMORY_NATIVE &&
+        return video.input_memory == AVB_VIDEO_MEMORY_EXTERNAL &&
+               video.input_external_type ==
+                   AVB_VIDEO_EXTERNAL_CVPIXEL_BUFFER &&
                (container == Container::mp4 ||
                 container == Container::mov ||
                 container == Container::unknown);
@@ -91,6 +95,15 @@ bool validate_portable_backend(
     const EncoderContext &context,
     avb_encoder_validation &out,
     bool gstreamer) {
+    if (options.video.enable &&
+        options.video.input_memory == AVB_VIDEO_MEMORY_EXTERNAL &&
+        options.video.input_external_type != AVB_VIDEO_EXTERNAL_DMABUF) {
+        set_result(
+            out,
+            AVB_ERROR_OPEN_FAILED,
+            "The selected backend cannot import the requested external video type.");
+        return false;
+    }
     if (options.video.enable && !context.custom_video &&
         !common_video_codec(context.video_codec)) {
         set_result(
@@ -174,18 +187,20 @@ bool validate_platform_backend(
         set_result(
             out,
             AVB_ERROR_OPEN_FAILED,
-            "The platform backend cannot consume the requested native video input.");
+            "The platform backend cannot consume the requested video memory representation.");
         return false;
     }
     if (out.backend == AVB_BACKEND_MEDIAFOUNDATION &&
         options.video.enable &&
-        options.video.input_memory == AVB_VIDEO_MEMORY_NATIVE &&
+        options.video.input_memory == AVB_VIDEO_MEMORY_EXTERNAL &&
+        options.video.input_external_type ==
+            AVB_VIDEO_EXTERNAL_D3D11_TEXTURE &&
         context.container != Container::ivf &&
         !options.video.hardware_context) {
         set_result(
             out,
             AVB_ERROR_INVALID_ARGUMENT,
-            "Media Foundation native MP4/MOV input requires an ID3D11Device hardware_context.");
+            "Media Foundation D3D11 texture input requires an ID3D11Device hardware_context.");
         return false;
     }
     return true;

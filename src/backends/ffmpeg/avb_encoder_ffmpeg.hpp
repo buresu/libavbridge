@@ -56,6 +56,9 @@ private:
     AVPacket       *m_packet      = nullptr;
     AVPixelFormat    m_src_av_fmt   = AV_PIX_FMT_BGRA;
     avb_pixel_format m_input_format = AVB_PIXEL_FORMAT_BGRA8;
+    avb_video_memory_type m_input_memory = AVB_VIDEO_MEMORY_CPU;
+    avb_video_external_type m_input_external_type =
+        AVB_VIDEO_EXTERNAL_NONE;
     int             m_width       = 0;
     int             m_height      = 0;
     double          m_frame_rate  = 30.0;

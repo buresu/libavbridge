@@ -4,6 +4,7 @@ using avb::capability::add_audio_codec_unchecked;
 using avb::capability::add_common_audio_codecs;
 using avb::capability::add_common_video_codecs;
 using avb::capability::add_device;
+using avb::capability::add_external;
 using avb::capability::add_memory;
 using avb::capability::add_software_pixel_formats;
 using avb::capability::add_video_codec;
@@ -38,7 +39,7 @@ void avb_fill_mediafoundation_capabilities(
         add_video_codec(out, AVB_VIDEO_CODEC_AV1, container);
         add_software_pixel_formats(out);
         add_memory(out, AVB_VIDEO_MEMORY_CPU);
-        add_memory(out, AVB_VIDEO_MEMORY_NATIVE);
+        add_external(out, AVB_VIDEO_EXTERNAL_D3D11_TEXTURE);
         add_device(out, AVB_HW_DEVICE_AUTO);
         add_device(out, AVB_HW_DEVICE_D3D11VA);
         return;
@@ -50,7 +51,7 @@ void avb_fill_mediafoundation_capabilities(
     add_software_pixel_formats(out);
     add_memory(out, AVB_VIDEO_MEMORY_CPU);
     if (!audio_only_container(container))
-        add_memory(out, AVB_VIDEO_MEMORY_NATIVE);
+        add_external(out, AVB_VIDEO_EXTERNAL_D3D11_TEXTURE);
     add_device(out, AVB_HW_DEVICE_AUTO);
     if (!audio_only_container(container))
         add_device(out, AVB_HW_DEVICE_D3D11VA);
@@ -98,7 +99,7 @@ void avb_fill_mediafoundation_capabilities(
 
     add_memory(out, AVB_VIDEO_MEMORY_CPU);
     if (native_video_container(container))
-        add_memory(out, AVB_VIDEO_MEMORY_NATIVE);
+        add_external(out, AVB_VIDEO_EXTERNAL_D3D11_TEXTURE);
     add_device(out, AVB_HW_DEVICE_AUTO);
     if (native_video_container(container))
         add_device(out, AVB_HW_DEVICE_D3D11VA);

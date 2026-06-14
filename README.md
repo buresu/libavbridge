@@ -1,206 +1,83 @@
 # libavbridge
 
-A small, portable C/C++ library that provides a unified API for decoding media
-files across platforms. It abstracts the platform-native or platform-preferred
-media stack behind a stable C ABI, so applications and plugins can add
-audio/video decoding without embedding large codec libraries directly.
+A small C/C++ library for decoding and encoding media through a portable C ABI.
+It uses platform media frameworks or optional runtime-loaded FFmpeg/GStreamer
+backends without bundling codec libraries.
 
 ## Backends
 
-libavbridge uses platform media backends. `AVB_BACKEND_AUTO` selects the default
-per platform:
+`AVB_BACKEND_AUTO` selects the platform default:
 
-| Platform | Default backend (`auto`) |
-| -------- | ------------------------ |
-| Windows  | `mediafoundation`        |
-| macOS / iOS | `avfoundation`        |
-| Linux    | `gstreamer`              |
+| Platform | Default |
+| --- | --- |
+| Windows | Media Foundation |
+| macOS / iOS | AVFoundation |
+| Linux | GStreamer |
 
-`ffmpeg` is an **optional, cross-platform** backend (Windows / macOS / Linux).
-Enable it at build time and select it explicitly with `AVB_BACKEND_FFMPEG`; it
-is never chosen by `auto`.
+FFmpeg is an optional cross-platform backend selected explicitly with
+`AVB_BACKEND_FFMPEG`.
 
-The `gstreamer` and `ffmpeg` backends are **loaded at runtime** via dynamic
-loading (`dlopen`/`dlsym`, or `LoadLibrary`/`GetProcAddress` on Windows). This
-project does **not** bundle GStreamer or FFmpeg and does **not** link to them at
-build time — the relevant runtime libraries must be installed on the target
-system. If the selected backend's libraries are missing, decoding is
-unavailable and opening fails with a clear backend-unavailable error.
+GStreamer and FFmpeg are loaded dynamically at runtime. Applications must
+install the corresponding libraries and codec plugins separately.
 
-## Codec support
+## Features
 
-The public encoder API can request H.264, HEVC, VP8, VP9, AV1, HAP, AAC, Opus,
-MP3, FLAC, Vorbis, and PCM. Exact availability is backend, container, and
-runtime-install dependent:
+- Audio and video decode, encode, probe, seek, and transcode APIs
+- Static and runtime capability queries
+- CPU, backend-native, and external hardware frame representations
+- Hardware acceleration policies and device selection
+- Custom video decoder and encoder plugins
+- File, memory, and callback-based decode input
 
-- FFmpeg can encode H.264, HEVC, VP8, VP9, AV1, HAP, AAC, Opus, MP3, FLAC,
-  Vorbis, and PCM when the installed FFmpeg build provides the corresponding
-  encoder.
-- GStreamer can encode H.264, HEVC, VP8, VP9, AV1, HAP, AAC, Opus, MP3, FLAC,
-  Vorbis, and PCM when the required plugins are installed.
-- AVFoundation built-in encoders are limited to H.264, HEVC, and AAC.
-- Media Foundation built-in encoders support H.264/HEVC video, AAC audio for
-  MP4/MOV/M4A-style outputs, MP3 audio through the MP3 ACM codec wrapper, FLAC
-  audio for native FLAC outputs, and PCM_S16/PCM_F32 audio for WAV outputs.
-  VP8/VP9/AV1 video can be encoded through Media Foundation encoder MFTs to
-  video-only IVF outputs when the installed runtime can configure them.
-  VP8, VP9, AV1, and HAP can
-  still be produced through registered custom video encoders when the selected
-  container accepts the compressed packets. Asynchronous encoder MFTs are driven
-  through their Media Foundation event stream.
-- Media Foundation directly demuxes IVF and decodes VP8, VP9, or AV1 through
-  installed decoder MFTs, including IVF files produced by this library.
-- Media Foundation IVF encoding accepts `AVB_VIDEO_MEMORY_NATIVE` NV12 frames
-  whose `native_handle` is an `ID3D11Texture2D*`, avoiding a CPU readback.
-- Media Foundation MP4/MOV H.264 and HEVC encoding accepts the same D3D11 NV12
-  frames when `avb_video_encode_params::hardware_context` points to the
-  texture's `ID3D11Device`.
-- Media Foundation decoding can return D3D11 NV12 textures for IVF and for
-  containers handled by Source Reader, such as MP4/MOV, WebM, and Matroska.
-  This covers H.264, HEVC, VP8, VP9, and AV1 when the installed decoder MFT
-  exposes D3D11 output. The texture and its owning sample remain valid until
-  `avb_decoder_release_video_frame`. Set
-  `avb_decode_options::hardware_context` to an `ID3D11Device*` to allocate
-  decoded textures on an application-owned device. Multiple native frames may
-  be held simultaneously and released in any order, including across a seek.
-- Media Foundation decoder runtime probing checks installed Media Foundation
-  Transform registrations. On current Windows runtimes this can expose H.264,
-  HEVC, VP8, VP9, AV1, AAC, Opus, MP3, FLAC, Vorbis, and PCM decode support,
-  depending on the installed OS components/codecs. The test suite exercises
-  VP8, VP9, AV1, FLAC, Opus, and Vorbis decode when the corresponding runtime
-  support is present.
-- Media Foundation may report an already-decoded PCM subtype for some source
-  handlers. In particular, Ogg/Vorbis can decode successfully while
-  `avb_media_info::audio.codec_name` reports `pcm` rather than `vorbis`.
-- AVFoundation decoder runtime probing queries VideoToolbox
-  (`VTIsHardwareDecodeSupported`) and AudioToolbox decoder registrations. On
-  current macOS this exposes H.264/HEVC decode (always) plus VP9/AV1 when the
-  hardware supports them, and AAC, MP3, FLAC, Opus, and PCM audio decode. The
-  encoder probe walks `VTCopyVideoEncoderList`, reporting H.264/HEVC video and
-  AAC audio for the writer's MP4/MOV/M4A containers.
+Codec and container support depends on the selected backend and installed
+runtime. Use these APIs instead of assuming a fixed codec list:
 
-Applications can query the static and runtime codec surface with
-`avb_decoder_query_capabilities`, `avb_encoder_query_capabilities`,
-`avb_decoder_probe_runtime_capabilities`, and
-`avb_encoder_probe_runtime_capabilities`. Runtime probes inspect the loaded
-backend environment: FFmpeg libraries, GStreamer elements/plugins, Media
-Foundation Transform (MFT) registrations on Windows, and VideoToolbox/
-AudioToolbox registrations on macOS. The lists are still
-container-filtered and are a probe, not a guarantee that every resolution,
-bitrate, profile, or media sink will accept a full session.
+- `avb_decoder_query_capabilities`
+- `avb_encoder_query_capabilities`
+- `avb_decoder_probe_runtime_capabilities`
+- `avb_encoder_probe_runtime_capabilities`
 
-## Hardware video frames
+## Video Memory
 
-`avb_video_frame` can describe either CPU-readable planes or backend-native
-hardware frames. Use `avb_decode_options::video_memory` and
-`hardware_policy`/`hardware_device` to request native decode output, and use
-`avb_video_encode_params::input_memory` plus the same hardware options to feed
-native frames into encoders.
+`avb_video_frame::memory_type` describes how a frame is exposed:
 
-Memory modes:
+- `AVB_VIDEO_MEMORY_CPU`: CPU-readable planes
+- `AVB_VIDEO_MEMORY_BACKEND_NATIVE`: an opaque backend object such as
+  `AVFrame*` or `GstBuffer*`
+- `AVB_VIDEO_MEMORY_EXTERNAL`: a typed platform interop representation
 
-- `AVB_VIDEO_MEMORY_CPU` is the portable default. Frames use `plane_data[]`,
-  `plane_stride[]`, `data`, and `stride`.
-- `AVB_VIDEO_MEMORY_NATIVE` keeps the backend's native object alive until the
-  frame is released. FFmpeg uses `AVFrame*`; GStreamer uses `GstBuffer*`;
-  Media Foundation uses `ID3D11Texture2D*`; AVFoundation uses `CVPixelBufferRef`.
-- `AVB_VIDEO_MEMORY_DMABUF` is the Linux zero-copy interchange mode. Frames
-  carry DRM PRIME / DMABUF fd, offset, stride, modifier, and `drm_format`
-  metadata. Multiple planes may point at the same fd.
+External representations use `external_type`:
 
-Hardware policy:
+| Type | Representation |
+| --- | --- |
+| `AVB_VIDEO_EXTERNAL_DMABUF` | DRM PRIME / DMABUF descriptors |
+| `AVB_VIDEO_EXTERNAL_D3D11_TEXTURE` | `ID3D11Texture2D*` |
+| `AVB_VIDEO_EXTERNAL_CVPIXEL_BUFFER` | `CVPixelBufferRef` |
 
-- `AVB_HARDWARE_DISABLED` keeps the request on CPU/system-memory paths.
-- `AVB_HARDWARE_PREFER` enables hardware when the backend can do so and keeps a
-  CPU fallback only where such a fallback preserves the requested memory type.
-- `AVB_HARDWARE_REQUIRE` makes `open` fail unless the backend can satisfy the
-  requested codec, device, and memory type in hardware.
+Decode requests use `video_memory` and `video_external_type`. Encoder input
+uses `input_memory` and `input_external_type`. Capability queries expose the
+supported memory and external types separately.
 
-Implemented native paths:
+Hardware behavior is controlled with:
 
-- FFmpeg decode returns backend-owned `AVFrame*` handles for hardware frames;
-  VAAPI also exposes the `VASurfaceID` through `native_handle_id`.
-- FFmpeg encode supports VAAPI hardware encoding, including CPU-frame upload and
-  direct `AVFrame*` native input when it matches the encoder device.
-- GStreamer decode can request `video/x-raw(memory:VASurface)` and returns a
-  `GstBuffer*` native handle.
-- GStreamer encode can push native `GstBuffer*` input into VA encoders, or upload
-  CPU input through `vapostproc`.
-- FFmpeg decode can export hardware frames as DRM PRIME / DMABUF descriptors,
-  filling `dmabuf_fd[]`, `plane_offset[]`, `plane_stride[]`,
-  `dmabuf_modifier[]`, and `drm_format`.
-- GStreamer decode can request `video/x-raw(memory:DMABuf)` and fill the same
-  DMABUF fields from the returned buffer.
-- GStreamer encode can import DMABUF input either by reusing a `GstBuffer*`
-  native handle or by wrapping the `dmabuf_fd[]` planes into a new buffer.
-- FFmpeg encode can import DMABUF input into the VAAPI hardware encoder path by
-  wrapping the plane descriptors as a DRM PRIME `AVFrame`.
-- Media Foundation decode can allocate NV12 `ID3D11Texture2D` frames on an
-  application-provided `ID3D11Device`.
-- Media Foundation H.264/HEVC MP4/MOV encode can consume those textures on the
-  same device without a CPU pixel copy.
-- AVFoundation decode returns the VideoToolbox-decoded, IOSurface-backed
-  `CVPixelBufferRef` in `native_handle` (NV12 by default) without a CPU copy.
-- AVFoundation H.264/HEVC MP4/MOV encode appends a caller-provided
-  `CVPixelBufferRef` straight into the `AVAssetWriter`, avoiding a readback.
+- `AVB_HARDWARE_DISABLED`
+- `AVB_HARDWARE_PREFER`
+- `AVB_HARDWARE_REQUIRE`
 
-The optional `avb_dmabuf_roundtrip` CTest smoke validates all Linux VAAPI
-interchange paths when the runtime stack supports them:
+The caller must release decoded frames with
+`avb_decoder_release_video_frame`. For encoder input, the caller retains
+ownership until `avb_encoder_write_video` returns.
 
-- FFmpeg decode -> FFmpeg encode
-- FFmpeg decode -> GStreamer encode
-- GStreamer decode -> GStreamer encode
-- GStreamer decode -> FFmpeg encode
+## Custom Video Codecs
 
-On systems without VAAPI, DMABUF support, or the relevant plugins/codecs, those
-tests skip rather than fail.
+Applications can register process-wide codecs with:
 
-### Runtime libraries
+- `avb_register_video_decoder`
+- `avb_register_video_encoder`
 
-GStreamer backend (Linux default):
-
-- `libgstreamer-1.0`, `libgstapp-1.0`, `libgstpbutils-1.0`
-- `libgstvideo-1.0`, `libgstallocators-1.0`
-- `libglib-2.0`, `libgobject-2.0`
-- GStreamer plugins: `base`, `good` (plus others for additional codecs)
-- For VAAPI native/DMABUF paths: the GStreamer `va` plugin (for example
-  `gst-plugin-va` on Arch Linux), a working VA driver, and `vainfo` reporting
-  the required decode/encode entrypoints.
-
-FFmpeg backend (optional):
-
-- `libavformat`, `libavcodec`, `libavutil`, `libswresample`, `libswscale`
-- For VAAPI native/DMABUF paths: an FFmpeg build with VAAPI and DRM PRIME
-  hwcontext support, plus a working VA driver.
-
-> Users and distributors are responsible for ensuring that their installed
-> GStreamer / FFmpeg builds and codec usage comply with applicable licenses and
-> patent requirements. FDK-AAC is not used.
-
-## Custom video decoders
-
-Applications can register process-wide custom video decoders with
-`avb_register_video_decoder`. Capable backends still handle demuxing and regular
-audio decoding, then route matching video packets to the registered decoder.
-This is intended for formats such as HAP where a plugin may want to return
-GPU-ready compressed frames instead of CPU-expanded pixels. FFmpeg, GStreamer,
-Media Foundation, and AVFoundation can use custom video decoders.
-
-Applications can also register custom video encoders with
-`avb_register_video_encoder`. FFmpeg, GStreamer, Media Foundation, and
-AVFoundation can use a registered encoder for video compression while continuing
-to mux regular audio through the backend. FFmpeg writes the returned encoded
-packets directly to the container muxer; GStreamer pushes them through an
-encoded `appsrc` using the caps reported by the plugin; Media Foundation writes
-encoded samples directly to Sink Writer streams when the selected Windows media
-sink accepts that compressed format; AVFoundation wraps them in
-`CMSampleBuffer` objects for `AVAssetWriter`.
-
-Compressed block formats are represented through `avb_video_frame` using
-`AVB_PIXEL_FORMAT_BC1_RGBA`, `AVB_PIXEL_FORMAT_BC3_RGBA`, `AVB_PIXEL_FORMAT_BC4_R`,
-`AVB_PIXEL_FORMAT_BC5_RG`, or `AVB_PIXEL_FORMAT_BC7_RGBA`. For these formats,
-`data` points to the compressed payload and `stride` is the byte count for one
-row of 4x4 blocks.
+Backends continue to handle demuxing, muxing, and audio while registered plugins
+process matching video streams. This supports codecs such as HAP and GPU-ready
+compressed formats including BC1, BC3, BC4, BC5, and BC7.
 
 ## Building
 
@@ -209,57 +86,66 @@ cmake -S . -B build
 cmake --build build -j
 ```
 
-### CMake options
+Common options:
 
-| Option                       | Default                     | Description                                   |
-| ---------------------------- | --------------------------- | --------------------------------------------- |
-| `AVB_BUILD_SHARED`           | ON                          | Build the shared library                      |
-| `AVB_BUILD_EXAMPLES`         | ON                          | Build the example tools                       |
-| `AVB_BUILD_TESTS`            | OFF                         | Build the conformance test                    |
-| `AVB_ENABLE_MEDIAFOUNDATION` | ON (Windows only)           | Windows Media Foundation backend              |
-| `AVB_ENABLE_AVFOUNDATION`    | ON (Apple only)             | Apple AVFoundation backend                    |
-| `AVB_ENABLE_GSTREAMER`       | ON on Linux, OFF elsewhere  | GStreamer backend (Linux default)             |
-| `AVB_ENABLE_FFMPEG`          | OFF                         | FFmpeg backend (optional, cross-platform)     |
+| Option | Default | Description |
+| --- | --- | --- |
+| `AVB_BUILD_SHARED` | ON | Build a shared library |
+| `AVB_BUILD_EXAMPLES` | ON | Build example tools |
+| `AVB_BUILD_TESTS` | OFF | Build tests |
+| `AVB_ENABLE_MEDIAFOUNDATION` | Windows | Enable Media Foundation |
+| `AVB_ENABLE_AVFOUNDATION` | Apple | Enable AVFoundation |
+| `AVB_ENABLE_GSTREAMER` | Linux | Enable GStreamer |
+| `AVB_ENABLE_FFMPEG` | OFF | Enable FFmpeg |
 
-Examples:
+Build with FFmpeg and tests:
 
 ```bash
-# Linux default build (GStreamer backend)
-cmake -S . -B build && cmake --build build -j
-
-# Add the optional FFmpeg backend alongside GStreamer
-cmake -S . -B build -DAVB_ENABLE_FFMPEG=ON && cmake --build build -j
-
-# Run the conformance test (needs the `ffmpeg` CLI to generate the fixture)
-cmake -S . -B build -DAVB_BUILD_TESTS=ON && cmake --build build -j
+cmake -S . -B build \
+  -DAVB_ENABLE_FFMPEG=ON \
+  -DAVB_BUILD_TESTS=ON
+cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
+
+The tests use the `ffmpeg` command-line tool to generate fixtures when it is
+available. Hardware tests skip when the required device, driver, or runtime
+plugin is unavailable.
+
+## Runtime Dependencies
+
+GStreamer requires the core, app, pbutils, video, and allocators libraries plus
+the plugins needed by the selected codecs. DMABUF/VAAPI paths also require a
+working VA driver and GStreamer VA plugins.
+
+FFmpeg requires `libavformat`, `libavcodec`, `libavutil`, `libswresample`, and
+`libswscale`. DMABUF/VAAPI paths require FFmpeg hardware-context support and a
+working VA driver.
 
 ## Examples
 
 ```bash
-build/examples/avb_probe         sample.mp4
-build/examples/avb_probe         sample.mp4 ffmpeg
-build/examples/avb_decode_audio  sample.mp4 out.f32
-build/examples/avb_decode_video  sample.mp4 frame_%04d.rgba
-build/examples/avb_transcode     sample.mp4 out.mp4
+build/examples/avb_probe sample.mp4
+build/examples/avb_capabilities --backend ffmpeg --runtime
+build/examples/avb_decode_audio sample.mp4 out.f32
+build/examples/avb_decode_video sample.mp4 frame_%04d.rgba
+build/examples/avb_transcode sample.mp4 out.mp4
+```
 
-# Select backend/codecs explicitly.
-build/examples/avb_transcode sample.mp4 out.webm \
-  --backend gstreamer --video-codec vp9 --audio-codec opus
-build/examples/avb_transcode sample.mp4 out.mkv \
-  --backend ffmpeg --video-codec av1 --audio-codec opus
+Select codecs and hardware explicitly:
 
-# Require a specific hardware encoder path when the runtime stack supports it.
+```bash
 build/examples/avb_transcode sample.mp4 out.webm \
-  --backend gstreamer --video-codec vp9 --audio-codec opus \
-  --hardware require --hardware-device vaapi
+  --backend gstreamer \
+  --video-codec vp9 \
+  --audio-codec opus \
+  --hardware require \
+  --hardware-device vaapi
 ```
 
 ## License
 
-libavbridge is licensed under the MIT License. See [LICENSE](LICENSE) for
-details.
+libavbridge is licensed under the MIT License. See [LICENSE](LICENSE).
 
-GStreamer and FFmpeg are external runtime dependencies loaded dynamically; they
-are neither bundled nor linked at build time.
+GStreamer and FFmpeg are external runtime dependencies. They are not bundled or
+linked into libavbridge.

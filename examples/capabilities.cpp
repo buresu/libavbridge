@@ -29,9 +29,19 @@ static const char *pixel_format_name(avb_pixel_format format) {
 
 static const char *video_memory_name(avb_video_memory_type memory) {
     switch (memory) {
-        case AVB_VIDEO_MEMORY_CPU:    return "cpu";
-        case AVB_VIDEO_MEMORY_NATIVE: return "native";
-        case AVB_VIDEO_MEMORY_DMABUF: return "dmabuf";
+        case AVB_VIDEO_MEMORY_CPU:            return "cpu";
+        case AVB_VIDEO_MEMORY_BACKEND_NATIVE: return "backend-native";
+        case AVB_VIDEO_MEMORY_EXTERNAL:       return "external";
+    }
+    return "invalid";
+}
+
+static const char *video_external_name(avb_video_external_type external_type) {
+    switch (external_type) {
+        case AVB_VIDEO_EXTERNAL_NONE:             return "none";
+        case AVB_VIDEO_EXTERNAL_DMABUF:           return "dmabuf";
+        case AVB_VIDEO_EXTERNAL_D3D11_TEXTURE:    return "d3d11-texture";
+        case AVB_VIDEO_EXTERNAL_CVPIXEL_BUFFER:   return "cvpixelbuffer";
     }
     return "invalid";
 }
@@ -81,6 +91,8 @@ static void print_decoder_caps(const char *title,
                pixel_format_name);
     print_list("video memory", caps.video_memory, caps.video_memory_count,
                video_memory_name);
+    print_list("external types", caps.video_external_types,
+               caps.video_external_type_count, video_external_name);
     print_list("hw devices", caps.hardware_devices, caps.hardware_device_count,
                hardware_device_name);
 }
@@ -100,6 +112,8 @@ static void print_encoder_caps(const char *title,
                avb_audio_codec_name);
     print_list("video memory", caps.video_memory, caps.video_memory_count,
                video_memory_name);
+    print_list("external types", caps.video_external_types,
+               caps.video_external_type_count, video_external_name);
     print_list("hw devices", caps.hardware_devices, caps.hardware_device_count,
                hardware_device_name);
 }

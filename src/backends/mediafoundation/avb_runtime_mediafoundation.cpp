@@ -16,6 +16,7 @@ using avb::detail::audio_only_container;
 using avb::capability::add_audio_codec;
 using avb::capability::add_audio_codec_unchecked;
 using avb::capability::add_device;
+using avb::capability::add_external;
 using avb::capability::add_memory;
 using avb::capability::add_software_pixel_formats;
 using avb::capability::add_video_codec;
@@ -274,7 +275,7 @@ void fill_decoder(avb_decoder_capabilities &out, Container container) {
     add_software_pixel_formats(out);
     add_memory(out, AVB_VIDEO_MEMORY_CPU);
     if (!audio_only_container(container))
-        add_memory(out, AVB_VIDEO_MEMORY_NATIVE);
+        add_external(out, AVB_VIDEO_EXTERNAL_D3D11_TEXTURE);
     add_device(out, AVB_HW_DEVICE_AUTO);
     if (!audio_only_container(container))
         add_device(out, AVB_HW_DEVICE_D3D11VA);
@@ -336,7 +337,7 @@ void fill_encoder(avb_encoder_capabilities &out, Container container) {
         container == Container::ivf ||
         container == Container::mp4 ||
         container == Container::mov) {
-        add_memory(out, AVB_VIDEO_MEMORY_NATIVE);
+        add_external(out, AVB_VIDEO_EXTERNAL_D3D11_TEXTURE);
     }
     add_device(out, AVB_HW_DEVICE_AUTO);
     if (container == Container::any ||

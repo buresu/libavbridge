@@ -227,7 +227,7 @@ avb_result AvbEncoderFFmpeg::setup_hardware_video_encoder(
     const AVCodec **out_codec
 ) {
     if (options.video.hardware_policy == AVB_HARDWARE_DISABLED &&
-        options.video.input_memory != AVB_VIDEO_MEMORY_DMABUF)
+        options.video.input_memory != AVB_VIDEO_MEMORY_EXTERNAL)
         return AVB_ERROR_STREAM_NOT_FOUND;
 
     avb_hardware_device requested = options.video.hardware_device;
@@ -320,6 +320,8 @@ void AvbEncoderFFmpeg::close_internal() {
     m_hw_video = false;
     m_hw_device = AVB_HW_DEVICE_AUTO;
     m_hw_pix_fmt = AV_PIX_FMT_NONE;
+    m_input_memory = AVB_VIDEO_MEMORY_CPU;
+    m_input_external_type = AVB_VIDEO_EXTERNAL_NONE;
 }
 
 avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &options) {
@@ -361,6 +363,8 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
         }
         m_width      = options.video.width;
         m_height     = options.video.height;
+        m_input_memory = options.video.input_memory;
+        m_input_external_type = options.video.input_external_type;
         m_frame_rate = options.video.frame_rate > 0 ? options.video.frame_rate : 30.0;
         m_fps_den    = std::max(1L, std::lround(m_frame_rate));
 
@@ -370,6 +374,7 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
         custom_info.frame_rate = m_frame_rate;
         custom_info.input_format = m_input_format;
         custom_info.input_memory = options.video.input_memory;
+        custom_info.input_external_type = options.video.input_external_type;
         custom_info.codec = options.video.codec;
         custom_info.bitrate = options.video.bitrate;
         const avb_video_encoder_plugin *plugin =
@@ -431,7 +436,7 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
         avb_result hw_res = setup_hardware_video_encoder(options, &vcodec);
         if (hw_res != AVB_OK &&
             (options.video.hardware_policy == AVB_HARDWARE_REQUIRE ||
-             options.video.input_memory == AVB_VIDEO_MEMORY_DMABUF)) {
+             options.video.input_memory == AVB_VIDEO_MEMORY_EXTERNAL)) {
             set_error("Required FFmpeg hardware %s encoder is not available.", vname);
             return hw_res == AVB_ERROR_OPEN_FAILED ? hw_res : AVB_ERROR_OPEN_FAILED;
         }
@@ -653,7 +658,11 @@ avb_result AvbEncoderFFmpeg::prepare_hardware_video_frame(
     double pts_sec,
     AVFrame **out_frame
 ) {
-    if (frame.memory_type == AVB_VIDEO_MEMORY_DMABUF) {
+    if (frame.memory_type == AVB_VIDEO_MEMORY_EXTERNAL) {
+        if (frame.external_type != AVB_VIDEO_EXTERNAL_DMABUF) {
+            set_error("FFmpeg external input requires a DMABUF frame.");
+            return AVB_ERROR_INVALID_ARGUMENT;
+        }
         return prepare_dmabuf_video_frame(frame, pts_sec, out_frame);
     }
 
@@ -661,7 +670,7 @@ avb_result AvbEncoderFFmpeg::prepare_hardware_video_frame(
                : frame.pts_sec >= 0.0 ? frame.pts_sec
                                        : (double)m_video_index / m_frame_rate;
 
-    if (frame.memory_type == AVB_VIDEO_MEMORY_NATIVE && frame.native_handle) {
+    if (frame.memory_type == AVB_VIDEO_MEMORY_BACKEND_NATIVE && frame.native_handle) {
         auto *native = static_cast<AVFrame *>(frame.native_handle);
         if ((AVPixelFormat)native->format == m_hw_pix_fmt) {
             native->pts = std::llround(pts * m_fps_den);
@@ -788,6 +797,12 @@ avb_result AvbEncoderFFmpeg::prepare_dmabuf_video_frame(
 
 avb_result AvbEncoderFFmpeg::write_video(const avb_video_frame &frame, double pts_sec) {
     if (!m_has_video) return AVB_ERROR_INVALID_ARGUMENT;
+    if (frame.memory_type != m_input_memory ||
+        (m_input_memory == AVB_VIDEO_MEMORY_EXTERNAL &&
+         frame.external_type != m_input_external_type)) {
+        set_error("Video frame memory representation does not match encoder options.");
+        return AVB_ERROR_INVALID_ARGUMENT;
+    }
     if (m_custom_video) {
         avb_encoded_packet packet{};
         avb_result res = m_custom_video_encoder->encode_frame(
@@ -808,7 +823,9 @@ avb_result AvbEncoderFFmpeg::write_video(const avb_video_frame &frame, double pt
 
     avb_result res = encode_and_mux(m_venc, m_vstream, enc_frame);
     if (m_hw_vframe && enc_frame == m_hw_vframe) m_ff.av_frame_unref(m_hw_vframe);
-    if (m_drm_import_frame && frame.memory_type == AVB_VIDEO_MEMORY_DMABUF)
+    if (m_drm_import_frame &&
+        frame.memory_type == AVB_VIDEO_MEMORY_EXTERNAL &&
+        frame.external_type == AVB_VIDEO_EXTERNAL_DMABUF)
         m_ff.av_frame_unref(m_drm_import_frame);
     if (res == AVB_OK) m_video_index++;
     return res;

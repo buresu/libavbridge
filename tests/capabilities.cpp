@@ -24,6 +24,16 @@ bool values_are_unique(const T (&values)[N], int count) {
     return true;
 }
 
+template <typename Capabilities>
+bool has_memory(
+    const Capabilities &caps,
+    avb_video_memory_type memory) {
+    for (int i = 0; i < caps.video_memory_count; ++i) {
+        if (caps.video_memory[i] == memory) return true;
+    }
+    return false;
+}
+
 int reject_decode(
     const avb_video_stream_info *,
     const avb_decode_options *) {
@@ -200,6 +210,14 @@ void check_decoder(
         values_are_unique(caps.video_memory, caps.video_memory_count),
         "decoder memory types contain duplicates or invalid count");
     check(
+        values_are_unique(
+            caps.video_external_types, caps.video_external_type_count),
+        "decoder external types contain duplicates or invalid count");
+    check(
+        has_memory(caps, AVB_VIDEO_MEMORY_EXTERNAL) ==
+            (caps.video_external_type_count > 0),
+        "decoder external memory and external type capabilities disagree");
+    check(
         values_are_unique(caps.hardware_devices, caps.hardware_device_count),
         "decoder hardware devices contain duplicates or invalid count");
 }
@@ -246,6 +264,14 @@ void check_encoder(
     check(
         values_are_unique(caps.video_memory, caps.video_memory_count),
         "encoder memory types contain duplicates or invalid count");
+    check(
+        values_are_unique(
+            caps.video_external_types, caps.video_external_type_count),
+        "encoder external types contain duplicates or invalid count");
+    check(
+        has_memory(caps, AVB_VIDEO_MEMORY_EXTERNAL) ==
+            (caps.video_external_type_count > 0),
+        "encoder external memory and external type capabilities disagree");
     check(
         values_are_unique(caps.hardware_devices, caps.hardware_device_count),
         "encoder hardware devices contain duplicates or invalid count");
@@ -303,6 +329,29 @@ int main() {
             validation.result == AVB_ERROR_INVALID_ARGUMENT,
         "encoder validation accepted an invalid memory type");
     encode.video.input_memory = AVB_VIDEO_MEMORY_CPU;
+    encode.video.input_external_type =
+        static_cast<avb_video_external_type>(999);
+    check(
+        avb_encoder_validate_options(
+            "output.mp4", &encode, &validation) == AVB_OK &&
+            validation.result == AVB_ERROR_INVALID_ARGUMENT,
+        "encoder validation accepted an invalid external type");
+    encode.video.input_external_type = AVB_VIDEO_EXTERNAL_DMABUF;
+    check(
+        avb_encoder_validate_options(
+            "output.mp4", &encode, &validation) == AVB_OK &&
+            validation.result == AVB_ERROR_INVALID_ARGUMENT,
+        "encoder validation accepted an external type with CPU memory");
+    encode.video.input_external_type = AVB_VIDEO_EXTERNAL_NONE;
+
+    avb_decode_options decode = avb_decode_options_default();
+    decode.video_memory = AVB_VIDEO_MEMORY_EXTERNAL;
+    avb_decoder_validation decoder_validation{};
+    check(
+        avb_decoder_validate_options(
+            &decode, &decoder_validation) == AVB_OK &&
+            decoder_validation.result == AVB_ERROR_INVALID_ARGUMENT,
+        "decoder validation accepted EXTERNAL memory without an external type");
     encode.video.hardware_policy = static_cast<avb_hardware_policy>(999);
     check(
         avb_encoder_validate_options(

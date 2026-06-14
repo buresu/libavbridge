@@ -2,6 +2,7 @@
 
 using avb::capability::add_audio_codec;
 using avb::capability::add_device;
+using avb::capability::add_external;
 using avb::capability::add_memory;
 using avb::capability::add_software_pixel_formats;
 using avb::capability::add_video_codec;
@@ -19,7 +20,7 @@ void avb_fill_avfoundation_capabilities(
     add_software_pixel_formats(out);
     add_memory(out, AVB_VIDEO_MEMORY_CPU);
     if (!audio_only_container(container))
-        add_memory(out, AVB_VIDEO_MEMORY_NATIVE);
+        add_external(out, AVB_VIDEO_EXTERNAL_CVPIXEL_BUFFER);
     add_device(out, AVB_HW_DEVICE_AUTO);
     if (!audio_only_container(container))
         add_device(out, AVB_HW_DEVICE_VIDEOTOOLBOX);
@@ -35,7 +36,7 @@ void avb_fill_avfoundation_capabilities(
     add_audio_codec(out, AVB_AUDIO_CODEC_AAC, container);
     add_memory(out, AVB_VIDEO_MEMORY_CPU);
     if (!audio_only_container(container))
-        add_memory(out, AVB_VIDEO_MEMORY_NATIVE);
+        add_external(out, AVB_VIDEO_EXTERNAL_CVPIXEL_BUFFER);
     add_device(out, AVB_HW_DEVICE_AUTO);
     if (!audio_only_container(container))
         add_device(out, AVB_HW_DEVICE_VIDEOTOOLBOX);

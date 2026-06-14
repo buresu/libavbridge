@@ -46,6 +46,8 @@ private:
     int    m_fps_n = 30; // framerate numerator (denominator fixed at 1)
     avb_pixel_format m_input_format = AVB_PIXEL_FORMAT_BGRA8;
     avb_video_memory_type m_input_memory = AVB_VIDEO_MEMORY_CPU;
+    avb_video_external_type m_input_external_type =
+        AVB_VIDEO_EXTERNAL_NONE;
     bool   m_hw_video = false;
     uint32_t m_dmabuf_caps_format = 0;
     uint64_t m_dmabuf_caps_modifier = UINT64_MAX;

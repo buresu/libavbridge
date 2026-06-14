@@ -77,6 +77,7 @@ avb_decode_options avb_decode_options_default(void) {
     o.enable_video       = 1;
     o.video_format       = AVB_PIXEL_FORMAT_UNKNOWN;
     o.video_memory       = AVB_VIDEO_MEMORY_CPU;
+    o.video_external_type = AVB_VIDEO_EXTERNAL_NONE;
     o.hardware_policy    = AVB_HARDWARE_DISABLED;
     o.hardware_device    = AVB_HW_DEVICE_AUTO;
     o.audio_sample_rate  = 0;

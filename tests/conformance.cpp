@@ -141,6 +141,16 @@ static bool has_video_memory(const avb_encoder_capabilities &caps,
     return false;
 }
 
+template <typename Capabilities>
+static bool has_video_external_type(
+    const Capabilities &caps,
+    avb_video_external_type external_type) {
+    for (int i = 0; i < caps.video_external_type_count; ++i) {
+        if (caps.video_external_types[i] == external_type) return true;
+    }
+    return false;
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         fprintf(stderr, "Usage: %s <fixture.mp4> [backend]\n", argv[0]);
@@ -234,7 +244,7 @@ int main(int argc, char *argv[]) {
 
         d = avb_decode_options_default();
         d.backend = backend;
-        d.video_memory = AVB_VIDEO_MEMORY_NATIVE;
+        d.video_memory = AVB_VIDEO_MEMORY_BACKEND_NATIVE;
         d.hardware_policy = AVB_HARDWARE_DISABLED;
         check(avb_decoder_validate_options(&d, &v) == AVB_OK &&
               !v.ok && v.result == AVB_ERROR_INVALID_ARGUMENT,
@@ -298,8 +308,10 @@ int main(int argc, char *argv[]) {
         check(has_video_memory(caps, AVB_VIDEO_MEMORY_CPU),
               "decoder runtime capabilities includes CPU video memory");
         if (caps.backend == AVB_BACKEND_MEDIAFOUNDATION) {
-            check(has_video_memory(caps, AVB_VIDEO_MEMORY_NATIVE),
-                  "MediaFoundation decoder runtime capabilities include native video memory");
+            check(has_video_memory(caps, AVB_VIDEO_MEMORY_EXTERNAL) &&
+                  has_video_external_type(
+                      caps, AVB_VIDEO_EXTERNAL_D3D11_TEXTURE),
+                  "MediaFoundation decoder runtime capabilities include D3D11 textures");
         }
         check(avb_decoder_probe_runtime_capabilities(backend, path, nullptr) ==
               AVB_ERROR_INVALID_ARGUMENT,
@@ -308,8 +320,10 @@ int main(int argc, char *argv[]) {
         if (caps.backend == AVB_BACKEND_MEDIAFOUNDATION) {
             check(avb_decoder_query_capabilities(backend, path, &caps) == AVB_OK &&
                   caps.result == AVB_OK &&
-                  has_video_memory(caps, AVB_VIDEO_MEMORY_NATIVE),
-                  "MediaFoundation decoder static capabilities include native MP4 video");
+                  has_video_memory(caps, AVB_VIDEO_MEMORY_EXTERNAL) &&
+                  has_video_external_type(
+                      caps, AVB_VIDEO_EXTERNAL_D3D11_TEXTURE),
+                  "MediaFoundation decoder static capabilities include D3D11 MP4 video");
             check(avb_decoder_query_capabilities(backend, "input.webm", &caps) == AVB_OK &&
                   caps.result == AVB_OK &&
                   has_video_codec(caps, AVB_VIDEO_CODEC_VP8) &&
@@ -335,13 +349,17 @@ int main(int argc, char *argv[]) {
                   caps.result == AVB_OK &&
                   caps.can_decode_video == 1 &&
                   caps.can_decode_audio == 0 &&
-                  has_video_memory(caps, AVB_VIDEO_MEMORY_NATIVE),
+                  has_video_memory(caps, AVB_VIDEO_MEMORY_EXTERNAL) &&
+                  has_video_external_type(
+                      caps, AVB_VIDEO_EXTERNAL_D3D11_TEXTURE),
                   "MediaFoundation decoder static capabilities include IVF video");
             check(avb_decoder_probe_runtime_capabilities(backend, "input.ivf", &caps) == AVB_OK &&
                   caps.result == AVB_OK &&
                   caps.can_decode_video == 1 &&
                   caps.can_decode_audio == 0 &&
-                  has_video_memory(caps, AVB_VIDEO_MEMORY_NATIVE),
+                  has_video_memory(caps, AVB_VIDEO_MEMORY_EXTERNAL) &&
+                  has_video_external_type(
+                      caps, AVB_VIDEO_EXTERNAL_D3D11_TEXTURE),
                   "MediaFoundation decoder runtime capabilities include IVF video");
         }
     }
@@ -394,7 +412,9 @@ int main(int argc, char *argv[]) {
                   v.ok && v.result == AVB_OK,
                   "encoder_validate_options accepts MediaFoundation AV1 IVF");
             e.video.input_format = AVB_PIXEL_FORMAT_NV12;
-            e.video.input_memory = AVB_VIDEO_MEMORY_NATIVE;
+            e.video.input_memory = AVB_VIDEO_MEMORY_EXTERNAL;
+            e.video.input_external_type =
+                AVB_VIDEO_EXTERNAL_D3D11_TEXTURE;
             e.video.hardware_policy = AVB_HARDWARE_REQUIRE;
             e.video.hardware_device = AVB_HW_DEVICE_D3D11VA;
             check(avb_encoder_validate_options("out.ivf", &e, &v) == AVB_OK &&
@@ -456,8 +476,10 @@ int main(int argc, char *argv[]) {
         check(has_video_memory(caps, AVB_VIDEO_MEMORY_CPU),
               "encoder capabilities includes CPU video memory");
         if (caps.backend == AVB_BACKEND_MEDIAFOUNDATION) {
-            check(has_video_memory(caps, AVB_VIDEO_MEMORY_NATIVE),
-                  "MediaFoundation encoder capabilities include native MP4 input");
+            check(has_video_memory(caps, AVB_VIDEO_MEMORY_EXTERNAL) &&
+                  has_video_external_type(
+                      caps, AVB_VIDEO_EXTERNAL_D3D11_TEXTURE),
+                  "MediaFoundation encoder capabilities include D3D11 MP4 input");
         }
 
         check(avb_encoder_query_capabilities(backend, "out.ogg", &caps) == AVB_OK &&
@@ -498,8 +520,10 @@ int main(int argc, char *argv[]) {
         check(has_video_memory(caps, AVB_VIDEO_MEMORY_CPU),
               "encoder runtime capabilities includes CPU video memory");
         if (caps.backend == AVB_BACKEND_MEDIAFOUNDATION) {
-            check(has_video_memory(caps, AVB_VIDEO_MEMORY_NATIVE),
-                  "MediaFoundation encoder runtime capabilities include native MP4 input");
+            check(has_video_memory(caps, AVB_VIDEO_MEMORY_EXTERNAL) &&
+                  has_video_external_type(
+                      caps, AVB_VIDEO_EXTERNAL_D3D11_TEXTURE),
+                  "MediaFoundation encoder runtime capabilities include D3D11 MP4 input");
         }
         check(avb_encoder_probe_runtime_capabilities(backend, path, nullptr) ==
               AVB_ERROR_INVALID_ARGUMENT,
@@ -532,14 +556,18 @@ int main(int argc, char *argv[]) {
                   has_video_codec(caps, AVB_VIDEO_CODEC_VP8) &&
                   has_video_codec(caps, AVB_VIDEO_CODEC_VP9) &&
                   has_video_codec(caps, AVB_VIDEO_CODEC_AV1) &&
-                  has_video_memory(caps, AVB_VIDEO_MEMORY_NATIVE),
+                  has_video_memory(caps, AVB_VIDEO_MEMORY_EXTERNAL) &&
+                  has_video_external_type(
+                      caps, AVB_VIDEO_EXTERNAL_D3D11_TEXTURE),
                   "MediaFoundation encoder static capabilities include VP8/VP9/AV1 IVF");
             check(avb_encoder_probe_runtime_capabilities(backend, "out.ivf", &caps) == AVB_OK &&
                   caps.result == AVB_OK &&
                   caps.can_encode_video == 1 &&
                   has_video_codec(caps, AVB_VIDEO_CODEC_VP8) &&
                   has_video_codec(caps, AVB_VIDEO_CODEC_VP9) &&
-                  has_video_memory(caps, AVB_VIDEO_MEMORY_NATIVE),
+                  has_video_memory(caps, AVB_VIDEO_MEMORY_EXTERNAL) &&
+                  has_video_external_type(
+                      caps, AVB_VIDEO_EXTERNAL_D3D11_TEXTURE),
                   "MediaFoundation encoder runtime capabilities include VP8/VP9 IVF");
             check(avb_encoder_query_capabilities(backend, "out.mp3", &caps) == AVB_OK &&
                   caps.result == AVB_OK &&

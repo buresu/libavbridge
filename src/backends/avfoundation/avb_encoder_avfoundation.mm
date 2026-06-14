@@ -148,12 +148,14 @@ static FourCharCode avb_normalize_fourcc(uint32_t tag) {
 
 avb_result AvbEncoderAVFoundation::open(const char *path, const avb_encode_options &options) {
     @autoreleasepool {
-        // CPU input is copied into a fresh CVPixelBuffer; NATIVE input appends
+        // CPU input is copied into a fresh CVPixelBuffer; EXTERNAL input appends
         // the caller's IOSurface-backed CVPixelBuffer directly (zero-copy).
-        // DMABUF has no AVFoundation equivalent.
         if (options.video.enable &&
-            options.video.input_memory == AVB_VIDEO_MEMORY_DMABUF) {
-            m_last_error = "AVFoundation does not consume DMABUF video input.";
+            options.video.input_memory == AVB_VIDEO_MEMORY_EXTERNAL &&
+            options.video.input_external_type !=
+                AVB_VIDEO_EXTERNAL_CVPIXEL_BUFFER) {
+            m_last_error =
+                "AVFoundation external input requires CVPixelBuffer.";
             return AVB_ERROR_OPEN_FAILED;
         }
         NSString *ns_path = [NSString stringWithUTF8String:path];
@@ -178,7 +180,7 @@ avb_result AvbEncoderAVFoundation::open(const char *path, const avb_encode_optio
                 return AVB_ERROR_INVALID_ARGUMENT;
             }
             m_impl->input_memory = options.video.input_memory;
-            bool native_in = m_impl->input_memory == AVB_VIDEO_MEMORY_NATIVE;
+            bool native_in = m_impl->input_memory == AVB_VIDEO_MEMORY_EXTERNAL;
             m_impl->input_format = options.video.input_format != AVB_PIXEL_FORMAT_UNKNOWN
                 ? options.video.input_format
                 : (native_in ? AVB_PIXEL_FORMAT_NV12 : AVB_PIXEL_FORMAT_BGRA8);
@@ -192,6 +194,8 @@ avb_result AvbEncoderAVFoundation::open(const char *path, const avb_encode_optio
             custom_info.frame_rate = m_impl->frame_rate;
             custom_info.input_format = m_impl->input_format;
             custom_info.input_memory = options.video.input_memory;
+            custom_info.input_external_type =
+                options.video.input_external_type;
             custom_info.codec = options.video.codec;
             custom_info.bitrate = options.video.bitrate;
             const avb_video_encoder_plugin *plugin =
@@ -561,9 +565,12 @@ avb_result AvbEncoderAVFoundation::write_video(const avb_video_frame &frame, dou
         if (res == AVB_OK) m_impl->video_frame_index++;
         return res;
     }
-    if (m_impl->input_memory == AVB_VIDEO_MEMORY_NATIVE) {
-        if (frame.memory_type != AVB_VIDEO_MEMORY_NATIVE || !frame.native_handle) {
-            m_last_error = "Encoder configured for native input but frame is not a native CVPixelBuffer.";
+    if (m_impl->input_memory == AVB_VIDEO_MEMORY_EXTERNAL) {
+        if (frame.memory_type != AVB_VIDEO_MEMORY_EXTERNAL ||
+            frame.external_type != AVB_VIDEO_EXTERNAL_CVPIXEL_BUFFER ||
+            !frame.native_handle) {
+            m_last_error =
+                "Encoder configured for external CVPixelBuffer input but frame does not match.";
             return AVB_ERROR_INVALID_ARGUMENT;
         }
         @autoreleasepool {

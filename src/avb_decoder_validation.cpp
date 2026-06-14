@@ -9,20 +9,24 @@ using avb::detail::set_validation_result;
 using avb::detail::valid_hardware_device;
 using avb::detail::valid_hardware_policy;
 using avb::detail::valid_pixel_format;
-using avb::detail::valid_video_memory;
+using avb::detail::valid_video_memory_external_pair;
 
-bool platform_native_output(
+bool platform_video_output(
     avb_backend backend,
     const avb_decode_options &options) {
     if (backend == AVB_BACKEND_MEDIAFOUNDATION) {
-        return options.video_memory == AVB_VIDEO_MEMORY_NATIVE &&
+        return options.video_memory == AVB_VIDEO_MEMORY_EXTERNAL &&
+               options.video_external_type ==
+                   AVB_VIDEO_EXTERNAL_D3D11_TEXTURE &&
                (options.video_format == AVB_PIXEL_FORMAT_UNKNOWN ||
                 options.video_format == AVB_PIXEL_FORMAT_NV12) &&
                (options.hardware_device == AVB_HW_DEVICE_AUTO ||
                 options.hardware_device == AVB_HW_DEVICE_D3D11VA);
     }
     if (backend == AVB_BACKEND_AVFOUNDATION) {
-        return options.video_memory == AVB_VIDEO_MEMORY_NATIVE &&
+        return options.video_memory == AVB_VIDEO_MEMORY_EXTERNAL &&
+               options.video_external_type ==
+                   AVB_VIDEO_EXTERNAL_CVPIXEL_BUFFER &&
                (options.hardware_device == AVB_HW_DEVICE_AUTO ||
                 options.hardware_device == AVB_HW_DEVICE_VIDEOTOOLBOX);
     }
@@ -48,6 +52,7 @@ avb_result avb_decoder_validate_options(
     out->backend = resolve_backend(options->backend);
     out->backend_name = avb_backend_name(out->backend);
     out->video_memory = options->video_memory;
+    out->video_external_type = options->video_external_type;
     out->hardware_policy = options->hardware_policy;
     out->hardware_device = options->hardware_device;
 
@@ -80,11 +85,12 @@ avb_result avb_decoder_validate_options(
             "Invalid decoded video pixel format.");
         return AVB_OK;
     }
-    if (!valid_video_memory(options->video_memory)) {
+    if (!valid_video_memory_external_pair(
+            options->video_memory, options->video_external_type)) {
         set_validation_result(
             *out,
             AVB_ERROR_INVALID_ARGUMENT,
-            "Invalid decoded video memory type.");
+            "Invalid decoded video memory/external type combination.");
         return AVB_OK;
     }
     if (!valid_hardware_policy(options->hardware_policy)) {
@@ -102,7 +108,7 @@ avb_result avb_decoder_validate_options(
         set_validation_result(
             *out,
             AVB_ERROR_INVALID_ARGUMENT,
-            "Native/DMABUF video output requires hardware_policy PREFER or REQUIRE.");
+            "Backend-native/external video output requires hardware_policy PREFER or REQUIRE.");
         return AVB_OK;
     }
     if (!out->backend_name || !avb_backend_is_available(out->backend)) {
@@ -113,15 +119,15 @@ avb_result avb_decoder_validate_options(
         return AVB_OK;
     }
 
-    const bool native_output = platform_native_output(out->backend, *options);
+    const bool platform_output = platform_video_output(out->backend, *options);
     if (platform_backend(out->backend) &&
-        ((options->video_memory != AVB_VIDEO_MEMORY_CPU && !native_output) ||
+        ((options->video_memory != AVB_VIDEO_MEMORY_CPU && !platform_output) ||
          (options->hardware_policy == AVB_HARDWARE_REQUIRE &&
-          !native_output))) {
+          !platform_output))) {
         set_validation_result(
             *out,
             AVB_ERROR_OPEN_FAILED,
-            "The platform backend cannot produce the requested native video output.");
+            "The platform backend cannot produce the requested video memory representation.");
         return AVB_OK;
     }
     if (out->backend == AVB_BACKEND_GSTREAMER &&
@@ -131,11 +137,22 @@ avb_result avb_decoder_validate_options(
         set_validation_result(
             *out,
             AVB_ERROR_INVALID_ARGUMENT,
-            "GStreamer native/DMABUF decode currently supports only AUTO/VAAPI devices.");
+            "GStreamer backend-native/external decode supports only AUTO/VAAPI devices.");
+        return AVB_OK;
+    }
+    if ((out->backend == AVB_BACKEND_FFMPEG ||
+         out->backend == AVB_BACKEND_GSTREAMER) &&
+        options->video_memory == AVB_VIDEO_MEMORY_EXTERNAL &&
+        options->video_external_type != AVB_VIDEO_EXTERNAL_DMABUF) {
+        set_validation_result(
+            *out,
+            AVB_ERROR_OPEN_FAILED,
+            "The selected backend cannot export the requested external video type.");
         return AVB_OK;
     }
 #if !defined(__linux__)
-    if (options->video_memory == AVB_VIDEO_MEMORY_DMABUF) {
+    if (options->video_memory == AVB_VIDEO_MEMORY_EXTERNAL &&
+        options->video_external_type == AVB_VIDEO_EXTERNAL_DMABUF) {
         set_validation_result(
             *out,
             AVB_ERROR_INVALID_ARGUMENT,

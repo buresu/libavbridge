@@ -15,7 +15,7 @@ using avb::detail::set_validation_result;
 using avb::detail::valid_hardware_device;
 using avb::detail::valid_hardware_policy;
 using avb::detail::valid_pixel_format;
-using avb::detail::valid_video_memory;
+using avb::detail::valid_video_memory_external_pair;
 
 static void set_result(avb_encoder_validation &out, avb_result result,
                        const char *message) {
@@ -51,6 +51,7 @@ static bool has_custom_video_encoder(const avb_encode_options &options) {
     info.frame_rate = options.video.frame_rate > 0 ? options.video.frame_rate : 30.0;
     info.input_format = options.video.input_format;
     info.input_memory = options.video.input_memory;
+    info.input_external_type = options.video.input_external_type;
     info.codec = options.video.codec;
     info.bitrate = options.video.bitrate;
     return avb_find_video_encoder_plugin(info) != nullptr;
@@ -116,9 +117,11 @@ avb_result avb_encoder_validate_options(const char *path,
         return AVB_OK;
     }
     if (options->video.enable &&
-        !valid_video_memory(options->video.input_memory)) {
+        !valid_video_memory_external_pair(
+            options->video.input_memory,
+            options->video.input_external_type)) {
         set_result(*out, AVB_ERROR_INVALID_ARGUMENT,
-                   "Invalid encoded video input memory type.");
+                   "Invalid encoded video input memory/external type combination.");
         return AVB_OK;
     }
     if (options->video.enable &&
@@ -135,7 +138,8 @@ avb_result avb_encoder_validate_options(const char *path,
     }
 #if !defined(__linux__)
     if (options->video.enable &&
-        options->video.input_memory == AVB_VIDEO_MEMORY_DMABUF) {
+        options->video.input_memory == AVB_VIDEO_MEMORY_EXTERNAL &&
+        options->video.input_external_type == AVB_VIDEO_EXTERNAL_DMABUF) {
         set_result(*out, AVB_ERROR_INVALID_ARGUMENT,
                    "DMABUF encode input is only supported on Linux builds.");
         return AVB_OK;

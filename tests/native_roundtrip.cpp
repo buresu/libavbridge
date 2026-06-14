@@ -1,12 +1,11 @@
-// Native (zero-copy) hardware video round-trip smoke test.
+// Zero-copy hardware video round-trip smoke test.
 //
 // Usage:
 //   avb_native_roundtrip <fixture.mp4> <output.mp4> <decode_backend> <encode_backend>
 //
-// Decodes to AVB_VIDEO_MEMORY_NATIVE (the backend's reference-counted GPU/native
-// frame, e.g. a VideoToolbox CVPixelBuffer) and feeds those handles straight back
-// into a native-input encoder. The test skips when the backend cannot produce or
-// consume native frames; once both ends open and a native frame is produced,
+// Portable backends use BACKEND_NATIVE objects. Platform backends use typed
+// EXTERNAL objects (D3D11 textures or CVPixelBuffers). The test feeds the
+// returned handle straight back into an encoder and skips when unavailable;
 // write/finish/redecode failures are treated as real failures.
 
 #include <avbridge.h>
@@ -57,12 +56,23 @@ int main(int argc, char *argv[]) {
         return AVB_TEST_SKIP;
     }
 
+    avb_video_memory_type memory = AVB_VIDEO_MEMORY_BACKEND_NATIVE;
+    avb_video_external_type external_type = AVB_VIDEO_EXTERNAL_NONE;
+    if (decode_backend == AVB_BACKEND_MEDIAFOUNDATION) {
+        memory = AVB_VIDEO_MEMORY_EXTERNAL;
+        external_type = AVB_VIDEO_EXTERNAL_D3D11_TEXTURE;
+    } else if (decode_backend == AVB_BACKEND_AVFOUNDATION) {
+        memory = AVB_VIDEO_MEMORY_EXTERNAL;
+        external_type = AVB_VIDEO_EXTERNAL_CVPIXEL_BUFFER;
+    }
+
     avb_decode_options dopts = avb_decode_options_default();
     dopts.backend = decode_backend;
     dopts.enable_audio = 0;
     dopts.enable_video = 1;
     dopts.video_format = AVB_PIXEL_FORMAT_UNKNOWN;
-    dopts.video_memory = AVB_VIDEO_MEMORY_NATIVE;
+    dopts.video_memory = memory;
+    dopts.video_external_type = external_type;
     dopts.hardware_policy = AVB_HARDWARE_PREFER;
 
     avb_decoder *dec = nullptr;
@@ -82,7 +92,8 @@ int main(int argc, char *argv[]) {
 
     avb_video_frame first{};
     avb_result r = avb_decoder_read_video_frame(dec, &first);
-    if (r != AVB_OK || first.memory_type != AVB_VIDEO_MEMORY_NATIVE ||
+    if (r != AVB_OK || first.memory_type != memory ||
+        first.external_type != external_type ||
         !first.native_handle) {
         printf("SKIP: first native frame unavailable from %s: %s\n", argv[3],
                avb_decoder_get_last_error(dec) ? avb_decoder_get_last_error(dec) : "unknown");
@@ -102,7 +113,8 @@ int main(int argc, char *argv[]) {
     eopts.video.frame_rate = mi.video.frame_rate > 0.0 ? mi.video.frame_rate : 25.0;
     eopts.video.codec = AVB_VIDEO_CODEC_H264;
     eopts.video.input_format = first.format;
-    eopts.video.input_memory = AVB_VIDEO_MEMORY_NATIVE;
+    eopts.video.input_memory = memory;
+    eopts.video.input_external_type = external_type;
     eopts.video.hardware_policy = AVB_HARDWARE_PREFER;
 
 #ifdef _WIN32
@@ -129,7 +141,9 @@ int main(int argc, char *argv[]) {
     avb_video_frame frame = first;
     bool have_frame = true;
     while (have_frame) {
-        if (frame.memory_type != AVB_VIDEO_MEMORY_NATIVE || !frame.native_handle) {
+        if (frame.memory_type != memory ||
+            frame.external_type != external_type ||
+            !frame.native_handle) {
             fprintf(stderr, "decoded frame %d is not native\n", written);
             avb_decoder_release_video_frame(dec, &frame);
             avb_encoder_close(enc);

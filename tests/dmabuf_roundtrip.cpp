@@ -61,7 +61,8 @@ int main(int argc, char *argv[]) {
     dopts.enable_audio = 0;
     dopts.enable_video = 1;
     dopts.video_format = AVB_PIXEL_FORMAT_UNKNOWN;
-    dopts.video_memory = AVB_VIDEO_MEMORY_DMABUF;
+    dopts.video_memory = AVB_VIDEO_MEMORY_EXTERNAL;
+    dopts.video_external_type = AVB_VIDEO_EXTERNAL_DMABUF;
     dopts.hardware_policy = AVB_HARDWARE_PREFER;
     dopts.hardware_device = AVB_HW_DEVICE_VAAPI;
 
@@ -83,7 +84,8 @@ int main(int argc, char *argv[]) {
 
     avb_video_frame first{};
     avb_result r = avb_decoder_read_video_frame(dec, &first);
-    if (r != AVB_OK || first.memory_type != AVB_VIDEO_MEMORY_DMABUF ||
+    if (r != AVB_OK || first.memory_type != AVB_VIDEO_MEMORY_EXTERNAL ||
+        first.external_type != AVB_VIDEO_EXTERNAL_DMABUF ||
         first.plane_count <= 0 || first.dmabuf_fd[0] < 0) {
         printf("SKIP: first DMABUF frame unavailable from %s: %s\n", argv[3],
                avb_decoder_get_last_error(dec) ? avb_decoder_get_last_error(dec) : "unknown");
@@ -107,7 +109,8 @@ int main(int argc, char *argv[]) {
     eopts.video.frame_rate = mi.video.frame_rate > 0.0 ? mi.video.frame_rate : 25.0;
     eopts.video.codec = AVB_VIDEO_CODEC_H264;
     eopts.video.input_format = AVB_PIXEL_FORMAT_UNKNOWN;
-    eopts.video.input_memory = AVB_VIDEO_MEMORY_DMABUF;
+    eopts.video.input_memory = AVB_VIDEO_MEMORY_EXTERNAL;
+    eopts.video.input_external_type = AVB_VIDEO_EXTERNAL_DMABUF;
     eopts.video.hardware_policy = AVB_HARDWARE_PREFER;
     eopts.video.hardware_device = AVB_HW_DEVICE_VAAPI;
 

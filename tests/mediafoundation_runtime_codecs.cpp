@@ -509,7 +509,8 @@ static int smoke_native_video_encoder(const char *output_path,
     opts.video.frame_rate = 15.0;
     opts.video.codec = codec;
     opts.video.input_format = AVB_PIXEL_FORMAT_NV12;
-    opts.video.input_memory = AVB_VIDEO_MEMORY_NATIVE;
+    opts.video.input_memory = AVB_VIDEO_MEMORY_EXTERNAL;
+    opts.video.input_external_type = AVB_VIDEO_EXTERNAL_D3D11_TEXTURE;
     opts.video.hardware_policy = AVB_HARDWARE_REQUIRE;
     opts.video.hardware_device = AVB_HW_DEVICE_D3D11VA;
     opts.video.hardware_context =
@@ -528,7 +529,8 @@ static int smoke_native_video_encoder(const char *output_path,
     frame.width = width;
     frame.height = height;
     frame.format = AVB_PIXEL_FORMAT_NV12;
-    frame.memory_type = AVB_VIDEO_MEMORY_NATIVE;
+    frame.memory_type = AVB_VIDEO_MEMORY_EXTERNAL;
+    frame.external_type = AVB_VIDEO_EXTERNAL_D3D11_TEXTURE;
     frame.hardware_device = AVB_HW_DEVICE_D3D11VA;
     frame.native_handle = texture.Get();
     for (int i = 0; i < 7; ++i) {
@@ -565,7 +567,8 @@ static int smoke_native_ivf_decoder(const char *input_path,
     dopts.enable_audio = 0;
     dopts.enable_video = 1;
     dopts.video_format = AVB_PIXEL_FORMAT_NV12;
-    dopts.video_memory = AVB_VIDEO_MEMORY_NATIVE;
+    dopts.video_memory = AVB_VIDEO_MEMORY_EXTERNAL;
+    dopts.video_external_type = AVB_VIDEO_EXTERNAL_D3D11_TEXTURE;
     dopts.hardware_policy = AVB_HARDWARE_REQUIRE;
     dopts.hardware_device = AVB_HW_DEVICE_D3D11VA;
 
@@ -593,7 +596,8 @@ static int smoke_native_ivf_decoder(const char *input_path,
     int frames = 0;
     avb_video_frame frame{};
     while (frames < 7 && avb_decoder_read_video_frame(dec, &frame) == AVB_OK) {
-        if (frame.memory_type != AVB_VIDEO_MEMORY_NATIVE ||
+        if (frame.memory_type != AVB_VIDEO_MEMORY_EXTERNAL ||
+            frame.external_type != AVB_VIDEO_EXTERNAL_D3D11_TEXTURE ||
             frame.hardware_device != AVB_HW_DEVICE_D3D11VA ||
             !frame.native_handle ||
             frame.format != AVB_PIXEL_FORMAT_NV12) {
@@ -638,7 +642,8 @@ static int smoke_native_source_decoder(const char *input_path,
     opts.enable_audio = 0;
     opts.enable_video = 1;
     opts.video_format = AVB_PIXEL_FORMAT_NV12;
-    opts.video_memory = AVB_VIDEO_MEMORY_NATIVE;
+    opts.video_memory = AVB_VIDEO_MEMORY_EXTERNAL;
+    opts.video_external_type = AVB_VIDEO_EXTERNAL_D3D11_TEXTURE;
     opts.hardware_policy = AVB_HARDWARE_REQUIRE;
     opts.hardware_device = AVB_HW_DEVICE_D3D11VA;
     opts.hardware_context = expected_device;
@@ -659,7 +664,8 @@ static int smoke_native_source_decoder(const char *input_path,
         avb_video_frame frame{};
         avb_result read = avb_decoder_read_video_frame(dec, &frame);
         if (read != AVB_OK ||
-            frame.memory_type != AVB_VIDEO_MEMORY_NATIVE ||
+            frame.memory_type != AVB_VIDEO_MEMORY_EXTERNAL ||
+            frame.external_type != AVB_VIDEO_EXTERNAL_D3D11_TEXTURE ||
             frame.hardware_device != AVB_HW_DEVICE_D3D11VA ||
             frame.format != AVB_PIXEL_FORMAT_NV12 ||
             !frame.native_handle) {
@@ -722,7 +728,8 @@ static int smoke_native_multi_frame_hold(const char *input_path,
     opts.enable_audio = 0;
     opts.enable_video = 1;
     opts.video_format = AVB_PIXEL_FORMAT_NV12;
-    opts.video_memory = AVB_VIDEO_MEMORY_NATIVE;
+    opts.video_memory = AVB_VIDEO_MEMORY_EXTERNAL;
+    opts.video_external_type = AVB_VIDEO_EXTERNAL_D3D11_TEXTURE;
     opts.hardware_policy = AVB_HARDWARE_REQUIRE;
     opts.hardware_device = AVB_HW_DEVICE_D3D11VA;
     opts.hardware_context = device.Get();
@@ -805,7 +812,8 @@ static int smoke_native_mp4_roundtrip(const char *input_path,
     dopts.enable_audio = 0;
     dopts.enable_video = 1;
     dopts.video_format = AVB_PIXEL_FORMAT_NV12;
-    dopts.video_memory = AVB_VIDEO_MEMORY_NATIVE;
+    dopts.video_memory = AVB_VIDEO_MEMORY_EXTERNAL;
+    dopts.video_external_type = AVB_VIDEO_EXTERNAL_D3D11_TEXTURE;
     dopts.hardware_policy = AVB_HARDWARE_REQUIRE;
     dopts.hardware_device = AVB_HW_DEVICE_D3D11VA;
 
@@ -861,7 +869,9 @@ static int smoke_native_mp4_roundtrip(const char *input_path,
         info.video.frame_rate > 0.0 ? info.video.frame_rate : 30.0;
     eopts.video.codec = output_codec;
     eopts.video.input_format = AVB_PIXEL_FORMAT_NV12;
-    eopts.video.input_memory = AVB_VIDEO_MEMORY_NATIVE;
+    eopts.video.input_memory = AVB_VIDEO_MEMORY_EXTERNAL;
+    eopts.video.input_external_type =
+        AVB_VIDEO_EXTERNAL_D3D11_TEXTURE;
     eopts.video.hardware_policy = AVB_HARDWARE_REQUIRE;
     eopts.video.hardware_device = AVB_HW_DEVICE_D3D11VA;
     eopts.video.hardware_context = device.Get();

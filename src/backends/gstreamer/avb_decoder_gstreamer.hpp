@@ -62,6 +62,8 @@ private:
 
     avb_pixel_format m_video_format = AVB_PIXEL_FORMAT_BGRA8;
     avb_video_memory_type m_video_memory = AVB_VIDEO_MEMORY_CPU;
+    avb_video_external_type m_video_external_type =
+        AVB_VIDEO_EXTERNAL_NONE;
     avb_hardware_device m_hw_device = AVB_HW_DEVICE_AUTO;
     bool m_custom_pipeline = false;
     const avb_video_decoder_plugin *m_custom_video_decoder = nullptr;

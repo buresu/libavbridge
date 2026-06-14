@@ -248,7 +248,9 @@ avb_result AvbDecoderMediaFoundation::open_ivf(
         }
     }
     m_impl->ivf_native_output =
-        options.video_memory == AVB_VIDEO_MEMORY_NATIVE;
+        options.video_memory == AVB_VIDEO_MEMORY_EXTERNAL &&
+        options.video_external_type ==
+            AVB_VIDEO_EXTERNAL_D3D11_TEXTURE;
     if (m_impl->ivf_native_output) {
         if (options.video_format != AVB_PIXEL_FORMAT_UNKNOWN &&
             options.video_format != AVB_PIXEL_FORMAT_NV12) {
@@ -376,7 +378,9 @@ avb_result AvbDecoderMediaFoundation::open_file(const char *path, const avb_deco
     const bool ivf_path =
         path_len >= 4 && _stricmp(path + path_len - 4, ".ivf") == 0;
     const bool native_d3d11 =
-        options.video_memory == AVB_VIDEO_MEMORY_NATIVE &&
+        options.video_memory == AVB_VIDEO_MEMORY_EXTERNAL &&
+        options.video_external_type ==
+            AVB_VIDEO_EXTERNAL_D3D11_TEXTURE &&
         (options.video_format == AVB_PIXEL_FORMAT_UNKNOWN ||
          options.video_format == AVB_PIXEL_FORMAT_NV12) &&
         (options.hardware_device == AVB_HW_DEVICE_AUTO ||
@@ -1002,7 +1006,8 @@ retry_output:
         out_frame.height = h;
         out_frame.format = AVB_PIXEL_FORMAT_NV12;
         out_frame.pts_sec = pts_sec;
-        out_frame.memory_type = AVB_VIDEO_MEMORY_NATIVE;
+        out_frame.memory_type = AVB_VIDEO_MEMORY_EXTERNAL;
+        out_frame.external_type = AVB_VIDEO_EXTERNAL_D3D11_TEXTURE;
         out_frame.hardware_device = AVB_HW_DEVICE_D3D11VA;
         out_frame.native_handle = texture.Get();
         out_frame.native_handle_id = subresource;
@@ -1253,7 +1258,8 @@ avb_result AvbDecoderMediaFoundation::read_video_frame(avb_video_frame &out_fram
         out_frame.height = h;
         out_frame.format = AVB_PIXEL_FORMAT_NV12;
         out_frame.pts_sec = (double)ts / 1e7;
-        out_frame.memory_type = AVB_VIDEO_MEMORY_NATIVE;
+        out_frame.memory_type = AVB_VIDEO_MEMORY_EXTERNAL;
+        out_frame.external_type = AVB_VIDEO_EXTERNAL_D3D11_TEXTURE;
         out_frame.hardware_device = AVB_HW_DEVICE_D3D11VA;
         out_frame.native_handle = texture.Get();
         out_frame.native_handle_id = subresource;
@@ -1501,7 +1507,8 @@ avb_result AvbDecoderMediaFoundation::read_video_frame(avb_video_frame &out_fram
 }
 
 void AvbDecoderMediaFoundation::release_video_frame(avb_video_frame &frame) {
-    if (m_impl && frame.memory_type == AVB_VIDEO_MEMORY_NATIVE &&
+    if (m_impl && frame.memory_type == AVB_VIDEO_MEMORY_EXTERNAL &&
+        frame.external_type == AVB_VIDEO_EXTERNAL_D3D11_TEXTURE &&
         frame.native_owner) {
         auto lease = m_impl->native_frame_leases.find(frame.native_owner);
         if (lease != m_impl->native_frame_leases.end()) {

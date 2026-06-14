@@ -171,6 +171,7 @@ void AvbDecoderFFmpeg::close_internal() {
     m_sws_src_fmt = AV_PIX_FMT_NONE;
     m_hw_pix_fmt = AV_PIX_FMT_NONE;
     m_video_memory = AVB_VIDEO_MEMORY_CPU;
+    m_video_external_type = AVB_VIDEO_EXTERNAL_NONE;
     m_hw_device = AVB_HW_DEVICE_AUTO;
     m_eof = false;
     m_seek_target = -1.0;
@@ -513,10 +514,11 @@ avb_result AvbDecoderFFmpeg::setup_after_open(const avb_decode_options &options)
             }
 
             m_video_memory = options.video_memory;
+            m_video_external_type = options.video_external_type;
             avb_result hw_res = setup_hardware_decoder(codec, options);
             if (hw_res != AVB_OK &&
                 (options.hardware_policy == AVB_HARDWARE_REQUIRE ||
-                 options.video_memory == AVB_VIDEO_MEMORY_DMABUF)) {
+                 options.video_memory == AVB_VIDEO_MEMORY_EXTERNAL)) {
                 set_error("Required FFmpeg hardware decoder is not available for this stream.");
                 return AVB_ERROR_OPEN_FAILED;
             }
@@ -815,7 +817,7 @@ avb_result AvbDecoderFFmpeg::fill_native_video_frame(
     out_frame.height = frame->height;
     out_frame.format = m_video_format;
     out_frame.pts_sec = pts_sec;
-    out_frame.memory_type = AVB_VIDEO_MEMORY_NATIVE;
+    out_frame.memory_type = AVB_VIDEO_MEMORY_BACKEND_NATIVE;
     out_frame.hardware_device = m_hw_device;
     out_frame.plane_count = 0;
     out_frame.native_handle = m_native_video_frame;
@@ -859,7 +861,8 @@ avb_result AvbDecoderFFmpeg::fill_dmabuf_video_frame(
     out_frame.height = frame->height;
     out_frame.format = AVB_PIXEL_FORMAT_UNKNOWN;
     out_frame.pts_sec = pts_sec;
-    out_frame.memory_type = AVB_VIDEO_MEMORY_DMABUF;
+    out_frame.memory_type = AVB_VIDEO_MEMORY_EXTERNAL;
+    out_frame.external_type = AVB_VIDEO_EXTERNAL_DMABUF;
     out_frame.hardware_device = m_hw_device;
     out_frame.native_handle = m_drm_video_frame;
     out_frame.native_owner = this;
@@ -999,9 +1002,11 @@ avb_result AvbDecoderFFmpeg::read_video_frame(avb_video_frame &out_frame) {
                 (AVPixelFormat)m_video_frame->format == m_hw_pix_fmt;
 
             avb_result frame_res = AVB_OK;
-            if (is_hw_frame && m_video_memory == AVB_VIDEO_MEMORY_NATIVE) {
+            if (is_hw_frame && m_video_memory == AVB_VIDEO_MEMORY_BACKEND_NATIVE) {
                 frame_res = fill_native_video_frame(m_video_frame, frame_pts, out_frame);
-            } else if (is_hw_frame && m_video_memory == AVB_VIDEO_MEMORY_DMABUF) {
+            } else if (is_hw_frame &&
+                       m_video_memory == AVB_VIDEO_MEMORY_EXTERNAL &&
+                       m_video_external_type == AVB_VIDEO_EXTERNAL_DMABUF) {
                 frame_res = fill_dmabuf_video_frame(m_video_frame, frame_pts, out_frame);
             } else {
                 if (is_hw_frame) {
@@ -1055,11 +1060,12 @@ void AvbDecoderFFmpeg::release_video_frame(avb_video_frame &frame) {
         memset(&frame, 0, sizeof(frame));
         return;
     }
-    if (frame.memory_type == AVB_VIDEO_MEMORY_NATIVE &&
+    if (frame.memory_type == AVB_VIDEO_MEMORY_BACKEND_NATIVE &&
         frame.native_owner == this && m_native_video_frame) {
         m_ff.av_frame_unref(m_native_video_frame);
     }
-    if (frame.memory_type == AVB_VIDEO_MEMORY_DMABUF &&
+    if (frame.memory_type == AVB_VIDEO_MEMORY_EXTERNAL &&
+        frame.external_type == AVB_VIDEO_EXTERNAL_DMABUF &&
         frame.native_owner == this && m_drm_video_frame) {
         m_ff.av_frame_unref(m_drm_video_frame);
     }

@@ -200,6 +200,7 @@ void AvbDecoderGStreamer::close_internal() {
     m_audio_codec_name.clear();
     m_video_codec_name.clear();
     m_video_memory = AVB_VIDEO_MEMORY_CPU;
+    m_video_external_type = AVB_VIDEO_EXTERNAL_NONE;
     m_hw_device = AVB_HW_DEVICE_AUTO;
 }
 
@@ -400,14 +401,15 @@ avb_result AvbDecoderGStreamer::open_file(const char *path, const avb_decode_opt
     }
 
     m_video_memory = options.video_memory;
+    m_video_external_type = options.video_external_type;
     m_hw_device = options.hardware_device == AVB_HW_DEVICE_AUTO
         ? AVB_HW_DEVICE_VAAPI : options.hardware_device;
-    if (m_video_memory == AVB_VIDEO_MEMORY_NATIVE &&
+    if (m_video_memory == AVB_VIDEO_MEMORY_BACKEND_NATIVE &&
         options.hardware_policy == AVB_HARDWARE_DISABLED) {
         set_error("Native video output requires hardware_policy PREFER or REQUIRE.");
         return AVB_ERROR_INVALID_ARGUMENT;
     }
-    if (m_video_memory == AVB_VIDEO_MEMORY_DMABUF &&
+    if (m_video_memory == AVB_VIDEO_MEMORY_EXTERNAL &&
         options.hardware_policy == AVB_HARDWARE_DISABLED) {
         m_hw_device = AVB_HW_DEVICE_VAAPI;
     }
@@ -489,11 +491,12 @@ avb_result AvbDecoderGStreamer::open_file(const char *path, const avb_decode_opt
         // backs up the demuxer and starves audio. For bulk per-stream decoding,
         // open a decoder with only that stream enabled.
         char desc[256];
-        if (m_video_memory == AVB_VIDEO_MEMORY_NATIVE) {
+        if (m_video_memory == AVB_VIDEO_MEMORY_BACKEND_NATIVE) {
             snprintf(desc, sizeof(desc),
                 "appsink name=avb_vsink sync=false max-buffers=16 "
                 "caps=video/x-raw(memory:VASurface)");
-        } else if (m_video_memory == AVB_VIDEO_MEMORY_DMABUF) {
+        } else if (m_video_memory == AVB_VIDEO_MEMORY_EXTERNAL &&
+                   m_video_external_type == AVB_VIDEO_EXTERNAL_DMABUF) {
             snprintf(desc, sizeof(desc),
                 "appsink name=avb_vsink sync=false max-buffers=16 "
                 "caps=video/x-raw(memory:DMABuf)");
@@ -515,7 +518,8 @@ avb_result AvbDecoderGStreamer::open_file(const char *path, const avb_decode_opt
         m_video_sink = m_gst.gst_bin_get_by_name((GstBin *)vbin, "avb_vsink");
         if (m_video_sink) {
             m_gst.gst_app_sink_set_drop((GstAppSink *)m_video_sink, FALSE);
-            if (m_video_memory == AVB_VIDEO_MEMORY_DMABUF) {
+            if (m_video_memory == AVB_VIDEO_MEMORY_EXTERNAL &&
+                m_video_external_type == AVB_VIDEO_EXTERNAL_DMABUF) {
                 GstAppSinkCallbacks callbacks{};
                 callbacks.propose_allocation = avb_gst_dmabuf_propose_allocation;
                 m_gst.gst_app_sink_set_callbacks(
@@ -860,7 +864,8 @@ avb_result AvbDecoderGStreamer::fill_dmabuf_video_frame(
     out_frame.height = h;
     out_frame.format = AVB_PIXEL_FORMAT_UNKNOWN;
     out_frame.pts_sec = pts_sec;
-    out_frame.memory_type = AVB_VIDEO_MEMORY_DMABUF;
+    out_frame.memory_type = AVB_VIDEO_MEMORY_EXTERNAL;
+    out_frame.external_type = AVB_VIDEO_EXTERNAL_DMABUF;
     out_frame.hardware_device = m_hw_device;
     out_frame.native_handle = buf;
     out_frame.native_owner = this;
@@ -925,7 +930,7 @@ avb_result AvbDecoderGStreamer::read_video_frame(avb_video_frame &out_frame) {
         }
         m_seek_target = -1.0;
 
-        if (m_video_memory == AVB_VIDEO_MEMORY_NATIVE) {
+        if (m_video_memory == AVB_VIDEO_MEMORY_BACKEND_NATIVE) {
             if (m_native_video_sample) {
                 m_gst.gst_mini_object_unref((GstMiniObject *)m_native_video_sample);
                 m_native_video_sample = nullptr;
@@ -936,14 +941,15 @@ avb_result AvbDecoderGStreamer::read_video_frame(avb_video_frame &out_frame) {
             out_frame.height = h;
             out_frame.format = m_video_format;
             out_frame.pts_sec = pts_sec;
-            out_frame.memory_type = AVB_VIDEO_MEMORY_NATIVE;
+            out_frame.memory_type = AVB_VIDEO_MEMORY_BACKEND_NATIVE;
             out_frame.hardware_device = m_hw_device;
             out_frame.native_handle = buf;
             out_frame.native_owner = this;
             for (int p = 0; p < AVB_MAX_PLANES; ++p) out_frame.dmabuf_fd[p] = -1;
             return AVB_OK;
         }
-        if (m_video_memory == AVB_VIDEO_MEMORY_DMABUF) {
+        if (m_video_memory == AVB_VIDEO_MEMORY_EXTERNAL &&
+            m_video_external_type == AVB_VIDEO_EXTERNAL_DMABUF) {
             avb_result res = fill_dmabuf_video_frame(
                 sample, buf, caps, w, h, pts_sec, out_frame);
             if (res != AVB_OK)
@@ -1022,8 +1028,9 @@ void AvbDecoderGStreamer::release_video_frame(avb_video_frame &frame) {
         memset(&frame, 0, sizeof(frame));
         return;
     }
-    if ((frame.memory_type == AVB_VIDEO_MEMORY_NATIVE ||
-         frame.memory_type == AVB_VIDEO_MEMORY_DMABUF) &&
+    if ((frame.memory_type == AVB_VIDEO_MEMORY_BACKEND_NATIVE ||
+         (frame.memory_type == AVB_VIDEO_MEMORY_EXTERNAL &&
+          frame.external_type == AVB_VIDEO_EXTERNAL_DMABUF)) &&
         frame.native_owner == this && m_native_video_sample) {
         m_gst.gst_mini_object_unref((GstMiniObject *)m_native_video_sample);
         m_native_video_sample = nullptr;

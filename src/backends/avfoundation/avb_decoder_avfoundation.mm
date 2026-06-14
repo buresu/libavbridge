@@ -90,8 +90,8 @@ static OSType avb_cvpixfmt(avb_pixel_format want) {
     }
 }
 
-// Reverse mapping, used to report the format of a native CVPixelBuffer handed
-// back to the caller for AVB_VIDEO_MEMORY_NATIVE output.
+// Reverse mapping, used to report the format of an external CVPixelBuffer handed
+// back to the caller for AVB_VIDEO_MEMORY_EXTERNAL output.
 static avb_pixel_format avb_avbfmt_from_cv(OSType cvfmt) {
     switch (cvfmt) {
         case kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange:
@@ -239,11 +239,13 @@ avb_result AvbDecoderAVFoundation::open_custom_video_decoder(
 
 avb_result AvbDecoderAVFoundation::open_file(const char *path, const avb_decode_options &options) {
     @autoreleasepool {
-        // CPU frames are copied out plane-by-plane; NATIVE hands back the
+        // CPU frames are copied out plane-by-plane; EXTERNAL hands back the
         // decoder's IOSurface-backed CVPixelBuffer (zero-copy, VideoToolbox).
-        // DMABUF is a Linux-only export and has no AVFoundation equivalent.
-        if (options.video_memory == AVB_VIDEO_MEMORY_DMABUF) {
-            m_last_error = "AVFoundation does not support DMABUF video frames.";
+        if (options.video_memory == AVB_VIDEO_MEMORY_EXTERNAL &&
+            options.video_external_type !=
+                AVB_VIDEO_EXTERNAL_CVPIXEL_BUFFER) {
+            m_last_error =
+                "AVFoundation external output requires CVPixelBuffer.";
             return AVB_ERROR_OPEN_FAILED;
         }
         m_impl->video_memory = options.video_memory;
@@ -333,17 +335,17 @@ avb_result AvbDecoderAVFoundation::open_file(const char *path, const avb_decode_
                 }
 
                 if (!m_impl->custom_video_decoder) {
-                    bool native = m_impl->video_memory == AVB_VIDEO_MEMORY_NATIVE;
-                    // Native output defaults to NV12, the format VideoToolbox
+                    bool external = m_impl->video_memory == AVB_VIDEO_MEMORY_EXTERNAL;
+                    // External output defaults to NV12, the format VideoToolbox
                     // decodes into, so the IOSurface is handed back untouched.
                     avb_pixel_format want = options.video_format;
                     if (want == AVB_PIXEL_FORMAT_UNKNOWN)
-                        want = native ? AVB_PIXEL_FORMAT_NV12 : AVB_PIXEL_FORMAT_BGRA8;
+                        want = external ? AVB_PIXEL_FORMAT_NV12 : AVB_PIXEL_FORMAT_BGRA8;
                     m_impl->cv_pixel_format = avb_cvpixfmt(want);
                     m_impl->video_avb_fmt = want;
                     // RGBA is emulated by swizzling a BGRA CPU copy, which is not
-                    // possible for a zero-copy native buffer.
-                    m_impl->swizzle_rgba = !native &&
+                    // possible for a zero-copy external buffer.
+                    m_impl->swizzle_rgba = !external &&
                         (options.video_format == AVB_PIXEL_FORMAT_RGBA8);
                     NSMutableDictionary *settings = [@{
                         (NSString *)kCVPixelBufferPixelFormatTypeKey:
@@ -457,7 +459,7 @@ avb_result AvbDecoderAVFoundation::seek(double seconds) {
                     (NSString *)kCVPixelBufferPixelFormatTypeKey:
                         @(m_impl->cv_pixel_format),
                 } mutableCopy];
-                if (m_impl->video_memory == AVB_VIDEO_MEMORY_NATIVE)
+                if (m_impl->video_memory == AVB_VIDEO_MEMORY_EXTERNAL)
                     s[(NSString *)kCVPixelBufferIOSurfacePropertiesKey] = @{};
                 settings = s;
             }
@@ -629,10 +631,10 @@ avb_result AvbDecoderAVFoundation::read_video_frame(avb_video_frame &out_frame) 
             return AVB_ERROR_DECODE_FAILED;
         }
 
-        // Native output: retain the decoder's IOSurface-backed CVPixelBuffer and
+        // External output: retain the decoder's IOSurface-backed CVPixelBuffer and
         // hand it back without copying. The caller keeps native_owner intact and
         // calls release_video_frame(), which releases our retain.
-        if (m_impl->video_memory == AVB_VIDEO_MEMORY_NATIVE) {
+        if (m_impl->video_memory == AVB_VIDEO_MEMORY_EXTERNAL) {
             CVPixelBufferRef pb = (CVPixelBufferRef)image;
             CVPixelBufferRetain(pb);
             out_frame = {};
@@ -641,7 +643,9 @@ avb_result AvbDecoderAVFoundation::read_video_frame(avb_video_frame &out_frame) 
             out_frame.format      =
                 avb_avbfmt_from_cv(CVPixelBufferGetPixelFormatType(pb));
             out_frame.pts_sec     = CMTimeGetSeconds(pts);
-            out_frame.memory_type = AVB_VIDEO_MEMORY_NATIVE;
+            out_frame.memory_type = AVB_VIDEO_MEMORY_EXTERNAL;
+            out_frame.external_type =
+                AVB_VIDEO_EXTERNAL_CVPIXEL_BUFFER;
             out_frame.hardware_device = AVB_HW_DEVICE_VIDEOTOOLBOX;
             out_frame.plane_count = 0;
             out_frame.native_handle = pb;
@@ -737,7 +741,8 @@ void AvbDecoderAVFoundation::release_video_frame(avb_video_frame &frame) {
         m_impl->custom_video_decoder->release_frame(m_impl->custom_video_ctx, &frame);
         return;
     }
-    if (frame.memory_type == AVB_VIDEO_MEMORY_NATIVE &&
+    if (frame.memory_type == AVB_VIDEO_MEMORY_EXTERNAL &&
+        frame.external_type == AVB_VIDEO_EXTERNAL_CVPIXEL_BUFFER &&
         frame.native_owner == this && frame.native_handle) {
         CVPixelBufferRelease((CVPixelBufferRef)frame.native_handle);
     }

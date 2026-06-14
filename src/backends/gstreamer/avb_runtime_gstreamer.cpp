@@ -9,6 +9,7 @@ using avb::detail::Container;
 using avb::detail::audio_only_container;
 using avb::capability::add_audio_codec;
 using avb::capability::add_device;
+using avb::capability::add_external;
 using avb::capability::add_memory;
 using avb::capability::add_software_pixel_formats;
 using avb::capability::add_video_codec;
@@ -154,12 +155,12 @@ void fill_decoder(
 
     add_software_pixel_formats(out);
     add_memory(out, AVB_VIDEO_MEMORY_CPU);
-    add_memory(out, AVB_VIDEO_MEMORY_NATIVE);
+    add_memory(out, AVB_VIDEO_MEMORY_BACKEND_NATIVE);
     add_device(out, AVB_HW_DEVICE_AUTO);
     if (has_vaapi(gst)) {
         add_device(out, AVB_HW_DEVICE_VAAPI);
         if (has_dmabuf_allocator(gst))
-            add_memory(out, AVB_VIDEO_MEMORY_DMABUF);
+            add_external(out, AVB_VIDEO_EXTERNAL_DMABUF);
     }
 }
 
@@ -192,9 +193,9 @@ void fill_encoder(
     add_device(out, AVB_HW_DEVICE_AUTO);
     if (has_vaapi(gst)) {
         add_device(out, AVB_HW_DEVICE_VAAPI);
-        add_memory(out, AVB_VIDEO_MEMORY_NATIVE);
+        add_memory(out, AVB_VIDEO_MEMORY_BACKEND_NATIVE);
         if (has_dmabuf_allocator(gst))
-            add_memory(out, AVB_VIDEO_MEMORY_DMABUF);
+            add_external(out, AVB_VIDEO_EXTERNAL_DMABUF);
     }
 }
 

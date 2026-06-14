@@ -174,8 +174,27 @@ inline bool valid_pixel_format(avb_pixel_format format) {
 
 inline bool valid_video_memory(avb_video_memory_type memory) {
     return memory == AVB_VIDEO_MEMORY_CPU ||
-           memory == AVB_VIDEO_MEMORY_NATIVE ||
-           memory == AVB_VIDEO_MEMORY_DMABUF;
+           memory == AVB_VIDEO_MEMORY_BACKEND_NATIVE ||
+           memory == AVB_VIDEO_MEMORY_EXTERNAL;
+}
+
+inline bool valid_video_external_type(avb_video_external_type external_type) {
+    return external_type == AVB_VIDEO_EXTERNAL_NONE ||
+           external_type == AVB_VIDEO_EXTERNAL_DMABUF ||
+           external_type == AVB_VIDEO_EXTERNAL_D3D11_TEXTURE ||
+           external_type == AVB_VIDEO_EXTERNAL_CVPIXEL_BUFFER;
+}
+
+inline bool valid_video_memory_external_pair(
+    avb_video_memory_type memory,
+    avb_video_external_type external_type) {
+    if (!valid_video_memory(memory) ||
+        !valid_video_external_type(external_type)) {
+        return false;
+    }
+    return memory == AVB_VIDEO_MEMORY_EXTERNAL
+        ? external_type != AVB_VIDEO_EXTERNAL_NONE
+        : external_type == AVB_VIDEO_EXTERNAL_NONE;
 }
 
 inline bool valid_hardware_policy(avb_hardware_policy policy) {
@@ -281,6 +300,17 @@ void add_memory(Capabilities &out, avb_video_memory_type memory) {
 }
 
 template <typename Capabilities>
+void add_external(
+    Capabilities &out,
+    avb_video_external_type external_type) {
+    add_memory(out, AVB_VIDEO_MEMORY_EXTERNAL);
+    detail::add_unique(
+        out.video_external_types,
+        out.video_external_type_count,
+        external_type);
+}
+
+template <typename Capabilities>
 void add_device(Capabilities &out, avb_hardware_device device) {
     detail::add_unique(
         out.hardware_devices, out.hardware_device_count, device);
@@ -294,9 +324,9 @@ void add_portable_capabilities(
         add_common_video_codecs(out, container);
     add_common_audio_codecs(out, container);
     add_memory(out, AVB_VIDEO_MEMORY_CPU);
-    add_memory(out, AVB_VIDEO_MEMORY_NATIVE);
+    add_memory(out, AVB_VIDEO_MEMORY_BACKEND_NATIVE);
 #if defined(__linux__)
-    add_memory(out, AVB_VIDEO_MEMORY_DMABUF);
+    add_external(out, AVB_VIDEO_EXTERNAL_DMABUF);
 #endif
     add_device(out, AVB_HW_DEVICE_AUTO);
     add_device(out, AVB_HW_DEVICE_VAAPI);

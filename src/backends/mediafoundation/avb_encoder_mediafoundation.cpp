@@ -321,14 +321,21 @@ avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_op
     }
     if (options.video.enable) {
         if (options.video.input_memory != AVB_VIDEO_MEMORY_CPU &&
-            options.video.input_memory != AVB_VIDEO_MEMORY_NATIVE) {
-            m_last_error = "Media Foundation supports CPU or D3D11 native video input.";
+            options.video.input_memory != AVB_VIDEO_MEMORY_EXTERNAL) {
+            m_last_error = "Media Foundation supports CPU or external D3D11 texture input.";
             return AVB_ERROR_OPEN_FAILED;
         }
-        if (options.video.input_memory == AVB_VIDEO_MEMORY_NATIVE &&
+        if (options.video.input_memory == AVB_VIDEO_MEMORY_EXTERNAL &&
+            options.video.input_external_type !=
+                AVB_VIDEO_EXTERNAL_D3D11_TEXTURE) {
+            m_last_error =
+                "Media Foundation external input requires D3D11 textures.";
+            return AVB_ERROR_INVALID_ARGUMENT;
+        }
+        if (options.video.input_memory == AVB_VIDEO_MEMORY_EXTERNAL &&
             options.video.input_format != AVB_PIXEL_FORMAT_UNKNOWN &&
             options.video.input_format != AVB_PIXEL_FORMAT_NV12) {
-            m_last_error = "Media Foundation D3D11 native input requires NV12 textures.";
+            m_last_error = "Media Foundation D3D11 texture input requires NV12 textures.";
             return AVB_ERROR_INVALID_ARGUMENT;
         }
     }
@@ -336,7 +343,7 @@ avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_op
     const bool direct_ivf = container == Container::ivf;
     const bool native_sink =
         options.video.enable &&
-        options.video.input_memory == AVB_VIDEO_MEMORY_NATIVE &&
+        options.video.input_memory == AVB_VIDEO_MEMORY_EXTERNAL &&
         !direct_ivf;
     if (native_sink && !options.video.hardware_context) {
         m_last_error =
@@ -422,7 +429,7 @@ avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_op
                 m_impl->video_is_nv12 = true;
                 break;
             case AVB_PIXEL_FORMAT_UNKNOWN:
-                if (options.video.input_memory == AVB_VIDEO_MEMORY_NATIVE) {
+                if (options.video.input_memory == AVB_VIDEO_MEMORY_EXTERNAL) {
                     m_impl->input_format = AVB_PIXEL_FORMAT_NV12;
                     m_impl->video_is_nv12 = true;
                 } else {
@@ -452,6 +459,8 @@ avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_op
         custom_info.frame_rate = m_impl->frame_rate;
         custom_info.input_format = m_impl->input_format;
         custom_info.input_memory = options.video.input_memory;
+        custom_info.input_external_type =
+            options.video.input_external_type;
         custom_info.codec = options.video.codec;
         custom_info.bitrate = options.video.bitrate;
         const avb_video_encoder_plugin *plugin =
@@ -1085,11 +1094,13 @@ avb_result AvbEncoderMediaFoundation::write_video(const avb_video_frame &frame, 
     LONGLONG dur_hns =
         mf_encode_seconds_to_hns(1.0 / m_impl->frame_rate);
 
-    if (m_impl->input_memory == AVB_VIDEO_MEMORY_NATIVE) {
-        if (frame.memory_type != AVB_VIDEO_MEMORY_NATIVE ||
+    if (m_impl->input_memory == AVB_VIDEO_MEMORY_EXTERNAL) {
+        if (frame.memory_type != AVB_VIDEO_MEMORY_EXTERNAL ||
+            frame.external_type != AVB_VIDEO_EXTERNAL_D3D11_TEXTURE ||
             frame.hardware_device != AVB_HW_DEVICE_D3D11VA ||
             !frame.native_handle) {
-            m_last_error = "Native video input requires an ID3D11Texture2D native_handle.";
+            m_last_error =
+                "External D3D11 texture input requires an ID3D11Texture2D native_handle.";
             return AVB_ERROR_INVALID_ARGUMENT;
         }
         auto *texture = static_cast<ID3D11Texture2D *>(frame.native_handle);

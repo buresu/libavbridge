@@ -113,6 +113,7 @@ void AvbEncoderGStreamer::close_internal() {
     m_custom_video = false;
     m_hw_video = false;
     m_input_memory = AVB_VIDEO_MEMORY_CPU;
+    m_input_external_type = AVB_VIDEO_EXTERNAL_NONE;
     m_dmabuf_caps_format = 0;
     m_dmabuf_caps_modifier = UINT64_MAX;
 }
@@ -318,6 +319,7 @@ avb_result AvbEncoderGStreamer::open(const char *path, const avb_encode_options 
             default:                     m_input_format = AVB_PIXEL_FORMAT_BGRA8; vfmt = "BGRA"; break;
         }
         m_input_memory = options.video.input_memory;
+        m_input_external_type = options.video.input_external_type;
         int kbps = options.video.bitrate / 1000;
         switch (options.video.codec) {
             case AVB_VIDEO_CODEC_AUTO:
@@ -387,6 +389,7 @@ avb_result AvbEncoderGStreamer::open(const char *path, const avb_encode_options 
         custom_info.frame_rate = m_frame_rate;
         custom_info.input_format = m_input_format;
         custom_info.input_memory = options.video.input_memory;
+        custom_info.input_external_type = options.video.input_external_type;
         custom_info.codec = options.video.codec;
         custom_info.bitrate = options.video.bitrate;
         const avb_video_encoder_plugin *plugin =
@@ -510,11 +513,11 @@ avb_result AvbEncoderGStreamer::open(const char *path, const avb_encode_options 
         if (m_custom_video) {
             n += snprintf(desc + n, sizeof(desc) - n,
                 "appsrc name=vsrc is-live=false format=time max-bytes=0 ! queue ! mux. ");
-        } else if (m_hw_video && m_input_memory == AVB_VIDEO_MEMORY_NATIVE) {
+        } else if (m_hw_video && m_input_memory == AVB_VIDEO_MEMORY_BACKEND_NATIVE) {
             n += snprintf(desc + n, sizeof(desc) - n,
                 "appsrc name=vsrc is-live=false format=time max-bytes=0 block=true max-buffers=4 ! "
                 "queue max-size-buffers=4 max-size-bytes=0 max-size-time=0 ! %s ! %s queue ! mux. ", venc, vparse);
-        } else if (m_hw_video && m_input_memory == AVB_VIDEO_MEMORY_DMABUF) {
+        } else if (m_hw_video && m_input_memory == AVB_VIDEO_MEMORY_EXTERNAL) {
             n += snprintf(desc + n, sizeof(desc) - n,
                 "appsrc name=vsrc is-live=false format=time max-bytes=0 block=true max-buffers=4 ! "
                 "queue max-size-buffers=4 max-size-bytes=0 max-size-time=0 ! vapostproc ! %s ! %s queue ! mux. ", venc, vparse);
@@ -576,11 +579,11 @@ avb_result AvbEncoderGStreamer::open(const char *path, const avb_encode_options 
                 snprintf(caps_str, sizeof(caps_str), "%s", custom_vcaps.c_str());
             }
         } else {
-            if (m_input_memory == AVB_VIDEO_MEMORY_NATIVE) {
+            if (m_input_memory == AVB_VIDEO_MEMORY_BACKEND_NATIVE) {
                 snprintf(caps_str, sizeof(caps_str),
                          "video/x-raw(memory:VASurface),width=%d,height=%d,framerate=%d/1",
                          m_width, m_height, m_fps_n);
-            } else if (m_input_memory == AVB_VIDEO_MEMORY_DMABUF) {
+            } else if (m_input_memory == AVB_VIDEO_MEMORY_EXTERNAL) {
                 snprintf(caps_str, sizeof(caps_str),
                          "video/x-raw(memory:DMABuf),format=DMA_DRM,width=%d,height=%d,framerate=%d/1",
                          m_width, m_height, m_fps_n);
@@ -619,6 +622,13 @@ avb_result AvbEncoderGStreamer::open(const char *path, const avb_encode_options 
 
 avb_result AvbEncoderGStreamer::write_video(const avb_video_frame &frame, double pts_sec) {
     if (!m_has_video) return AVB_ERROR_INVALID_ARGUMENT;
+    if (frame.memory_type != m_input_memory ||
+        (m_input_memory == AVB_VIDEO_MEMORY_EXTERNAL &&
+         frame.external_type != m_input_external_type)) {
+        m_last_error =
+            "Video frame memory representation does not match encoder options.";
+        return AVB_ERROR_INVALID_ARGUMENT;
+    }
     if (m_custom_video) {
         avb_encoded_packet packet{};
         avb_result res = m_custom_video_encoder->encode_frame(
@@ -637,17 +647,19 @@ avb_result AvbEncoderGStreamer::write_video(const avb_video_frame &frame, double
                : frame.pts_sec >= 0.0 ? frame.pts_sec
                : (double)m_video_index / m_frame_rate;
 
-    if (m_input_memory == AVB_VIDEO_MEMORY_NATIVE ||
-        m_input_memory == AVB_VIDEO_MEMORY_DMABUF) {
-        if (frame.memory_type != m_input_memory) {
-            m_last_error = "Native/DMABUF video input requires matching frame.memory_type.";
+    if (m_input_memory == AVB_VIDEO_MEMORY_BACKEND_NATIVE ||
+        m_input_memory == AVB_VIDEO_MEMORY_EXTERNAL) {
+        if (m_input_memory == AVB_VIDEO_MEMORY_EXTERNAL &&
+            (m_input_external_type != AVB_VIDEO_EXTERNAL_DMABUF ||
+             frame.external_type != AVB_VIDEO_EXTERNAL_DMABUF)) {
+            m_last_error = "GStreamer external input requires a DMABUF frame.";
             return AVB_ERROR_INVALID_ARGUMENT;
         }
         GstBuffer *buf = nullptr;
         if (frame.native_handle && frame.native_handle_id == 0) {
             buf = (GstBuffer *)m_gst.gst_mini_object_ref(
                 (GstMiniObject *)frame.native_handle);
-        } else if (m_input_memory == AVB_VIDEO_MEMORY_DMABUF) {
+        } else if (m_input_memory == AVB_VIDEO_MEMORY_EXTERNAL) {
             avb_result caps_res = update_dmabuf_caps(frame);
             if (caps_res != AVB_OK) return caps_res;
             buf = build_dmabuf_buffer(frame);
