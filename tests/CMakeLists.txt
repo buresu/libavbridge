@@ -1,73 +1,74 @@
-# Conformance test. The fixture is generated with ffmpeg at build time so the
-# repository stays free of binary blobs; if ffmpeg is unavailable the test is
-# skipped (registered but reported as "not run") rather than failing the build.
+# Tests are split into:
+#   contract     - fixture-free public API/ABI checks
+#   conformance  - the same media behavior against every enabled backend
+#   integration  - codec, custom plugin, and native-memory round trips
+#   platform     - native handle, descriptor, and runtime-specific contracts
 
-add_executable(avb_conformance conformance.cpp)
-target_link_libraries(avb_conformance PRIVATE avbridge)
-if(AVB_BUILD_SHARED)
-    target_compile_definitions(avb_conformance PRIVATE AVB_USING_SHARED)
+function(avb_add_test_binary target source)
+    add_executable(${target} ${source})
+    target_link_libraries(${target} PRIVATE avbridge)
+    target_include_directories(
+        ${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/support)
+    if(AVB_BUILD_SHARED)
+        target_compile_definitions(${target} PRIVATE AVB_USING_SHARED)
+    endif()
+endfunction()
+
+function(avb_add_ctest name target labels)
+    add_test(NAME ${name} COMMAND ${target} ${ARGN})
+    set_tests_properties(${name} PROPERTIES
+        LABELS "${labels}"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 180
+    )
+endfunction()
+
+avb_add_test_binary(avb_api_contract contract/api.cpp)
+avb_add_test_binary(avb_c_api_contract contract/c_api.c)
+set_target_properties(avb_c_api_contract PROPERTIES LINKER_LANGUAGE CXX)
+avb_add_test_binary(avb_conformance conformance/decode.cpp)
+avb_add_test_binary(avb_io conformance/io.cpp)
+avb_add_test_binary(avb_roundtrip integration/roundtrip.cpp)
+avb_add_test_binary(avb_codecs integration/codecs.cpp)
+avb_add_test_binary(avb_custom_decoder integration/custom_decoder.cpp)
+avb_add_test_binary(avb_custom_encoder integration/custom_encoder.cpp)
+avb_add_test_binary(
+    avb_video_memory_roundtrip
+    integration/video_memory_roundtrip.cpp)
+
+if(AVB_ENABLE_MEDIAFOUNDATION)
+    avb_add_test_binary(
+        avb_mediafoundation_runtime_codecs
+        platform/mediafoundation.cpp)
+    target_link_libraries(
+        avb_mediafoundation_runtime_codecs PRIVATE d3d11 dxgi)
 endif()
 
-add_executable(avb_roundtrip roundtrip.cpp)
-target_link_libraries(avb_roundtrip PRIVATE avbridge)
-if(AVB_BUILD_SHARED)
-    target_compile_definitions(avb_roundtrip PRIVATE AVB_USING_SHARED)
+if(AVB_ENABLE_AVFOUNDATION)
+    avb_add_test_binary(
+        avb_platform_avfoundation
+        platform/avfoundation.mm)
+    target_link_libraries(
+        avb_platform_avfoundation PRIVATE
+        "-framework CoreFoundation"
+        "-framework CoreVideo"
+        "-framework IOSurface")
 endif()
 
-add_executable(avb_codecs codecs.cpp)
-target_link_libraries(avb_codecs PRIVATE avbridge)
-if(AVB_BUILD_SHARED)
-    target_compile_definitions(avb_codecs PRIVATE AVB_USING_SHARED)
+if(UNIX AND NOT APPLE)
+    avb_add_test_binary(
+        avb_platform_linux
+        platform/linux.cpp)
 endif()
 
-add_executable(avb_io io.cpp)
-target_link_libraries(avb_io PRIVATE avbridge)
-if(AVB_BUILD_SHARED)
-    target_compile_definitions(avb_io PRIVATE AVB_USING_SHARED)
-endif()
-
-add_executable(avb_custom_decoder custom_decoder.cpp)
-target_link_libraries(avb_custom_decoder PRIVATE avbridge)
-if(AVB_BUILD_SHARED)
-    target_compile_definitions(avb_custom_decoder PRIVATE AVB_USING_SHARED)
-endif()
-
-add_executable(avb_custom_encoder custom_encoder.cpp)
-target_link_libraries(avb_custom_encoder PRIVATE avbridge)
-if(AVB_BUILD_SHARED)
-    target_compile_definitions(avb_custom_encoder PRIVATE AVB_USING_SHARED)
-endif()
-
-add_executable(avb_mediafoundation_runtime_codecs mediafoundation_runtime_codecs.cpp)
-target_link_libraries(avb_mediafoundation_runtime_codecs PRIVATE avbridge)
 if(WIN32)
-    target_link_libraries(avb_mediafoundation_runtime_codecs PRIVATE d3d11 dxgi)
-endif()
-if(AVB_BUILD_SHARED)
-    target_compile_definitions(avb_mediafoundation_runtime_codecs PRIVATE AVB_USING_SHARED)
+    target_link_libraries(avb_video_memory_roundtrip PRIVATE d3d11)
 endif()
 
-add_executable(avb_dmabuf_roundtrip dmabuf_roundtrip.cpp)
-target_link_libraries(avb_dmabuf_roundtrip PRIVATE avbridge)
-if(AVB_BUILD_SHARED)
-    target_compile_definitions(avb_dmabuf_roundtrip PRIVATE AVB_USING_SHARED)
-endif()
-
-add_executable(avb_native_roundtrip native_roundtrip.cpp)
-target_link_libraries(avb_native_roundtrip PRIVATE avbridge)
-if(WIN32)
-    target_link_libraries(avb_native_roundtrip PRIVATE d3d11)
-endif()
-if(AVB_BUILD_SHARED)
-    target_compile_definitions(avb_native_roundtrip PRIVATE AVB_USING_SHARED)
-endif()
-
-add_executable(avb_capabilities_api capabilities.cpp)
-target_link_libraries(avb_capabilities_api PRIVATE avbridge)
-if(AVB_BUILD_SHARED)
-    target_compile_definitions(avb_capabilities_api PRIVATE AVB_USING_SHARED)
-endif()
-add_test(NAME capabilities_api COMMAND avb_capabilities_api)
+avb_add_ctest(
+    api_contract avb_api_contract "contract;api")
+avb_add_ctest(
+    c_api_contract avb_c_api_contract "contract;api;c-abi")
 
 find_program(FFMPEG_EXECUTABLE ffmpeg)
 
@@ -89,114 +90,11 @@ if(FFMPEG_EXECUTABLE)
     add_custom_target(avb_conformance_fixture DEPENDS "${AVB_FIXTURE}")
     set(AVB_MF_RUNTIME_CODEC_ARGS)
     if(WIN32 AND AVB_ENABLE_MEDIAFOUNDATION)
-        execute_process(
-            COMMAND ${FFMPEG_EXECUTABLE} -hide_banner -encoders
-            OUTPUT_VARIABLE AVB_FFMPEG_ENCODERS
-            ERROR_QUIET
-        )
-
-        set(AVB_MF_AUDIO_FIXTURES)
-        set(AVB_MF_VIDEO_FIXTURES)
-        set(AVB_MF_FLAC_FIXTURE "${AVB_OUT}/runtime_codecs_mediafoundation_flac.flac")
-        add_custom_command(
-            OUTPUT "${AVB_MF_FLAC_FIXTURE}"
-            COMMAND ${FFMPEG_EXECUTABLE} -y -loglevel error
-                    -f lavfi -i "sine=frequency=660:duration=1"
-                    -c:a flac -ar 44100 -ac 1
-                    "${AVB_MF_FLAC_FIXTURE}"
-            COMMENT "Generating Media Foundation FLAC runtime fixture"
-            VERBATIM
-        )
-        list(APPEND AVB_MF_AUDIO_FIXTURES "${AVB_MF_FLAC_FIXTURE}")
-        list(APPEND AVB_MF_RUNTIME_CODEC_ARGS
-             audio flac "${AVB_MF_FLAC_FIXTURE}" flac)
-
-        if(AVB_FFMPEG_ENCODERS MATCHES "libopus")
-            set(AVB_MF_OPUS_FIXTURE "${AVB_OUT}/runtime_codecs_mediafoundation_opus.ogg")
-            add_custom_command(
-                OUTPUT "${AVB_MF_OPUS_FIXTURE}"
-                COMMAND ${FFMPEG_EXECUTABLE} -y -loglevel error
-                        -f lavfi -i "sine=frequency=550:duration=1"
-                        -c:a libopus -ar 48000 -ac 1
-                        "${AVB_MF_OPUS_FIXTURE}"
-                COMMENT "Generating Media Foundation Opus runtime fixture"
-                VERBATIM
-            )
-            list(APPEND AVB_MF_AUDIO_FIXTURES "${AVB_MF_OPUS_FIXTURE}")
-            list(APPEND AVB_MF_RUNTIME_CODEC_ARGS
-                 audio opus "${AVB_MF_OPUS_FIXTURE}" opus)
-        endif()
-
-        if(AVB_FFMPEG_ENCODERS MATCHES "libvorbis")
-            set(AVB_MF_VORBIS_FIXTURE "${AVB_OUT}/runtime_codecs_mediafoundation_vorbis.ogg")
-            add_custom_command(
-                OUTPUT "${AVB_MF_VORBIS_FIXTURE}"
-                COMMAND ${FFMPEG_EXECUTABLE} -y -loglevel error
-                        -f lavfi -i "sine=frequency=770:duration=1"
-                        -c:a libvorbis -ar 44100 -ac 1
-                        "${AVB_MF_VORBIS_FIXTURE}"
-                COMMENT "Generating Media Foundation Vorbis runtime fixture"
-                VERBATIM
-            )
-            list(APPEND AVB_MF_AUDIO_FIXTURES "${AVB_MF_VORBIS_FIXTURE}")
-            list(APPEND AVB_MF_RUNTIME_CODEC_ARGS
-                 audio vorbis "${AVB_MF_VORBIS_FIXTURE}" "*")
-        endif()
-
-        if(AVB_FFMPEG_ENCODERS MATCHES "libvpx")
-            set(AVB_MF_VP8_FIXTURE "${AVB_OUT}/runtime_codecs_mediafoundation_vp8.webm")
-            add_custom_command(
-                OUTPUT "${AVB_MF_VP8_FIXTURE}"
-                COMMAND ${FFMPEG_EXECUTABLE} -y -loglevel error
-                        -f lavfi -i "testsrc=duration=1:size=160x120:rate=15"
-                        -an -c:v libvpx -pix_fmt yuv420p -b:v 500k
-                        "${AVB_MF_VP8_FIXTURE}"
-                COMMENT "Generating Media Foundation VP8 runtime fixture"
-                VERBATIM
-            )
-            list(APPEND AVB_MF_VIDEO_FIXTURES "${AVB_MF_VP8_FIXTURE}")
-            list(APPEND AVB_MF_RUNTIME_CODEC_ARGS
-                 video vp8 "${AVB_MF_VP8_FIXTURE}" vp8)
-        endif()
-
-        if(AVB_FFMPEG_ENCODERS MATCHES "libvpx-vp9")
-            set(AVB_MF_VP9_FIXTURE "${AVB_OUT}/runtime_codecs_mediafoundation_vp9.webm")
-            add_custom_command(
-                OUTPUT "${AVB_MF_VP9_FIXTURE}"
-                COMMAND ${FFMPEG_EXECUTABLE} -y -loglevel error
-                        -f lavfi -i "testsrc=duration=1:size=160x120:rate=15"
-                        -an -c:v libvpx-vp9 -pix_fmt yuv420p -b:v 500k
-                        "${AVB_MF_VP9_FIXTURE}"
-                COMMENT "Generating Media Foundation VP9 runtime fixture"
-                VERBATIM
-            )
-            list(APPEND AVB_MF_VIDEO_FIXTURES "${AVB_MF_VP9_FIXTURE}")
-            list(APPEND AVB_MF_RUNTIME_CODEC_ARGS
-                 video vp9 "${AVB_MF_VP9_FIXTURE}" vp9)
-        endif()
-
-        if(AVB_FFMPEG_ENCODERS MATCHES "libaom-av1")
-            set(AVB_MF_AV1_FIXTURE "${AVB_OUT}/runtime_codecs_mediafoundation_av1.mkv")
-            add_custom_command(
-                OUTPUT "${AVB_MF_AV1_FIXTURE}"
-                COMMAND ${FFMPEG_EXECUTABLE} -y -loglevel error
-                        -f lavfi -i "testsrc=duration=1:size=320x240:rate=15"
-                        -an -c:v libaom-av1 -pix_fmt yuv420p -crf 38 -b:v 0
-                        -cpu-used 8
-                        "${AVB_MF_AV1_FIXTURE}"
-                COMMENT "Generating Media Foundation AV1 runtime fixture"
-                VERBATIM
-            )
-            list(APPEND AVB_MF_VIDEO_FIXTURES "${AVB_MF_AV1_FIXTURE}")
-            list(APPEND AVB_MF_RUNTIME_CODEC_ARGS
-                 video av1 "${AVB_MF_AV1_FIXTURE}" av1)
-        endif()
-
-        if(AVB_MF_AUDIO_FIXTURES OR AVB_MF_VIDEO_FIXTURES)
-            add_custom_target(avb_mediafoundation_codec_fixtures
-                              DEPENDS ${AVB_MF_AUDIO_FIXTURES}
-                                      ${AVB_MF_VIDEO_FIXTURES})
-        endif()
+        include(platform/mediafoundation_fixtures.cmake)
+        avb_add_mediafoundation_fixtures(
+            "${FFMPEG_EXECUTABLE}"
+            "${AVB_OUT}"
+            AVB_MF_RUNTIME_CODEC_ARGS)
     endif()
 
     add_dependencies(avb_conformance avb_conformance_fixture)
@@ -205,110 +103,184 @@ if(FFMPEG_EXECUTABLE)
     add_dependencies(avb_io avb_conformance_fixture)
     add_dependencies(avb_custom_decoder avb_conformance_fixture)
     add_dependencies(avb_custom_encoder avb_conformance_fixture)
-    add_dependencies(avb_mediafoundation_runtime_codecs avb_conformance_fixture)
-    if(TARGET avb_mediafoundation_codec_fixtures)
+    if(TARGET avb_platform_avfoundation)
+        add_dependencies(
+            avb_platform_avfoundation avb_conformance_fixture)
+    endif()
+    if(TARGET avb_platform_linux)
+        add_dependencies(
+            avb_platform_linux avb_conformance_fixture)
+    endif()
+    if(TARGET avb_mediafoundation_runtime_codecs)
+        add_dependencies(
+            avb_mediafoundation_runtime_codecs avb_conformance_fixture)
+    endif()
+    if(TARGET avb_mediafoundation_codec_fixtures AND
+       TARGET avb_mediafoundation_runtime_codecs)
         add_dependencies(avb_mediafoundation_runtime_codecs
                          avb_mediafoundation_codec_fixtures)
     endif()
-    add_dependencies(avb_dmabuf_roundtrip avb_conformance_fixture)
-    add_dependencies(avb_native_roundtrip avb_conformance_fixture)
+    add_dependencies(
+        avb_video_memory_roundtrip avb_conformance_fixture)
 
-    # The conformance contract is backend-agnostic, so run it against every
-    # backend compiled into this build (each skips itself if not present). A
-    # SKIP_RETURN_CODE of 77 reports "not run" rather than a failure.
+    # Apply the same decode, encode, and I/O contract to every enabled backend.
     set(_avb_backends auto)
-    if(WIN32 AND AVB_ENABLE_MEDIAFOUNDATION)
-        list(APPEND _avb_backends mediafoundation)
-    endif()
+    set(_avb_explicit_backends)
     if(AVB_ENABLE_GSTREAMER)
-        list(APPEND _avb_backends gstreamer)
+        list(APPEND _avb_explicit_backends gstreamer)
     endif()
     if(AVB_ENABLE_FFMPEG)
-        list(APPEND _avb_backends ffmpeg)
+        list(APPEND _avb_explicit_backends ffmpeg)
     endif()
-    foreach(be ${_avb_backends})
-        add_test(NAME conformance_${be} COMMAND avb_conformance "${AVB_FIXTURE}" ${be})
-        add_test(NAME roundtrip_${be}
-                 COMMAND avb_roundtrip "${AVB_FIXTURE}" "${AVB_OUT}/roundtrip_${be}.mp4" ${be})
-        add_test(NAME io_${be} COMMAND avb_io "${AVB_FIXTURE}" ${be})
-        set_tests_properties(conformance_${be} roundtrip_${be} io_${be}
-                             PROPERTIES SKIP_RETURN_CODE 77)
-    endforeach()
-
-    # Wide codec/pixel-format coverage via the FFmpeg backend (skips if absent).
-    add_test(NAME codecs_ffmpeg
-             COMMAND avb_codecs "${AVB_FIXTURE}" "${AVB_OUT}/codec_ffmpeg" ffmpeg)
-    set_tests_properties(codecs_ffmpeg PROPERTIES SKIP_RETURN_CODE 77)
-    add_test(NAME custom_decoder_ffmpeg
-             COMMAND avb_custom_decoder "${AVB_FIXTURE}" ffmpeg)
-    set_tests_properties(custom_decoder_ffmpeg PROPERTIES SKIP_RETURN_CODE 77)
-    if(WIN32 AND AVB_ENABLE_MEDIAFOUNDATION)
-        add_test(NAME custom_decoder_mediafoundation
-                 COMMAND avb_custom_decoder "${AVB_FIXTURE}" mediafoundation)
-        set_tests_properties(custom_decoder_mediafoundation PROPERTIES SKIP_RETURN_CODE 77)
-        add_test(NAME runtime_codecs_mediafoundation
-                 COMMAND avb_mediafoundation_runtime_codecs "${AVB_FIXTURE}"
-                         "${AVB_OUT}/runtime_codecs_mediafoundation_hevc.mp4"
-                         ${AVB_MF_RUNTIME_CODEC_ARGS})
-        set_tests_properties(runtime_codecs_mediafoundation PROPERTIES SKIP_RETURN_CODE 77)
-        add_test(NAME native_roundtrip_mediafoundation
-                 COMMAND avb_native_roundtrip "${AVB_FIXTURE}"
-                         "${AVB_OUT}/native_roundtrip_mediafoundation.mp4"
-                         mediafoundation mediafoundation)
-        set_tests_properties(native_roundtrip_mediafoundation PROPERTIES SKIP_RETURN_CODE 77)
-    endif()
-    add_test(NAME custom_encoder_ffmpeg
-             COMMAND avb_custom_encoder "${AVB_OUT}/custom_encoder_ffmpeg.mov" ffmpeg)
-    set_tests_properties(custom_encoder_ffmpeg PROPERTIES SKIP_RETURN_CODE 77)
-    if(AVB_ENABLE_FFMPEG)
-        add_test(NAME dmabuf_roundtrip_ffmpeg
-                 COMMAND avb_dmabuf_roundtrip "${AVB_FIXTURE}"
-                         "${AVB_OUT}/dmabuf_roundtrip_ffmpeg.mp4" ffmpeg ffmpeg)
-        set_tests_properties(dmabuf_roundtrip_ffmpeg PROPERTIES SKIP_RETURN_CODE 77)
-    endif()
-    if(AVB_ENABLE_GSTREAMER)
-        add_test(NAME codecs_gstreamer
-                 COMMAND avb_codecs "${AVB_FIXTURE}" "${AVB_OUT}/codec_gstreamer" gstreamer video-only)
-        set_tests_properties(codecs_gstreamer PROPERTIES SKIP_RETURN_CODE 77)
-        add_test(NAME codecs_gstreamer_audio
-                 COMMAND avb_codecs "${AVB_FIXTURE}" "${AVB_OUT}/codec_gstreamer_audio" gstreamer audio-only)
-        set_tests_properties(codecs_gstreamer_audio PROPERTIES SKIP_RETURN_CODE 77)
-        add_test(NAME custom_decoder_gstreamer
-                 COMMAND avb_custom_decoder "${AVB_FIXTURE}" gstreamer)
-        set_tests_properties(custom_decoder_gstreamer PROPERTIES SKIP_RETURN_CODE 77)
-        add_test(NAME custom_encoder_gstreamer
-                 COMMAND avb_custom_encoder "${AVB_OUT}/custom_encoder_gstreamer.mkv" gstreamer)
-        set_tests_properties(custom_encoder_gstreamer PROPERTIES SKIP_RETURN_CODE 77)
-        add_test(NAME dmabuf_roundtrip_gstreamer
-                 COMMAND avb_dmabuf_roundtrip "${AVB_FIXTURE}"
-                         "${AVB_OUT}/dmabuf_roundtrip_gstreamer.mp4" gstreamer gstreamer)
-        set_tests_properties(dmabuf_roundtrip_gstreamer PROPERTIES SKIP_RETURN_CODE 77)
-        if(AVB_ENABLE_FFMPEG)
-            add_test(NAME dmabuf_roundtrip_ffmpeg_to_gstreamer
-                     COMMAND avb_dmabuf_roundtrip "${AVB_FIXTURE}"
-                             "${AVB_OUT}/dmabuf_roundtrip_ffmpeg_to_gstreamer.mp4" ffmpeg gstreamer)
-            set_tests_properties(dmabuf_roundtrip_ffmpeg_to_gstreamer PROPERTIES SKIP_RETURN_CODE 77)
-            add_test(NAME dmabuf_roundtrip_gstreamer_to_ffmpeg
-                     COMMAND avb_dmabuf_roundtrip "${AVB_FIXTURE}"
-                             "${AVB_OUT}/dmabuf_roundtrip_gstreamer_to_ffmpeg.mp4" gstreamer ffmpeg)
-            set_tests_properties(dmabuf_roundtrip_gstreamer_to_ffmpeg PROPERTIES SKIP_RETURN_CODE 77)
-        endif()
+    if(AVB_ENABLE_MEDIAFOUNDATION)
+        list(APPEND _avb_explicit_backends mediafoundation)
     endif()
     if(AVB_ENABLE_AVFOUNDATION)
-        add_test(NAME custom_decoder_avfoundation
-                 COMMAND avb_custom_decoder "${AVB_FIXTURE}" avfoundation)
-        set_tests_properties(custom_decoder_avfoundation PROPERTIES SKIP_RETURN_CODE 77)
-        add_test(NAME custom_encoder_avfoundation
-                 COMMAND avb_custom_encoder "${AVB_OUT}/custom_encoder_avfoundation.mov" avfoundation)
-        set_tests_properties(custom_encoder_avfoundation PROPERTIES SKIP_RETURN_CODE 77)
-        add_test(NAME native_roundtrip_avfoundation
-                 COMMAND avb_native_roundtrip "${AVB_FIXTURE}"
-                         "${AVB_OUT}/native_roundtrip_avfoundation.mp4"
-                         avfoundation avfoundation)
-        set_tests_properties(native_roundtrip_avfoundation PROPERTIES SKIP_RETURN_CODE 77)
+        list(APPEND _avb_explicit_backends avfoundation)
+    endif()
+    list(APPEND _avb_backends ${_avb_explicit_backends})
+
+    foreach(be ${_avb_backends})
+        avb_add_ctest(
+            conformance_${be}
+            avb_conformance
+            "conformance;decode;backend-${be}"
+            "${AVB_FIXTURE}" ${be})
+        avb_add_ctest(
+            roundtrip_${be}
+            avb_roundtrip
+            "integration;roundtrip;backend-${be}"
+            "${AVB_FIXTURE}"
+            "${AVB_OUT}/roundtrip_${be}.mp4"
+            ${be})
+        avb_add_ctest(
+            io_${be}
+            avb_io
+            "conformance;io;backend-${be}"
+            "${AVB_FIXTURE}" ${be})
+    endforeach()
+
+    foreach(be ${_avb_explicit_backends})
+        avb_add_ctest(
+            custom_decoder_${be}
+            avb_custom_decoder
+            "integration;plugin;decode;backend-${be}"
+            "${AVB_FIXTURE}" ${be})
+        if(be STREQUAL "gstreamer")
+            set(_custom_extension mkv)
+        else()
+            set(_custom_extension mov)
+        endif()
+        avb_add_ctest(
+            custom_encoder_${be}
+            avb_custom_encoder
+            "integration;plugin;encode;backend-${be}"
+            "${AVB_OUT}/custom_encoder_${be}.${_custom_extension}"
+            ${be})
+    endforeach()
+
+    # Wide codec coverage is backend-specific because runtime plugin sets vary.
+    if(AVB_ENABLE_FFMPEG)
+        avb_add_ctest(
+            codecs_ffmpeg
+            avb_codecs
+            "integration;codec;backend-ffmpeg"
+            "${AVB_FIXTURE}" "${AVB_OUT}/codec_ffmpeg" ffmpeg)
+        avb_add_ctest(
+            dmabuf_roundtrip_ffmpeg
+            avb_video_memory_roundtrip
+            "integration;hardware;dmabuf;backend-ffmpeg"
+            dmabuf
+            "${AVB_FIXTURE}"
+            "${AVB_OUT}/dmabuf_roundtrip_ffmpeg.mp4"
+            ffmpeg ffmpeg)
+    endif()
+    if(AVB_ENABLE_GSTREAMER)
+        avb_add_ctest(
+            codecs_gstreamer_video
+            avb_codecs
+            "integration;codec;video;backend-gstreamer"
+            "${AVB_FIXTURE}"
+            "${AVB_OUT}/codec_gstreamer_video"
+            gstreamer video-only)
+        avb_add_ctest(
+            codecs_gstreamer_audio
+            avb_codecs
+            "integration;codec;audio;backend-gstreamer"
+            "${AVB_FIXTURE}"
+            "${AVB_OUT}/codec_gstreamer_audio"
+            gstreamer audio-only)
+        avb_add_ctest(
+            dmabuf_roundtrip_gstreamer
+            avb_video_memory_roundtrip
+            "integration;hardware;dmabuf;backend-gstreamer"
+            dmabuf
+            "${AVB_FIXTURE}"
+            "${AVB_OUT}/dmabuf_roundtrip_gstreamer.mp4"
+            gstreamer gstreamer)
+        if(AVB_ENABLE_FFMPEG)
+            avb_add_ctest(
+                dmabuf_roundtrip_ffmpeg_to_gstreamer
+                avb_video_memory_roundtrip
+                "integration;hardware;dmabuf;cross-backend"
+                dmabuf
+                "${AVB_FIXTURE}"
+                "${AVB_OUT}/dmabuf_roundtrip_ffmpeg_to_gstreamer.mp4"
+                ffmpeg gstreamer)
+            avb_add_ctest(
+                dmabuf_roundtrip_gstreamer_to_ffmpeg
+                avb_video_memory_roundtrip
+                "integration;hardware;dmabuf;cross-backend"
+                dmabuf
+                "${AVB_FIXTURE}"
+                "${AVB_OUT}/dmabuf_roundtrip_gstreamer_to_ffmpeg.mp4"
+                gstreamer ffmpeg)
+        endif()
+    endif()
+
+    if(AVB_ENABLE_MEDIAFOUNDATION)
+        avb_add_ctest(
+            runtime_codecs_mediafoundation
+            avb_mediafoundation_runtime_codecs
+            "platform;codec;hardware;backend-mediafoundation"
+            "${AVB_FIXTURE}"
+            "${AVB_OUT}/runtime_codecs_mediafoundation_hevc.mp4"
+            ${AVB_MF_RUNTIME_CODEC_ARGS})
+        avb_add_ctest(
+            native_roundtrip_mediafoundation
+            avb_video_memory_roundtrip
+            "integration;hardware;native;backend-mediafoundation"
+            native
+            "${AVB_FIXTURE}"
+            "${AVB_OUT}/native_roundtrip_mediafoundation.mp4"
+            mediafoundation mediafoundation)
+    endif()
+
+    if(AVB_ENABLE_AVFOUNDATION)
+        avb_add_ctest(
+            platform_avfoundation
+            avb_platform_avfoundation
+            "platform;hardware;native;backend-avfoundation"
+            "${AVB_FIXTURE}")
+        avb_add_ctest(
+            native_roundtrip_avfoundation
+            avb_video_memory_roundtrip
+            "integration;hardware;native;backend-avfoundation"
+            native
+            "${AVB_FIXTURE}"
+            "${AVB_OUT}/native_roundtrip_avfoundation.mp4"
+            avfoundation avfoundation)
+    endif()
+
+    if(TARGET avb_platform_linux)
+        avb_add_ctest(
+            platform_linux
+            avb_platform_linux
+            "platform;hardware;dmabuf;linux"
+            "${AVB_FIXTURE}")
     endif()
 else()
     message(WARNING
         "ffmpeg not found; the conformance test fixture cannot be generated. "
-        "Install ffmpeg to enable the test suite.")
+        "Only fixture-free contract tests are enabled.")
 endif()

@@ -108,9 +108,8 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-The tests use the `ffmpeg` command-line tool to generate fixtures when it is
-available. Hardware tests skip when the required device, driver, or runtime
-plugin is unavailable.
+Tests generate fixtures with the `ffmpeg` command-line tool when available.
+Optional backend, codec, and hardware tests skip when unavailable.
 
 ## Runtime Dependencies
 

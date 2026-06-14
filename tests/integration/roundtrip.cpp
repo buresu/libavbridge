@@ -46,12 +46,8 @@ int main(int argc, char *argv[]) {
     }
 
     // --- Decode source ---
-    avb_decode_options dopts{};
+    avb_decode_options dopts = avb_decode_options_default();
     dopts.backend      = backend;
-    dopts.audio_stream_index = -1;
-    dopts.video_stream_index = -1;
-    dopts.enable_audio = 1;
-    dopts.enable_video = 1;
     dopts.video_format = AVB_PIXEL_FORMAT_BGRA8;
 
     avb_decoder *dec = nullptr;
@@ -65,7 +61,7 @@ int main(int argc, char *argv[]) {
     avb_decoder_get_media_info(dec, &src);
 
     // --- Open encoder (skip test if this backend has no encoder) ---
-    avb_encode_options eopts{};
+    avb_encode_options eopts = avb_encode_options_default();
     eopts.backend            = backend;
     eopts.video.enable       = 1;
     eopts.video.width        = src.video.width;
