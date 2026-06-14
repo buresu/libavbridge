@@ -67,6 +67,11 @@ private:
     bool            m_has_video   = false;
     bool            m_custom_video = false;
     bool            m_hw_video     = false;
+    // true  -> "upload" HW encoder (VAAPI): software frames are uploaded into a
+    //          hwframes context before encoding.
+    // false -> "software-input" HW encoder (NVENC/AMF/VideoToolbox): the encoder
+    //          consumes system-memory YUV420P frames directly (no hwframes ctx).
+    bool            m_hw_upload    = false;
     avb_hardware_device m_hw_device = AVB_HW_DEVICE_AUTO;
     AVPixelFormat   m_hw_pix_fmt   = AV_PIX_FMT_NONE;
 

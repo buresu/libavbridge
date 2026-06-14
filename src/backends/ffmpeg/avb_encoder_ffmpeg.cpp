@@ -249,23 +249,22 @@ avb_result AvbEncoderFFmpeg::setup_hardware_video_encoder(
         else if (strstr(codec_name, "amf")) device = AVB_HW_DEVICE_AMF;
     }
 
-    AVHWDeviceType hw_type = avb_ff_encode_hw_type(device);
-    if (hw_type == AV_HWDEVICE_TYPE_NONE && device == AVB_HW_DEVICE_AMF)
-        hw_type = AV_HWDEVICE_TYPE_D3D11VA;
-    if (hw_type == AV_HWDEVICE_TYPE_NONE)
+    // DMABUF / backend-native external input can only be imported on the VAAPI
+    // upload path; other HW encoders take system-memory frames only.
+    if (options.video.input_memory == AVB_VIDEO_MEMORY_EXTERNAL &&
+        device != AVB_HW_DEVICE_VAAPI)
         return AVB_ERROR_STREAM_NOT_FOUND;
-    if (device != AVB_HW_DEVICE_VAAPI)
-        return AVB_ERROR_STREAM_NOT_FOUND;
-
-    AVBufferRef *device_ctx = nullptr;
-    int ret = m_ff.av_hwdevice_ctx_create(&device_ctx, hw_type, nullptr, nullptr, 0);
-    if (ret < 0) return AVB_ERROR_STREAM_NOT_FOUND;
-
-    m_hw_device_ctx = device_ctx;
-    m_hw_device = device;
 
     if (device == AVB_HW_DEVICE_VAAPI) {
+        // "Upload" encoder: allocate a hwdevice + hwframes context and upload
+        // each software YUV420P frame into GPU memory before encoding.
+        AVBufferRef *device_ctx = nullptr;
+        int ret = m_ff.av_hwdevice_ctx_create(
+            &device_ctx, AV_HWDEVICE_TYPE_VAAPI, nullptr, nullptr, 0);
+        if (ret < 0) return AVB_ERROR_STREAM_NOT_FOUND;
+        m_hw_device_ctx = device_ctx;
         m_hw_pix_fmt = AV_PIX_FMT_VAAPI;
+
         m_hw_frames_ctx = m_ff.av_hwframe_ctx_alloc(m_hw_device_ctx);
         if (!m_hw_frames_ctx) {
             set_error("av_hwframe_ctx_alloc (video encode) failed.");
@@ -282,8 +281,22 @@ avb_result AvbEncoderFFmpeg::setup_hardware_video_encoder(
             set_ff_error("av_hwframe_ctx_init (video encode)", ret);
             return AVB_ERROR_OPEN_FAILED;
         }
+        m_hw_upload = true;
+    } else if (device == AVB_HW_DEVICE_CUDA ||
+               device == AVB_HW_DEVICE_AMF ||
+               device == AVB_HW_DEVICE_VIDEOTOOLBOX) {
+        // "Software-input" encoder: NVENC/AMF/VideoToolbox accept regular
+        // system-memory YUV420P frames and upload internally, so there is no
+        // hwframes context and the normal software frame path is reused.
+        m_hw_pix_fmt = AV_PIX_FMT_NONE;
+        m_hw_upload = false;
+    } else {
+        // QSV and any other device: hwframes upload semantics are not validated
+        // here, so report unavailable and let the caller fall back to software.
+        return AVB_ERROR_STREAM_NOT_FOUND;
     }
 
+    m_hw_device = device;
     *out_codec = codec;
     m_hw_video = true;
     return AVB_OK;
@@ -318,6 +331,7 @@ void AvbEncoderFFmpeg::close_internal() {
     }
     m_audio_fifo.clear();
     m_hw_video = false;
+    m_hw_upload = false;
     m_hw_device = AVB_HW_DEVICE_AUTO;
     m_hw_pix_fmt = AV_PIX_FMT_NONE;
     m_input_memory = AVB_VIDEO_MEMORY_CPU;
@@ -452,12 +466,12 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
         if (!m_venc) { set_error("avcodec_alloc_context3 (video) failed."); return AVB_ERROR_OPEN_FAILED; }
         m_venc->width     = m_width;
         m_venc->height    = m_height;
-        m_venc->pix_fmt   = m_hw_video ? m_hw_pix_fmt : AV_PIX_FMT_YUV420P;
+        m_venc->pix_fmt   = m_hw_upload ? m_hw_pix_fmt : AV_PIX_FMT_YUV420P;
         m_venc->time_base = AVRational{1, m_fps_den};
         m_venc->framerate = AVRational{m_fps_den, 1};
         if (options.video.bitrate > 0) m_venc->bit_rate = options.video.bitrate;
         if (global_header) m_venc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-        if (m_hw_video) {
+        if (m_hw_upload) {
             m_venc->hw_device_ctx = m_ff.av_buffer_ref(m_hw_device_ctx);
             if (m_hw_frames_ctx) m_venc->hw_frames_ctx = m_ff.av_buffer_ref(m_hw_frames_ctx);
         }
@@ -484,7 +498,7 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
         m_vframe->height = m_height;
         ret = m_ff.av_frame_get_buffer(m_vframe, 0);
         if (ret < 0) { set_ff_error("av_frame_get_buffer (video)", ret); return AVB_ERROR_OPEN_FAILED; }
-        if (m_hw_video) {
+        if (m_hw_upload) {
             m_hw_vframe = m_ff.av_frame_alloc();
             m_drm_import_frame = m_ff.av_frame_alloc();
             if (!m_hw_vframe || !m_drm_import_frame) {
@@ -816,7 +830,7 @@ avb_result AvbEncoderFFmpeg::write_video(const avb_video_frame &frame, double pt
     }
 
     AVFrame *enc_frame = nullptr;
-    avb_result prep = m_hw_video
+    avb_result prep = m_hw_upload
         ? prepare_hardware_video_frame(frame, pts_sec, &enc_frame)
         : prepare_software_video_frame(frame, pts_sec, &enc_frame);
     if (prep != AVB_OK) return prep;
