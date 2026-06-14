@@ -1,4 +1,5 @@
 #include "avb_decoder_impl.hpp"
+#include "avb_backend_internal.hpp"
 
 #include <cstring>
 #include <cstdio>
@@ -111,29 +112,7 @@ avb_result AvbDecoderImpl::open_io(const avb_io_callbacks &cb, void *user,
 }
 
 AvbDecoderImpl *avb_create_decoder_impl(avb_backend backend) {
-    avb_backend resolved = backend;
-
-    if (resolved == AVB_BACKEND_AUTO) {
-#if defined(_WIN32)
-        resolved = AVB_BACKEND_MEDIAFOUNDATION;
-#elif defined(__APPLE__)
-        resolved = AVB_BACKEND_AVFOUNDATION;
-#elif defined(__linux__)
-        // Linux default is GStreamer. If a build excludes the GStreamer backend
-        // but includes FFmpeg, fall back to FFmpeg so AUTO still resolves.
-#  if defined(AVB_ENABLE_GSTREAMER)
-        resolved = AVB_BACKEND_GSTREAMER;
-#  elif defined(AVB_ENABLE_FFMPEG)
-        resolved = AVB_BACKEND_FFMPEG;
-#  else
-        return nullptr;
-#  endif
-#else
-        return nullptr;
-#endif
-    }
-
-    switch (resolved) {
+    switch (avb::detail::resolve_backend(backend)) {
 #if defined(AVB_ENABLE_GSTREAMER)
         case AVB_BACKEND_GSTREAMER:
             return new AvbDecoderGStreamer();

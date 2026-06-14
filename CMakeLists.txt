@@ -40,6 +40,7 @@ set(AVB_SOURCES
     src/avb_error.cpp
     src/avb_decoder_impl.cpp
     src/avb_encoder.cpp
+    src/avb_encoder_impl.cpp
     src/avb_capabilities.cpp
     src/avb_validation.cpp
     src/avb_probe.cpp

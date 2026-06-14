@@ -1,4 +1,5 @@
 #include "avbridge.h"
+#include "avb_backend_internal.hpp"
 
 #include <cstring>
 
@@ -111,17 +112,11 @@ int avb_backend_is_available(avb_backend backend) {
             return 0;
 #endif
         case AVB_BACKEND_AUTO:
-            // Available if this platform has any default backend compiled in.
-#if defined(_WIN32)
-            return avb_backend_is_available(AVB_BACKEND_MEDIAFOUNDATION);
-#elif defined(__APPLE__)
-            return avb_backend_is_available(AVB_BACKEND_AVFOUNDATION);
-#elif defined(__linux__)
-            return avb_backend_is_available(AVB_BACKEND_GSTREAMER) ||
-                   avb_backend_is_available(AVB_BACKEND_FFMPEG);
-#else
-            return 0;
-#endif
+        {
+            avb_backend resolved = avb::detail::resolve_backend(backend);
+            return resolved != AVB_BACKEND_AUTO &&
+                   avb_backend_is_available(resolved);
+        }
         default:
             return 0;
     }

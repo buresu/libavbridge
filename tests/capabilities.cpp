@@ -124,6 +124,16 @@ void check_encoder(
 }  // namespace
 
 int main() {
+    avb_decoder_capabilities auto_caps{};
+    check(
+        avb_decoder_query_capabilities(
+            AVB_BACKEND_AUTO, nullptr, &auto_caps) == AVB_OK,
+        "AUTO backend capability query failed");
+    check(
+        avb_backend_is_available(AVB_BACKEND_AUTO) ==
+            (auto_caps.result == AVB_OK),
+        "AUTO backend availability and resolution disagree");
+
     check(
         avb_decoder_query_capabilities(
             AVB_BACKEND_AUTO, nullptr, nullptr) == AVB_ERROR_INVALID_ARGUMENT,
