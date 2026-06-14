@@ -46,6 +46,7 @@ if(AVB_ENABLE_MEDIAFOUNDATION)
         src/backends/mediafoundation/avb_capabilities_mediafoundation.cpp
         src/backends/mediafoundation/avb_runtime_mediafoundation.cpp
         src/backends/mediafoundation/avb_mediafoundation_common.cpp
+        src/backends/mediafoundation/avb_mediafoundation_decode_types.cpp
         src/backends/mediafoundation/avb_mediafoundation_encode_types.cpp
         src/backends/mediafoundation/avb_mediafoundation_ivf.cpp
         src/backends/mediafoundation/avb_decoder_mediafoundation.cpp

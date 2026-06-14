@@ -1,7 +1,7 @@
 #include "avb_decoder_mediafoundation.hpp"
 #include "avb_mediafoundation_common.hpp"
+#include "avb_mediafoundation_decode_types.hpp"
 #include "avb_mediafoundation_ivf.hpp"
-#include "avb_video_plugins.hpp"
 
 #ifdef _WIN32
 
@@ -188,182 +188,6 @@ AvbDecoderMediaFoundation::~AvbDecoderMediaFoundation() {
 const char *AvbDecoderMediaFoundation::get_backend_name() const { return "mediafoundation"; }
 const char *AvbDecoderMediaFoundation::get_last_error() const {
     return m_last_error.empty() ? nullptr : m_last_error.c_str();
-}
-
-static void find_stream_indices(IMFSourceReader *reader, int *audio_idx, int *video_idx,
-                                int *audio_count) {
-    *audio_idx = -1;
-    *video_idx = -1;
-    *audio_count = 0;
-    for (DWORD i = 0; ; ++i) {
-        ComPtr<IMFMediaType> type;
-        if (FAILED(reader->GetNativeMediaType(i, 0, &type))) break;
-
-        GUID major = GUID_NULL;
-        type->GetGUID(MF_MT_MAJOR_TYPE, &major);
-
-        if (IsEqualGUID(major, MFMediaType_Audio)) {
-            if (*audio_idx < 0) *audio_idx = (int)i;
-            ++*audio_count;
-        }
-        if (*video_idx < 0 && IsEqualGUID(major, MFMediaType_Video))
-            *video_idx = (int)i;
-    }
-}
-
-// Map a Media Foundation subtype GUID to the same codec name FFmpeg reports, so
-// avb_media_info::codec_name means the *source* codec consistently across
-// backends. We compare against the well-defined subtype constants and fall back
-// to the printable FourCC encoded in the GUID's Data1 field (which is how MF
-// derives most of these subtypes), so unknown/newer codecs still report sanely.
-static std::string mf_subtype_name(const GUID &sub) {
-    static const struct { const GUID *guid; const char *name; } kMap[] = {
-        { &MFVideoFormat_H264,      "h264"       },
-        { &MFVideoFormat_HEVC,      "hevc"       },
-        { &MFVideoFormat_MPEG2,     "mpeg2video" },
-        { &MFVideoFormat_MP4V,      "mpeg4"      },
-        { &MFVideoFormat_MJPG,      "mjpeg"      },
-        { &MFVideoFormat_WMV3,      "wmv3"       },
-        { &MFAudioFormat_AAC,       "aac"        },
-        { &MFAudioFormat_MP3,       "mp3"        },
-        { &MFAudioFormat_Dolby_AC3, "ac3"        },
-        { &MFAudioFormat_PCM,       "pcm"        },
-        { &MFAudioFormat_Float,     "pcm_f32"    },
-    };
-    for (const auto &e : kMap) {
-        if (IsEqualGUID(sub, *e.guid)) return e.name;
-    }
-    static const GUID h264_es = {
-        0x3f40f4f0, 0x5622, 0x4ff8,
-        { 0xb6, 0xd8, 0xa1, 0x7a, 0x58, 0x4b, 0xee, 0x5e }
-    };
-    if (IsEqualGUID(sub, h264_es)) return "h264";
-    static const GUID vorbis = {
-        0x8d2fd10b, 0x5841, 0x4a6b,
-        { 0x89, 0x05, 0x58, 0x8f, 0xec, 0x1a, 0xde, 0xd9 }
-    };
-    if (IsEqualGUID(sub, vorbis)) return "vorbis";
-
-    if (sub.Data2 == 0x0000 && sub.Data3 == 0x0010 &&
-        sub.Data4[0] == 0x80 && sub.Data4[1] == 0x00 &&
-        sub.Data4[2] == 0x00 && sub.Data4[3] == 0xaa &&
-        sub.Data4[4] == 0x00 && sub.Data4[5] == 0x38 &&
-        sub.Data4[6] == 0x9b && sub.Data4[7] == 0x71) {
-        if (sub.Data1 == 0x704f) return "opus";
-        if (sub.Data1 == 0xf1ac) return "flac";
-    }
-
-    // Printable FourCC fallback from the GUID's Data1 (little-endian FourCC).
-    DWORD fcc = sub.Data1;
-    char c[5] = {
-        (char)(fcc & 0xff),         (char)((fcc >> 8) & 0xff),
-        (char)((fcc >> 16) & 0xff), (char)((fcc >> 24) & 0xff), 0
-    };
-    if (std::strcmp(c, "H265") == 0 || std::strcmp(c, "HEVS") == 0) return "hevc";
-    if (std::strcmp(c, "VP80") == 0) return "vp8";
-    if (std::strcmp(c, "VP90") == 0) return "vp9";
-    if (std::strcmp(c, "AV01") == 0) return "av1";
-    for (int i = 0; i < 4; ++i) {
-        if (c[i] < 0x20 || c[i] > 0x7e) c[i] = '?';
-    }
-    return std::string(c);
-}
-
-// Source-codec name of a native stream, read before the output type is overridden.
-static std::string mf_native_codec_name(IMFSourceReader *reader, DWORD stream) {
-    std::string first;
-    for (DWORD i = 0; ; ++i) {
-        ComPtr<IMFMediaType> native;
-        if (FAILED(reader->GetNativeMediaType(stream, i, &native)) || !native) break;
-        GUID sub = GUID_NULL;
-        if (FAILED(native->GetGUID(MF_MT_SUBTYPE, &sub))) continue;
-        std::string name = mf_subtype_name(sub);
-        if (first.empty()) first = name;
-        if (name != "pcm" && name != "pcm_f32") return name;
-    }
-    return first;
-}
-
-static uint32_t mf_fourcc_from_subtype(const GUID &sub) {
-    return sub.Data1;
-}
-
-static bool mf_get_blob(IMFMediaType *type, REFGUID key,
-                        std::vector<unsigned char> &out) {
-    UINT32 size = 0;
-    if (!type || FAILED(type->GetBlobSize(key, &size)) || size == 0) return false;
-    out.resize(size);
-    UINT32 got = 0;
-    if (FAILED(type->GetBlob(key, out.data(), size, &got))) {
-        out.clear();
-        return false;
-    }
-    out.resize(got);
-    return true;
-}
-
-static avb_result mf_open_custom_video_decoder(
-    IMFSourceReader *reader,
-    DWORD stream_idx,
-    const avb_decode_options &options,
-    const avb_video_decoder_plugin **out_plugin,
-    void **out_ctx,
-    std::string &out_codec_name,
-    int *out_width,
-    int *out_height,
-    double *out_frame_rate
-) {
-    if (!options.enable_custom_video_decoders) return AVB_ERROR_STREAM_NOT_FOUND;
-
-    ComPtr<IMFMediaType> native;
-    if (FAILED(reader->GetNativeMediaType(stream_idx, 0, &native)) || !native)
-        return AVB_ERROR_STREAM_NOT_FOUND;
-
-    GUID sub = GUID_NULL;
-    native->GetGUID(MF_MT_SUBTYPE, &sub);
-
-    UINT32 w = 0, h = 0;
-    MFGetAttributeSize(native.Get(), MF_MT_FRAME_SIZE, &w, &h);
-    UINT32 fps_num = 0, fps_den = 1;
-    MFGetAttributeRatio(native.Get(), MF_MT_FRAME_RATE, &fps_num, &fps_den);
-
-    std::vector<unsigned char> extradata;
-    mf_get_blob(native.Get(), MF_MT_MPEG_SEQUENCE_HEADER, extradata);
-
-    avb_video_stream_info stream{};
-    stream.stream_index = (int)stream_idx;
-    stream.width = (int)w;
-    stream.height = (int)h;
-    stream.frame_rate = fps_den != 0 ? (double)fps_num / fps_den : 0.0;
-    stream.codec_tag = mf_fourcc_from_subtype(sub);
-    stream.extradata = extradata.empty() ? nullptr : extradata.data();
-    stream.extradata_size = (int)extradata.size();
-    stream.time_base_num = 1;
-    stream.time_base_den = 10000000;
-
-    out_codec_name = mf_subtype_name(sub);
-    stream.codec_name = out_codec_name.empty() ? nullptr : out_codec_name.c_str();
-
-    const avb_video_decoder_plugin *plugin =
-        avb_find_video_decoder_plugin(stream, options);
-    if (!plugin) return AVB_ERROR_STREAM_NOT_FOUND;
-
-    void *ctx = nullptr;
-    avb_result res = plugin->open(&ctx, &stream, &options);
-    if (res != AVB_OK) return res;
-
-    HRESULT hr = reader->SetCurrentMediaType(stream_idx, nullptr, native.Get());
-    if (FAILED(hr)) {
-        if (plugin->close && ctx) plugin->close(ctx);
-        return AVB_ERROR_OPEN_FAILED;
-    }
-
-    *out_plugin = plugin;
-    *out_ctx = ctx;
-    if (out_width) *out_width = (int)w;
-    if (out_height) *out_height = (int)h;
-    if (out_frame_rate) *out_frame_rate = stream.frame_rate;
-    return AVB_OK;
 }
 
 avb_result AvbDecoderMediaFoundation::open_ivf(
@@ -616,7 +440,8 @@ avb_result AvbDecoderMediaFoundation::open_file(const char *path, const avb_deco
     }
 
     int found_audio = -1, found_video = -1, audio_count = 0;
-    find_stream_indices(m_impl->reader.Get(), &found_audio, &found_video, &audio_count);
+    mf_decode_find_stream_indices(
+        m_impl->reader.Get(), &found_audio, &found_video, &audio_count);
     m_impl->audio_track_count = audio_count;
 
     if (!options.enable_audio) found_audio = -1;
@@ -628,7 +453,8 @@ avb_result AvbDecoderMediaFoundation::open_file(const char *path, const avb_deco
 
     if (found_audio >= 0) {
         std::string native_audio_codec =
-            mf_native_codec_name(m_impl->reader.Get(), (DWORD)found_audio);
+            mf_decode_native_codec_name(
+                m_impl->reader.Get(), (DWORD)found_audio);
 
         ComPtr<IMFMediaType> want;
         MFCreateMediaType(&want);
@@ -663,7 +489,7 @@ avb_result AvbDecoderMediaFoundation::open_file(const char *path, const avb_deco
     if (found_video >= 0) {
         avb_result custom_res = m_impl->source_native_output
             ? AVB_ERROR_STREAM_NOT_FOUND
-            : mf_open_custom_video_decoder(
+            : mf_decode_open_custom_video(
                 m_impl->reader.Get(), (DWORD)found_video, options,
                 &m_impl->custom_video_decoder, &m_impl->custom_video_ctx,
                 m_impl->video_codec_name, &m_impl->width, &m_impl->height,
@@ -678,7 +504,8 @@ avb_result AvbDecoderMediaFoundation::open_file(const char *path, const avb_deco
             return custom_res;
         } else {
         std::string native_video_codec =
-            mf_native_codec_name(m_impl->reader.Get(), (DWORD)found_video);
+            mf_decode_native_codec_name(
+                m_impl->reader.Get(), (DWORD)found_video);
 
         // Pick the output subtype the Video Processor MFT should convert to.
         // NV12 is emitted as two planes (Y + interleaved CbCr); ARGB32 is a
