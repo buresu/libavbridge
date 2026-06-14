@@ -239,6 +239,7 @@ avb_result avb_decoder_read_video_frame(avb_decoder *dec, avb_video_frame *out_f
 void avb_decoder_release_video_frame(avb_decoder *dec, avb_video_frame *frame) {
     if (!dec || !frame || !dec->impl) return;
     dec->impl->release_video_frame(*frame);
+    std::memset(frame, 0, sizeof(*frame));
 }
 
 const char *avb_decoder_get_last_error(avb_decoder *dec) {

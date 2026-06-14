@@ -16,11 +16,11 @@ struct DummyContext {
     int width = 0;
     int height = 0;
     std::vector<unsigned char> bc1;
-    int release_count = 0;
 };
 
 static int g_open_count = 0;
 static int g_decode_count = 0;
+static int g_release_count = 0;
 static int g_close_count = 0;
 
 static int can_decode(const avb_video_stream_info *stream,
@@ -66,9 +66,8 @@ static avb_result decode_packet(void *user, const avb_encoded_packet *packet,
     return AVB_OK;
 }
 
-static void release_frame(void *user, avb_video_frame *frame) {
-    if (user) static_cast<DummyContext *>(user)->release_count++;
-    if (frame) std::memset(frame, 0, sizeof(*frame));
+static void release_frame(void *, avb_video_frame *) {
+    ++g_release_count;
 }
 
 static void close_decoder(void *user) {
@@ -136,6 +135,9 @@ int main(int argc, char **argv) {
     check(frame.stride == ((frame.width + 3) / 4) * 8,
           "BC1 stride is one compressed block row", &failures);
     avb_decoder_release_video_frame(dec, &frame);
+    check(g_release_count == 1, "custom frame released once", &failures);
+    check(frame.data == nullptr && frame.width == 0 && frame.height == 0,
+          "released frame is cleared by the API", &failures);
     avb_decoder_close(dec);
 
     check(g_open_count == 1, "custom decoder opened once", &failures);

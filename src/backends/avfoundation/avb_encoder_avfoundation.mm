@@ -556,12 +556,14 @@ avb_result AvbEncoderAVFoundation::write_video(const avb_video_frame &frame, dou
         avb_result res = m_impl->custom_video_encoder->encode_frame(
             m_impl->custom_video_ctx, &frame, pts_sec, &packet);
         if (res != AVB_OK) return res;
+        AvbVideoEncoderPacketScope packet_scope(
+            m_impl->custom_video_encoder,
+            m_impl->custom_video_ctx,
+            packet);
         double fallback_pts = pts_sec >= 0.0 ? pts_sec
                            : frame.pts_sec >= 0.0 ? frame.pts_sec
                            : (double)m_impl->video_frame_index / m_impl->frame_rate;
         res = write_custom_video_packet(packet, fallback_pts);
-        if (m_impl->custom_video_encoder->release_packet)
-            m_impl->custom_video_encoder->release_packet(m_impl->custom_video_ctx, &packet);
         if (res == AVB_OK) m_impl->video_frame_index++;
         return res;
     }
@@ -663,12 +665,13 @@ avb_result AvbEncoderAVFoundation::finish() {
                     m_impl->custom_video_ctx, &packet);
                 if (r == AVB_ERROR_EOF || r == AVB_ERROR_AGAIN) break;
                 if (r != AVB_OK) return r;
+                AvbVideoEncoderPacketScope packet_scope(
+                    m_impl->custom_video_encoder,
+                    m_impl->custom_video_ctx,
+                    packet);
                 r = write_custom_video_packet(
                     packet,
                     (double)m_impl->video_frame_index / m_impl->frame_rate);
-                if (m_impl->custom_video_encoder->release_packet)
-                    m_impl->custom_video_encoder->release_packet(
-                        m_impl->custom_video_ctx, &packet);
                 if (r != AVB_OK) return r;
                 m_impl->video_frame_index++;
             }

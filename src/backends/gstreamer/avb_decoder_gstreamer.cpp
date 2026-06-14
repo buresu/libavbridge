@@ -1025,7 +1025,6 @@ void AvbDecoderGStreamer::release_video_frame(avb_video_frame &frame) {
     if (m_custom_pipeline) {
         if (m_custom_video_decoder && m_custom_video_decoder->release_frame)
             m_custom_video_decoder->release_frame(m_custom_video_ctx, &frame);
-        memset(&frame, 0, sizeof(frame));
         return;
     }
     if ((frame.memory_type == AVB_VIDEO_MEMORY_BACKEND_NATIVE ||
@@ -1035,7 +1034,4 @@ void AvbDecoderGStreamer::release_video_frame(avb_video_frame &frame) {
         m_gst.gst_mini_object_unref((GstMiniObject *)m_native_video_sample);
         m_native_video_sample = nullptr;
     }
-    // Output buffer is backend-owned and reused on the next read; just zero the
-    // caller's struct so stale pointers can't be used by accident.
-    memset(&frame, 0, sizeof(frame));
 }

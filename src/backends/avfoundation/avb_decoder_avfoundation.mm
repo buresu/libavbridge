@@ -746,7 +746,6 @@ void AvbDecoderAVFoundation::release_video_frame(avb_video_frame &frame) {
         frame.native_owner == this && frame.native_handle) {
         CVPixelBufferRelease((CVPixelBufferRef)frame.native_handle);
     }
-    memset(&frame, 0, sizeof(frame));
 }
 
 #else // !__APPLE__

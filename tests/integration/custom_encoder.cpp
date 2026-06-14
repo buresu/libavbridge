@@ -21,6 +21,7 @@ struct DummyEnc {
 
 static int g_open_count = 0;
 static int g_encode_count = 0;
+static int g_release_count = 0;
 static int g_close_count = 0;
 
 static uint32_t fourcc_le(const char *s) {
@@ -88,6 +89,11 @@ static avb_result flush_encoder(void *, avb_encoded_packet *) {
     return AVB_ERROR_EOF;
 }
 
+static void release_packet(void *, avb_encoded_packet *packet) {
+    if (packet) *packet = {};
+    ++g_release_count;
+}
+
 static void close_encoder(void *user) {
     delete static_cast<DummyEnc *>(user);
     ++g_close_count;
@@ -121,6 +127,7 @@ int main(int argc, char **argv) {
     plugin.open = open_encoder;
     plugin.encode_frame = encode_frame;
     plugin.flush = flush_encoder;
+    plugin.release_packet = release_packet;
     plugin.close = close_encoder;
 
     int failures = 0;
@@ -184,6 +191,8 @@ int main(int argc, char **argv) {
 
     check(g_open_count == 1, "custom encoder opened once", &failures);
     check(g_encode_count == 1, "custom encoder received frame", &failures);
+    check(g_release_count == g_encode_count,
+          "custom encoder packets released once", &failures);
     check(g_close_count == 1, "custom encoder closed once", &failures);
     check(avb_unregister_video_encoder(&plugin) == AVB_OK,
           "unregister custom encoder", &failures);

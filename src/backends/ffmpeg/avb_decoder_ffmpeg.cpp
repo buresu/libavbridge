@@ -1057,7 +1057,6 @@ void AvbDecoderFFmpeg::release_video_frame(avb_video_frame &frame) {
     if (m_custom_video_decoder) {
         if (m_custom_video_decoder->release_frame)
             m_custom_video_decoder->release_frame(m_custom_video_ctx, &frame);
-        memset(&frame, 0, sizeof(frame));
         return;
     }
     if (frame.memory_type == AVB_VIDEO_MEMORY_BACKEND_NATIVE &&
@@ -1069,7 +1068,4 @@ void AvbDecoderFFmpeg::release_video_frame(avb_video_frame &frame) {
         frame.native_owner == this && m_drm_video_frame) {
         m_ff.av_frame_unref(m_drm_video_frame);
     }
-    // Output buffer is owned by the backend and reused on the next read_video_frame call.
-    // Just zero the caller's frame struct so they can't accidentally use stale pointers.
-    memset(&frame, 0, sizeof(frame));
 }

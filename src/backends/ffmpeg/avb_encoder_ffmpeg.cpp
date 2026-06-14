@@ -808,9 +808,9 @@ avb_result AvbEncoderFFmpeg::write_video(const avb_video_frame &frame, double pt
         avb_result res = m_custom_video_encoder->encode_frame(
             m_custom_video_ctx, &frame, pts_sec, &packet);
         if (res != AVB_OK) return res;
+        AvbVideoEncoderPacketScope packet_scope(
+            m_custom_video_encoder, m_custom_video_ctx, packet);
         res = write_custom_video_packet(packet);
-        if (m_custom_video_encoder->release_packet)
-            m_custom_video_encoder->release_packet(m_custom_video_ctx, &packet);
         if (res == AVB_OK) m_video_index++;
         return res;
     }
@@ -917,9 +917,9 @@ avb_result AvbEncoderFFmpeg::finish() {
                 avb_result r = m_custom_video_encoder->flush(m_custom_video_ctx, &packet);
                 if (r == AVB_ERROR_EOF || r == AVB_ERROR_AGAIN) break;
                 if (r != AVB_OK) return r;
+                AvbVideoEncoderPacketScope packet_scope(
+                    m_custom_video_encoder, m_custom_video_ctx, packet);
                 r = write_custom_video_packet(packet);
-                if (m_custom_video_encoder->release_packet)
-                    m_custom_video_encoder->release_packet(m_custom_video_ctx, &packet);
                 if (r != AVB_OK) return r;
             }
         } else {

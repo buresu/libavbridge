@@ -1120,17 +1120,14 @@ void AvbDecoderMediaFoundation::release_video_frame(avb_video_frame &frame) {
         auto lease = m_impl->native_frame_leases.find(frame.native_owner);
         if (lease != m_impl->native_frame_leases.end()) {
             m_impl->native_frame_leases.erase(lease);
-            memset(&frame, 0, sizeof(frame));
             return;
         }
     }
     if (m_impl && m_impl->custom_video_decoder) {
         if (m_impl->custom_video_decoder->release_frame)
             m_impl->custom_video_decoder->release_frame(m_impl->custom_video_ctx, &frame);
-        memset(&frame, 0, sizeof(frame));
         return;
     }
-    memset(&frame, 0, sizeof(frame));
 }
 
 #else // !_WIN32
