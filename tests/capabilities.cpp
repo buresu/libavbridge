@@ -25,13 +25,17 @@ bool values_are_unique(const T (&values)[N], int count) {
 }
 
 void check_decoder(
+    avb_result (*query)(
+        avb_backend,
+        const char *,
+        avb_decoder_capabilities *),
     avb_backend backend,
     const char *path,
     const char *expected_container) {
     avb_decoder_capabilities caps{};
     check(
-        avb_decoder_probe_runtime_capabilities(backend, path, &caps) == AVB_OK,
-        "decoder probe call failed");
+        query(backend, path, &caps) == AVB_OK,
+        "decoder capability query failed");
     check(caps.container_name != nullptr, "decoder container name is null");
     check(
         caps.container_name &&
@@ -42,7 +46,7 @@ void check_decoder(
     if (caps.result != AVB_OK) {
         check(
             caps.result == AVB_ERROR_BACKEND_NOT_AVAILABLE,
-            "decoder probe returned an unexpected capability result");
+            "decoder query returned an unexpected capability result");
         return;
     }
 
@@ -71,13 +75,17 @@ void check_decoder(
 }
 
 void check_encoder(
+    avb_result (*query)(
+        avb_backend,
+        const char *,
+        avb_encoder_capabilities *),
     avb_backend backend,
     const char *path,
     const char *expected_container) {
     avb_encoder_capabilities caps{};
     check(
-        avb_encoder_probe_runtime_capabilities(backend, path, &caps) == AVB_OK,
-        "encoder probe call failed");
+        query(backend, path, &caps) == AVB_OK,
+        "encoder capability query failed");
     check(caps.container_name != nullptr, "encoder container name is null");
     check(
         caps.container_name &&
@@ -88,7 +96,7 @@ void check_encoder(
     if (caps.result != AVB_OK) {
         check(
             caps.result == AVB_ERROR_BACKEND_NOT_AVAILABLE,
-            "encoder probe returned an unexpected capability result");
+            "encoder query returned an unexpected capability result");
         return;
     }
 
@@ -117,13 +125,21 @@ void check_encoder(
 
 int main() {
     check(
+        avb_decoder_query_capabilities(
+            AVB_BACKEND_AUTO, nullptr, nullptr) == AVB_ERROR_INVALID_ARGUMENT,
+        "decoder static query accepted a null output");
+    check(
         avb_decoder_probe_runtime_capabilities(
             AVB_BACKEND_AUTO, nullptr, nullptr) == AVB_ERROR_INVALID_ARGUMENT,
-        "decoder probe accepted a null output");
+        "decoder runtime query accepted a null output");
+    check(
+        avb_encoder_query_capabilities(
+            AVB_BACKEND_AUTO, nullptr, nullptr) == AVB_ERROR_INVALID_ARGUMENT,
+        "encoder static query accepted a null output");
     check(
         avb_encoder_probe_runtime_capabilities(
             AVB_BACKEND_AUTO, nullptr, nullptr) == AVB_ERROR_INVALID_ARGUMENT,
-        "encoder probe accepted a null output");
+        "encoder runtime query accepted a null output");
 
     const avb_backend backends[] = {
         AVB_BACKEND_AUTO,
@@ -133,16 +149,46 @@ int main() {
         AVB_BACKEND_AVFOUNDATION,
     };
     for (avb_backend backend : backends) {
-        check_decoder(backend, nullptr, "any");
-        check_decoder(backend, "sample.WEBM", "webm");
-        check_encoder(backend, "output.m4a", "m4a");
-        check_encoder(backend, "output.unknown", "any");
+        check_decoder(
+            avb_decoder_query_capabilities, backend, nullptr, "any");
+        check_decoder(
+            avb_decoder_query_capabilities,
+            backend,
+            "sample.WEBM",
+            "webm");
+        check_decoder(
+            avb_decoder_probe_runtime_capabilities,
+            backend,
+            nullptr,
+            "any");
+        check_decoder(
+            avb_decoder_probe_runtime_capabilities,
+            backend,
+            "sample.WEBM",
+            "webm");
+        check_encoder(
+            avb_encoder_query_capabilities, backend, "output.m4a", "m4a");
+        check_encoder(
+            avb_encoder_query_capabilities,
+            backend,
+            "output.unknown",
+            "any");
+        check_encoder(
+            avb_encoder_probe_runtime_capabilities,
+            backend,
+            "output.m4a",
+            "m4a");
+        check_encoder(
+            avb_encoder_probe_runtime_capabilities,
+            backend,
+            "output.unknown",
+            "any");
     }
 
     if (failures != 0) {
-        std::fprintf(stderr, "%d runtime capability checks failed\n", failures);
+        std::fprintf(stderr, "%d capability API checks failed\n", failures);
         return 1;
     }
-    std::printf("runtime capability API checks passed\n");
+    std::printf("capability API checks passed\n");
     return 0;
 }

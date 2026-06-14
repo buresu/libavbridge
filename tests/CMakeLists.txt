@@ -62,12 +62,12 @@ if(AVB_BUILD_SHARED)
     target_compile_definitions(avb_native_roundtrip PRIVATE AVB_USING_SHARED)
 endif()
 
-add_executable(avb_runtime_capabilities runtime_capabilities.cpp)
-target_link_libraries(avb_runtime_capabilities PRIVATE avbridge)
+add_executable(avb_capabilities_api capabilities.cpp)
+target_link_libraries(avb_capabilities_api PRIVATE avbridge)
 if(AVB_BUILD_SHARED)
-    target_compile_definitions(avb_runtime_capabilities PRIVATE AVB_USING_SHARED)
+    target_compile_definitions(avb_capabilities_api PRIVATE AVB_USING_SHARED)
 endif()
-add_test(NAME runtime_capabilities COMMAND avb_runtime_capabilities)
+add_test(NAME capabilities_api COMMAND avb_capabilities_api)
 
 find_program(FFMPEG_EXECUTABLE ffmpeg)
 

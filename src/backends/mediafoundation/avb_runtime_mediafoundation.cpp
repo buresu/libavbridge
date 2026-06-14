@@ -13,12 +13,12 @@
 using Microsoft::WRL::ComPtr;
 using avb::detail::Container;
 using avb::detail::audio_only_container;
-using avb::runtime::add_audio_codec;
-using avb::runtime::add_audio_codec_unchecked;
-using avb::runtime::add_device;
-using avb::runtime::add_memory;
-using avb::runtime::add_software_pixel_formats;
-using avb::runtime::add_video_codec;
+using avb::capability::add_audio_codec;
+using avb::capability::add_audio_codec_unchecked;
+using avb::capability::add_device;
+using avb::capability::add_memory;
+using avb::capability::add_software_pixel_formats;
+using avb::capability::add_video_codec;
 
 namespace {
 

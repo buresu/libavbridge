@@ -2,7 +2,7 @@
 
 #include "avb_capability_common.hpp"
 
-namespace avb::runtime {
+namespace avb::capability {
 
 template <typename Capabilities>
 void add_video_codec(
@@ -75,4 +75,4 @@ void add_device(Capabilities &out, avb_hardware_device device) {
         out.hardware_devices, out.hardware_device_count, device);
 }
 
-}  // namespace avb::runtime
+}  // namespace avb::capability
