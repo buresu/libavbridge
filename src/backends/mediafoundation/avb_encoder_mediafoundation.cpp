@@ -24,7 +24,6 @@
 #include <windows.h>
 
 #include <algorithm>
-#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -1240,24 +1239,13 @@ avb_result AvbEncoderMediaFoundation::write_video(const avb_video_frame &frame, 
 avb_result AvbEncoderMediaFoundation::write_audio_f32(const float *src_interleaved, int frames) {
     if (!m_impl->has_audio) return AVB_ERROR_INVALID_ARGUMENT;
 
-    const int    nch    = m_impl->channels;
-    const size_t count  = (size_t)frames * nch;
-    const bool float_pcm = m_impl->audio_codec == AVB_AUDIO_CODEC_PCM_F32;
-    const DWORD nbytes = (DWORD)(count *
-        (float_pcm ? sizeof(float) : sizeof(int16_t)));
-
-    const void *audio_data = src_interleaved;
-    if (!float_pcm) {
-        // AAC, MP3, FLAC, and PCM_S16 consume interleaved 16-bit PCM.
-        m_impl->audio_stage.resize(count);
-        int16_t *out = m_impl->audio_stage.data();
-        for (size_t i = 0; i < count; ++i) {
-            float s = src_interleaved[i];
-            s = std::max(-1.0f, std::min(1.0f, s));
-            out[i] = (int16_t)std::lround(s * 32767.0f);
-        }
-        audio_data = out;
-    }
+    const MfEncodeAudioData audio = mf_encode_pack_audio_f32(
+        src_interleaved,
+        frames,
+        m_impl->channels,
+        m_impl->audio_codec == AVB_AUDIO_CODEC_PCM_F32,
+        m_impl->audio_stage);
+    const DWORD nbytes = static_cast<DWORD>(audio.size);
 
     ComPtr<IMFMediaBuffer> buf;
     HRESULT hr = MFCreateMemoryBuffer(nbytes, &buf);
@@ -1267,7 +1255,7 @@ avb_result AvbEncoderMediaFoundation::write_audio_f32(const float *src_interleav
     if (FAILED(buf->Lock(&data, nullptr, nullptr))) {
         m_last_error = "Lock (audio buffer) failed."; return AVB_ERROR_ENCODE_FAILED;
     }
-    memcpy(data, audio_data, nbytes);
+    memcpy(data, audio.data, nbytes);
     buf->Unlock();
 
     LONGLONG time_hns = mf_encode_seconds_to_hns(

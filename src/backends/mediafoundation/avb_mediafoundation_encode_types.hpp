@@ -59,6 +59,18 @@ HRESULT mf_encode_write_buffer(
     long long time_hns,
     long long duration_hns);
 
+struct MfEncodeAudioData {
+    const void *data;
+    std::size_t size;
+};
+
+MfEncodeAudioData mf_encode_pack_audio_f32(
+    const float *samples,
+    int frames,
+    int channels,
+    bool keep_float,
+    std::vector<std::int16_t> &output);
+
 std::size_t mf_encode_pack_video_frame(
     const avb_video_frame &frame,
     int width,

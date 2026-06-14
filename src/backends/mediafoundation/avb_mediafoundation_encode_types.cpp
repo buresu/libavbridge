@@ -263,6 +263,26 @@ HRESULT mf_encode_write_buffer(
     return writer->WriteSample(stream, sample.Get());
 }
 
+MfEncodeAudioData mf_encode_pack_audio_f32(
+    const float *samples,
+    int frames,
+    int channels,
+    bool keep_float,
+    std::vector<std::int16_t> &output) {
+    const std::size_t count =
+        static_cast<std::size_t>(frames) * channels;
+    if (keep_float)
+        return {samples, count * sizeof(float)};
+
+    output.resize(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        float sample = std::clamp(samples[i], -1.0f, 1.0f);
+        output[i] =
+            static_cast<std::int16_t>(std::lround(sample * 32767.0f));
+    }
+    return {output.data(), output.size() * sizeof(output[0])};
+}
+
 std::size_t mf_encode_pack_video_frame(
     const avb_video_frame &frame,
     int width,
