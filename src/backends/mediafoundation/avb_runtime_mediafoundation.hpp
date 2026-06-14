@@ -2,6 +2,8 @@
 
 #include "avb_capability_common.hpp"
 
+// Runtime transform discovery owned by the Media Foundation backend.
+
 #if defined(AVB_ENABLE_MEDIAFOUNDATION)
 
 bool avb_probe_mediafoundation_decoder(

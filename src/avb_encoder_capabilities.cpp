@@ -1,33 +1,21 @@
 #include "avbridge.h"
+#include "avb_capability_builder.hpp"
 #include "avb_capability_common.hpp"
 
 namespace {
 
 using avb::detail::Container;
-using avb::detail::add_unique;
 using avb::detail::audio_only_container;
-using avb::detail::container_accepts_audio;
-using avb::detail::container_accepts_video;
 using avb::detail::container_from_path;
 using avb::detail::container_name;
 using avb::detail::resolve_backend;
-
-static void add_video_codec(avb_encoder_capabilities &out, avb_video_codec codec,
-                            Container container) {
-    if (!container_accepts_video(container, codec)) return;
-    add_unique(out.video_codecs, out.video_codec_count, codec);
-}
-
-static void add_audio_codec(avb_encoder_capabilities &out, avb_audio_codec codec,
-                            Container container) {
-    if (!container_accepts_audio(container, codec)) return;
-    add_unique(out.audio_codecs, out.audio_codec_count, codec);
-}
-
-static void add_audio_codec_unchecked(avb_encoder_capabilities &out,
-                                      avb_audio_codec codec) {
-    add_unique(out.audio_codecs, out.audio_codec_count, codec);
-}
+using avb::runtime::add_audio_codec;
+using avb::runtime::add_audio_codec_unchecked;
+using avb::runtime::add_common_audio_codecs;
+using avb::runtime::add_common_video_codecs;
+using avb::runtime::add_device;
+using avb::runtime::add_memory;
+using avb::runtime::add_video_codec;
 
 static bool mediafoundation_video_container(Container c) {
     return c == Container::any || c == Container::mp4 ||
@@ -35,35 +23,9 @@ static bool mediafoundation_video_container(Container c) {
            c == Container::unknown;
 }
 
-static void add_memory(avb_encoder_capabilities &out, avb_video_memory_type memory) {
-    add_unique(out.video_memory, out.video_memory_count, memory);
-}
-
-static void add_device(avb_encoder_capabilities &out, avb_hardware_device device) {
-    add_unique(out.hardware_devices, out.hardware_device_count, device);
-}
-
-static void add_common_software_video(avb_encoder_capabilities &out, Container c) {
-    add_video_codec(out, AVB_VIDEO_CODEC_H264, c);
-    add_video_codec(out, AVB_VIDEO_CODEC_HEVC, c);
-    add_video_codec(out, AVB_VIDEO_CODEC_VP8, c);
-    add_video_codec(out, AVB_VIDEO_CODEC_VP9, c);
-    add_video_codec(out, AVB_VIDEO_CODEC_AV1, c);
-}
-
-static void add_common_audio(avb_encoder_capabilities &out, Container c) {
-    add_audio_codec(out, AVB_AUDIO_CODEC_AAC, c);
-    add_audio_codec(out, AVB_AUDIO_CODEC_OPUS, c);
-    add_audio_codec(out, AVB_AUDIO_CODEC_MP3, c);
-    add_audio_codec(out, AVB_AUDIO_CODEC_FLAC, c);
-    add_audio_codec(out, AVB_AUDIO_CODEC_VORBIS, c);
-    add_audio_codec(out, AVB_AUDIO_CODEC_PCM_S16, c);
-    add_audio_codec(out, AVB_AUDIO_CODEC_PCM_F32, c);
-}
-
 static void fill_ffmpeg(avb_encoder_capabilities &out, Container c) {
-    if (!audio_only_container(c)) add_common_software_video(out, c);
-    add_common_audio(out, c);
+    if (!audio_only_container(c)) add_common_video_codecs(out, c);
+    add_common_audio_codecs(out, c);
 
     add_memory(out, AVB_VIDEO_MEMORY_CPU);
     add_memory(out, AVB_VIDEO_MEMORY_NATIVE);
@@ -81,8 +43,8 @@ static void fill_ffmpeg(avb_encoder_capabilities &out, Container c) {
 }
 
 static void fill_gstreamer(avb_encoder_capabilities &out, Container c) {
-    if (!audio_only_container(c)) add_common_software_video(out, c);
-    add_common_audio(out, c);
+    if (!audio_only_container(c)) add_common_video_codecs(out, c);
+    add_common_audio_codecs(out, c);
 
     add_memory(out, AVB_VIDEO_MEMORY_CPU);
     add_memory(out, AVB_VIDEO_MEMORY_NATIVE);

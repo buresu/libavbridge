@@ -2,6 +2,8 @@
 
 #include "avb_capability_common.hpp"
 
+// Runtime element and allocator discovery owned by the GStreamer backend.
+
 #if defined(AVB_ENABLE_GSTREAMER)
 
 bool avb_probe_gstreamer_decoder(

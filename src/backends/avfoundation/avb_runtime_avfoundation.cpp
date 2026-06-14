@@ -1,5 +1,5 @@
-#include "avb_runtime_avfoundation.hpp"
-#include "avb_runtime_capability_builder.hpp"
+#include "backends/avfoundation/avb_runtime_avfoundation.hpp"
+#include "avb_capability_builder.hpp"
 
 #if defined(AVB_ENABLE_AVFOUNDATION)
 
@@ -87,7 +87,7 @@ bool can_decode(avb_video_codec codec) {
 
 }  // namespace
 
-void avb_probe_avfoundation_decoder(
+bool avb_probe_avfoundation_decoder(
     avb_decoder_capabilities &out,
     Container container) {
     static const avb_video_codec video_codecs[] = {
@@ -118,9 +118,10 @@ void avb_probe_avfoundation_decoder(
         add_memory(out, AVB_VIDEO_MEMORY_NATIVE);
     add_device(out, AVB_HW_DEVICE_AUTO);
     add_device(out, AVB_HW_DEVICE_VIDEOTOOLBOX);
+    return true;
 }
 
-void avb_probe_avfoundation_encoder(
+bool avb_probe_avfoundation_encoder(
     avb_encoder_capabilities &out,
     Container container) {
     static const avb_video_codec video_codecs[] = {
@@ -141,6 +142,7 @@ void avb_probe_avfoundation_encoder(
         add_memory(out, AVB_VIDEO_MEMORY_NATIVE);
     add_device(out, AVB_HW_DEVICE_AUTO);
     add_device(out, AVB_HW_DEVICE_VIDEOTOOLBOX);
+    return true;
 }
 
 #endif

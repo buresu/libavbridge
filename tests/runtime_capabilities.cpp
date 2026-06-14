@@ -1,0 +1,148 @@
+#include "avbridge.h"
+
+#include <cstdio>
+#include <cstring>
+
+namespace {
+
+int failures = 0;
+
+void check(bool condition, const char *message) {
+    if (condition) return;
+    std::fprintf(stderr, "FAIL: %s\n", message);
+    ++failures;
+}
+
+template <typename T, size_t N>
+bool values_are_unique(const T (&values)[N], int count) {
+    if (count < 0 || count > static_cast<int>(N)) return false;
+    for (int i = 0; i < count; ++i) {
+        for (int j = i + 1; j < count; ++j) {
+            if (values[i] == values[j]) return false;
+        }
+    }
+    return true;
+}
+
+void check_decoder(
+    avb_backend backend,
+    const char *path,
+    const char *expected_container) {
+    avb_decoder_capabilities caps{};
+    check(
+        avb_decoder_probe_runtime_capabilities(backend, path, &caps) == AVB_OK,
+        "decoder probe call failed");
+    check(caps.container_name != nullptr, "decoder container name is null");
+    check(
+        caps.container_name &&
+            std::strcmp(caps.container_name, expected_container) == 0,
+        "decoder container inference mismatch");
+    check(caps.message != nullptr, "decoder message is null");
+
+    if (caps.result != AVB_OK) {
+        check(
+            caps.result == AVB_ERROR_BACKEND_NOT_AVAILABLE,
+            "decoder probe returned an unexpected capability result");
+        return;
+    }
+
+    check(caps.backend_name != nullptr, "decoder backend name is null");
+    check(
+        caps.can_decode_video == (caps.video_codec_count > 0),
+        "decoder video flag and codec count disagree");
+    check(
+        caps.can_decode_audio == (caps.audio_codec_count > 0),
+        "decoder audio flag and codec count disagree");
+    check(
+        values_are_unique(caps.video_codecs, caps.video_codec_count),
+        "decoder video codecs contain duplicates or invalid count");
+    check(
+        values_are_unique(caps.audio_codecs, caps.audio_codec_count),
+        "decoder audio codecs contain duplicates or invalid count");
+    check(
+        values_are_unique(caps.pixel_formats, caps.pixel_format_count),
+        "decoder pixel formats contain duplicates or invalid count");
+    check(
+        values_are_unique(caps.video_memory, caps.video_memory_count),
+        "decoder memory types contain duplicates or invalid count");
+    check(
+        values_are_unique(caps.hardware_devices, caps.hardware_device_count),
+        "decoder hardware devices contain duplicates or invalid count");
+}
+
+void check_encoder(
+    avb_backend backend,
+    const char *path,
+    const char *expected_container) {
+    avb_encoder_capabilities caps{};
+    check(
+        avb_encoder_probe_runtime_capabilities(backend, path, &caps) == AVB_OK,
+        "encoder probe call failed");
+    check(caps.container_name != nullptr, "encoder container name is null");
+    check(
+        caps.container_name &&
+            std::strcmp(caps.container_name, expected_container) == 0,
+        "encoder container inference mismatch");
+    check(caps.message != nullptr, "encoder message is null");
+
+    if (caps.result != AVB_OK) {
+        check(
+            caps.result == AVB_ERROR_BACKEND_NOT_AVAILABLE,
+            "encoder probe returned an unexpected capability result");
+        return;
+    }
+
+    check(caps.backend_name != nullptr, "encoder backend name is null");
+    check(
+        caps.can_encode_video == (caps.video_codec_count > 0),
+        "encoder video flag and codec count disagree");
+    check(
+        caps.can_encode_audio == (caps.audio_codec_count > 0),
+        "encoder audio flag and codec count disagree");
+    check(
+        values_are_unique(caps.video_codecs, caps.video_codec_count),
+        "encoder video codecs contain duplicates or invalid count");
+    check(
+        values_are_unique(caps.audio_codecs, caps.audio_codec_count),
+        "encoder audio codecs contain duplicates or invalid count");
+    check(
+        values_are_unique(caps.video_memory, caps.video_memory_count),
+        "encoder memory types contain duplicates or invalid count");
+    check(
+        values_are_unique(caps.hardware_devices, caps.hardware_device_count),
+        "encoder hardware devices contain duplicates or invalid count");
+}
+
+}  // namespace
+
+int main() {
+    check(
+        avb_decoder_probe_runtime_capabilities(
+            AVB_BACKEND_AUTO, nullptr, nullptr) == AVB_ERROR_INVALID_ARGUMENT,
+        "decoder probe accepted a null output");
+    check(
+        avb_encoder_probe_runtime_capabilities(
+            AVB_BACKEND_AUTO, nullptr, nullptr) == AVB_ERROR_INVALID_ARGUMENT,
+        "encoder probe accepted a null output");
+
+    const avb_backend backends[] = {
+        AVB_BACKEND_AUTO,
+        AVB_BACKEND_FFMPEG,
+        AVB_BACKEND_GSTREAMER,
+        AVB_BACKEND_MEDIAFOUNDATION,
+        AVB_BACKEND_AVFOUNDATION,
+    };
+    for (avb_backend backend : backends) {
+        check_decoder(backend, nullptr, "any");
+        check_decoder(backend, "sample.WEBM", "webm");
+        check_encoder(backend, "output.m4a", "m4a");
+        check_encoder(backend, "output.unknown", "any");
+    }
+
+    if (failures != 0) {
+        std::fprintf(stderr, "%d runtime capability checks failed\n", failures);
+        return 1;
+    }
+    std::printf("runtime capability API checks passed\n");
+    return 0;
+}

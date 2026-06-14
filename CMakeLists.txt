@@ -46,13 +46,12 @@ set(AVB_SOURCES
     src/avb_encoder_validation.cpp
     src/avb_probe.cpp
     src/avb_runtime_capabilities.cpp
-    src/runtime/avb_runtime_capabilities_impl.cpp
     src/avb_video_codec_registry.cpp
 )
 
 if(AVB_ENABLE_MEDIAFOUNDATION)
     list(APPEND AVB_SOURCES
-        src/runtime/avb_runtime_mediafoundation.cpp
+        src/backends/mediafoundation/avb_runtime_mediafoundation.cpp
         src/backends/mediafoundation/avb_mediafoundation_common.cpp
         src/backends/mediafoundation/avb_mediafoundation_ivf.cpp
         src/backends/mediafoundation/avb_decoder_mediafoundation.cpp
@@ -62,7 +61,7 @@ endif()
 
 if(AVB_ENABLE_AVFOUNDATION)
     list(APPEND AVB_SOURCES
-        src/runtime/avb_runtime_avfoundation.cpp
+        src/backends/avfoundation/avb_runtime_avfoundation.cpp
         src/backends/avfoundation/avb_decoder_avfoundation.mm
         src/backends/avfoundation/avb_encoder_avfoundation.mm
     )
@@ -77,7 +76,7 @@ endif()
 
 if(AVB_ENABLE_FFMPEG)
     list(APPEND AVB_SOURCES
-        src/runtime/avb_runtime_ffmpeg.cpp
+        src/backends/ffmpeg/avb_runtime_ffmpeg.cpp
         src/backends/ffmpeg/avb_decoder_ffmpeg.cpp
         src/backends/ffmpeg/avb_encoder_ffmpeg.cpp
         src/backends/ffmpeg/avb_ffmpeg_loader.cpp
@@ -86,7 +85,7 @@ endif()
 
 if(AVB_ENABLE_GSTREAMER)
     list(APPEND AVB_SOURCES
-        src/runtime/avb_runtime_gstreamer.cpp
+        src/backends/gstreamer/avb_runtime_gstreamer.cpp
         src/backends/gstreamer/avb_decoder_gstreamer.cpp
         src/backends/gstreamer/avb_encoder_gstreamer.cpp
         src/backends/gstreamer/avb_gstreamer_loader.cpp

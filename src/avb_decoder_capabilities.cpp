@@ -1,67 +1,21 @@
 #include "avbridge.h"
+#include "avb_capability_builder.hpp"
 #include "avb_capability_common.hpp"
 
 namespace {
 
 using avb::detail::Container;
-using avb::detail::add_unique;
 using avb::detail::audio_only_container;
-using avb::detail::container_accepts_audio;
-using avb::detail::container_accepts_video;
 using avb::detail::container_from_path;
 using avb::detail::container_name;
 using avb::detail::resolve_backend;
-
-static void add_video_codec(avb_decoder_capabilities &out, avb_video_codec codec,
-                            Container container) {
-    if (!container_accepts_video(container, codec)) return;
-    add_unique(out.video_codecs, out.video_codec_count, codec);
-}
-
-static void add_audio_codec(avb_decoder_capabilities &out, avb_audio_codec codec,
-                            Container container) {
-    if (!container_accepts_audio(container, codec)) return;
-    add_unique(out.audio_codecs, out.audio_codec_count, codec);
-}
-
-static void add_pixel_format(avb_decoder_capabilities &out,
-                             avb_pixel_format format) {
-    add_unique(out.pixel_formats, out.pixel_format_count, format);
-}
-
-static void add_memory(avb_decoder_capabilities &out,
-                       avb_video_memory_type memory) {
-    add_unique(out.video_memory, out.video_memory_count, memory);
-}
-
-static void add_device(avb_decoder_capabilities &out, avb_hardware_device device) {
-    add_unique(out.hardware_devices, out.hardware_device_count, device);
-}
-
-static void add_common_video_codecs(avb_decoder_capabilities &out, Container c) {
-    add_video_codec(out, AVB_VIDEO_CODEC_H264, c);
-    add_video_codec(out, AVB_VIDEO_CODEC_HEVC, c);
-    add_video_codec(out, AVB_VIDEO_CODEC_VP8, c);
-    add_video_codec(out, AVB_VIDEO_CODEC_VP9, c);
-    add_video_codec(out, AVB_VIDEO_CODEC_AV1, c);
-}
-
-static void add_common_audio_codecs(avb_decoder_capabilities &out, Container c) {
-    add_audio_codec(out, AVB_AUDIO_CODEC_AAC, c);
-    add_audio_codec(out, AVB_AUDIO_CODEC_OPUS, c);
-    add_audio_codec(out, AVB_AUDIO_CODEC_MP3, c);
-    add_audio_codec(out, AVB_AUDIO_CODEC_FLAC, c);
-    add_audio_codec(out, AVB_AUDIO_CODEC_VORBIS, c);
-    add_audio_codec(out, AVB_AUDIO_CODEC_PCM_S16, c);
-    add_audio_codec(out, AVB_AUDIO_CODEC_PCM_F32, c);
-}
-
-static void add_software_pixel_formats(avb_decoder_capabilities &out) {
-    add_pixel_format(out, AVB_PIXEL_FORMAT_BGRA8);
-    add_pixel_format(out, AVB_PIXEL_FORMAT_RGBA8);
-    add_pixel_format(out, AVB_PIXEL_FORMAT_NV12);
-    add_pixel_format(out, AVB_PIXEL_FORMAT_I420);
-}
+using avb::runtime::add_audio_codec;
+using avb::runtime::add_common_audio_codecs;
+using avb::runtime::add_common_video_codecs;
+using avb::runtime::add_device;
+using avb::runtime::add_memory;
+using avb::runtime::add_software_pixel_formats;
+using avb::runtime::add_video_codec;
 
 static void fill_ffmpeg(avb_decoder_capabilities &out, Container c) {
     if (!audio_only_container(c)) add_common_video_codecs(out, c);

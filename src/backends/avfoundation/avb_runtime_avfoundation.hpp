@@ -2,13 +2,15 @@
 
 #include "avb_capability_common.hpp"
 
-#if defined(AVB_ENABLE_FFMPEG)
+// Runtime codec discovery owned by the AVFoundation backend.
 
-bool avb_probe_ffmpeg_decoder(
+#if defined(AVB_ENABLE_AVFOUNDATION)
+
+bool avb_probe_avfoundation_decoder(
     avb_decoder_capabilities &out,
     avb::detail::Container container);
 
-bool avb_probe_ffmpeg_encoder(
+bool avb_probe_avfoundation_encoder(
     avb_encoder_capabilities &out,
     avb::detail::Container container);
 
