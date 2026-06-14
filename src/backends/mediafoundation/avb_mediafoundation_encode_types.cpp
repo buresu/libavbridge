@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <cstdlib>
 
 using Microsoft::WRL::ComPtr;
@@ -260,6 +261,121 @@ HRESULT mf_encode_write_buffer(
     sample->SetSampleTime(time_hns);
     sample->SetSampleDuration(duration_hns);
     return writer->WriteSample(stream, sample.Get());
+}
+
+std::size_t mf_encode_pack_video_frame(
+    const avb_video_frame &frame,
+    int width,
+    int height,
+    avb_pixel_format input_format,
+    bool convert_i420_to_nv12,
+    std::vector<unsigned char> &output) {
+    if (input_format == AVB_PIXEL_FORMAT_NV12) {
+        const int chroma_rows = height / 2;
+        const std::size_t y_size =
+            static_cast<std::size_t>(width) * height;
+        const std::size_t chroma_size =
+            static_cast<std::size_t>(width) * chroma_rows;
+        output.resize(y_size + chroma_size);
+        for (int y = 0; y < height; ++y) {
+            std::memcpy(
+                output.data() + static_cast<std::size_t>(y) * width,
+                frame.plane_data[0] +
+                    static_cast<std::size_t>(y) * frame.plane_stride[0],
+                width);
+        }
+        for (int y = 0; y < chroma_rows; ++y) {
+            std::memcpy(
+                output.data() + y_size +
+                    static_cast<std::size_t>(y) * width,
+                frame.plane_data[1] +
+                    static_cast<std::size_t>(y) * frame.plane_stride[1],
+                width);
+        }
+        return output.size();
+    }
+
+    if (input_format == AVB_PIXEL_FORMAT_I420) {
+        const int chroma_width = width / 2;
+        const int chroma_height = height / 2;
+        const std::size_t y_size =
+            static_cast<std::size_t>(width) * height;
+        const std::size_t chroma_size =
+            static_cast<std::size_t>(chroma_width) * chroma_height;
+
+        if (convert_i420_to_nv12) {
+            output.resize(
+                y_size + static_cast<std::size_t>(width) * chroma_height);
+            for (int y = 0; y < height; ++y) {
+                std::memcpy(
+                    output.data() + static_cast<std::size_t>(y) * width,
+                    frame.plane_data[0] +
+                        static_cast<std::size_t>(y) *
+                            frame.plane_stride[0],
+                    width);
+            }
+            unsigned char *uv = output.data() + y_size;
+            for (int y = 0; y < chroma_height; ++y) {
+                const unsigned char *u =
+                    frame.plane_data[1] +
+                    static_cast<std::size_t>(y) * frame.plane_stride[1];
+                const unsigned char *v =
+                    frame.plane_data[2] +
+                    static_cast<std::size_t>(y) * frame.plane_stride[2];
+                for (int x = 0; x < chroma_width; ++x) {
+                    uv[static_cast<std::size_t>(y) * width + x * 2] = u[x];
+                    uv[static_cast<std::size_t>(y) * width + x * 2 + 1] =
+                        v[x];
+                }
+            }
+            return output.size();
+        }
+
+        output.resize(y_size + 2 * chroma_size);
+        for (int y = 0; y < height; ++y) {
+            std::memcpy(
+                output.data() + static_cast<std::size_t>(y) * width,
+                frame.plane_data[0] +
+                    static_cast<std::size_t>(y) * frame.plane_stride[0],
+                width);
+        }
+        for (int y = 0; y < chroma_height; ++y) {
+            std::memcpy(
+                output.data() + y_size +
+                    static_cast<std::size_t>(y) * chroma_width,
+                frame.plane_data[1] +
+                    static_cast<std::size_t>(y) * frame.plane_stride[1],
+                chroma_width);
+            std::memcpy(
+                output.data() + y_size + chroma_size +
+                    static_cast<std::size_t>(y) * chroma_width,
+                frame.plane_data[2] +
+                    static_cast<std::size_t>(y) * frame.plane_stride[2],
+                chroma_width);
+        }
+        return output.size();
+    }
+
+    const int stride = width * 4;
+    output.resize(static_cast<std::size_t>(stride) * height);
+    for (int y = 0; y < height; ++y) {
+        const unsigned char *source =
+            frame.plane_data[0] +
+            static_cast<std::size_t>(y) * frame.plane_stride[0];
+        unsigned char *destination =
+            output.data() + static_cast<std::size_t>(y) * stride;
+        if (input_format == AVB_PIXEL_FORMAT_RGBA8) {
+            for (int x = 0; x < width; ++x) {
+                destination[x * 4] = source[x * 4 + 2];
+                destination[x * 4 + 1] = source[x * 4 + 1];
+                destination[x * 4 + 2] = source[x * 4];
+                destination[x * 4 + 3] = source[x * 4 + 3];
+            }
+        } else {
+            std::memcpy(destination, source, stride);
+        }
+    }
+    return output.size();
 }
 
 #endif

@@ -52,7 +52,6 @@ struct AvbEncoderMediaFoundation::Impl {
     avb_video_memory_type input_memory = AVB_VIDEO_MEMORY_CPU;
     bool             video_is_nv12 = false;
     bool             video_is_i420 = false;
-    bool             swizzle_rgba   = false; // RGBA8 input -> swizzle to BGRA for RGB32
     bool             custom_video = false;
     const avb_video_encoder_plugin *custom_video_encoder = nullptr;
     void            *custom_video_ctx = nullptr;
@@ -118,7 +117,6 @@ struct AvbEncoderMediaFoundation::Impl {
         input_memory = AVB_VIDEO_MEMORY_CPU;
         video_is_nv12 = false;
         video_is_i420 = false;
-        swizzle_rgba = false;
         ivf_video = false;
         ivf_codec = AVB_VIDEO_CODEC_AUTO;
         video_encoder_async = false;
@@ -438,7 +436,6 @@ avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_op
                 break;
             case AVB_PIXEL_FORMAT_RGBA8:
                 m_impl->input_format = AVB_PIXEL_FORMAT_RGBA8;
-                m_impl->swizzle_rgba = true;
                 break;
             case AVB_PIXEL_FORMAT_BGRA8:
             default:
@@ -570,7 +567,6 @@ avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_op
             input_subtype         = MFVideoFormat_I420;
         } else if (m_impl->input_format == AVB_PIXEL_FORMAT_RGBA8) {
             m_impl->input_format = AVB_PIXEL_FORMAT_RGBA8;
-            m_impl->swizzle_rgba = true;
             input_subtype        = MFVideoFormat_RGB32;
         } else {
             m_impl->input_format = AVB_PIXEL_FORMAT_BGRA8;
@@ -1168,81 +1164,17 @@ avb_result AvbEncoderMediaFoundation::write_video(const avb_video_frame &frame, 
         return AVB_OK;
     }
 
-    // Repack the caller's frame into a tightly-packed, top-down buffer matching
-    // the declared input stride, then hand it to the Sink Writer.
-    DWORD total;
-    if (m_impl->video_is_nv12) {
-        const int    y_rows = h, c_rows = h / 2, dst_stride = w;
-        const size_t y_size = (size_t)dst_stride * y_rows;
-        const size_t c_size = (size_t)dst_stride * c_rows;
-        total = (DWORD)(y_size + c_size);
-        m_impl->video_stage.resize(total);
-        unsigned char *dst = m_impl->video_stage.data();
-        for (int y = 0; y < y_rows; ++y)
-            memcpy(dst + (size_t)y * dst_stride,
-                   frame.plane_data[0] + (size_t)y * frame.plane_stride[0], dst_stride);
-        for (int y = 0; y < c_rows; ++y)
-            memcpy(dst + y_size + (size_t)y * dst_stride,
-                   frame.plane_data[1] + (size_t)y * frame.plane_stride[1], dst_stride);
-    } else if (m_impl->video_is_i420) {
-        const int    cw = w / 2, ch = h / 2;
-        const size_t y_size = (size_t)w * h;
-        const size_t c_size = (size_t)cw * ch;
-        if (m_impl->ivf_video && m_impl->ivf_mft_input_nv12) {
-            // The VP encoder MFTs accept NV12 more broadly than I420. Keep the
-            // public input as I420, but interleave U/V for the MFT.
-            total = (DWORD)(y_size + (size_t)w * ch);
-            m_impl->video_stage.resize(total);
-            unsigned char *dst = m_impl->video_stage.data();
-            for (int y = 0; y < h; ++y)
-                memcpy(dst + (size_t)y * w,
-                       frame.plane_data[0] + (size_t)y * frame.plane_stride[0], w);
-            unsigned char *uv = dst + y_size;
-            for (int y = 0; y < ch; ++y) {
-                const unsigned char *u =
-                    frame.plane_data[1] + (size_t)y * frame.plane_stride[1];
-                const unsigned char *v =
-                    frame.plane_data[2] + (size_t)y * frame.plane_stride[2];
-                for (int x = 0; x < cw; ++x) {
-                    uv[(size_t)y * w + x * 2 + 0] = u[x];
-                    uv[(size_t)y * w + x * 2 + 1] = v[x];
-                }
-            }
-        } else {
-            // Three tightly-packed planes: Y (w x h), then Cb and Cr (w/2 x h/2).
-            total = (DWORD)(y_size + 2 * c_size);
-            m_impl->video_stage.resize(total);
-            unsigned char *dst = m_impl->video_stage.data();
-            for (int y = 0; y < h; ++y)
-                memcpy(dst + (size_t)y * w,
-                       frame.plane_data[0] + (size_t)y * frame.plane_stride[0], w);
-            for (int y = 0; y < ch; ++y)
-                memcpy(dst + y_size + (size_t)y * cw,
-                       frame.plane_data[1] + (size_t)y * frame.plane_stride[1], cw);
-            for (int y = 0; y < ch; ++y)
-                memcpy(dst + y_size + c_size + (size_t)y * cw,
-                       frame.plane_data[2] + (size_t)y * frame.plane_stride[2], cw);
-        }
-    } else {
-        const int dst_stride = w * 4;
-        total = (DWORD)((size_t)dst_stride * h);
-        m_impl->video_stage.resize(total);
-        unsigned char *dst = m_impl->video_stage.data();
-        for (int y = 0; y < h; ++y) {
-            const unsigned char *src = frame.plane_data[0] + (size_t)y * frame.plane_stride[0];
-            unsigned char       *row = dst + (size_t)y * dst_stride;
-            if (m_impl->swizzle_rgba) {
-                for (int x = 0; x < w; ++x) { // RGBA -> BGRA
-                    row[x * 4 + 0] = src[x * 4 + 2];
-                    row[x * 4 + 1] = src[x * 4 + 1];
-                    row[x * 4 + 2] = src[x * 4 + 0];
-                    row[x * 4 + 3] = src[x * 4 + 3];
-                }
-            } else {
-                memcpy(row, src, dst_stride);
-            }
-        }
-    }
+    const bool convert_i420_to_nv12 =
+        m_impl->ivf_video &&
+        m_impl->video_is_i420 &&
+        m_impl->ivf_mft_input_nv12;
+    DWORD total = static_cast<DWORD>(mf_encode_pack_video_frame(
+        frame,
+        w,
+        h,
+        m_impl->input_format,
+        convert_i420_to_nv12,
+        m_impl->video_stage));
 
     ComPtr<IMFMediaBuffer> buf;
     HRESULT hr = MFCreateMemoryBuffer(total, &buf);

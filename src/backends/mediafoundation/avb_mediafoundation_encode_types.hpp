@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <mfidl.h>
 #include <mfreadwrite.h>
+#include <vector>
 
 long long mf_encode_seconds_to_hns(double seconds);
 int mf_encode_mp3_bitrate(int requested);
@@ -57,5 +58,13 @@ HRESULT mf_encode_write_buffer(
     unsigned long length,
     long long time_hns,
     long long duration_hns);
+
+std::size_t mf_encode_pack_video_frame(
+    const avb_video_frame &frame,
+    int width,
+    int height,
+    avb_pixel_format input_format,
+    bool convert_i420_to_nv12,
+    std::vector<unsigned char> &output);
 
 #endif
