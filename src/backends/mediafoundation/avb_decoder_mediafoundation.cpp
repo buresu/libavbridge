@@ -1,4 +1,5 @@
 #include "avb_decoder_mediafoundation.hpp"
+#include "avb_audio_buffer.hpp"
 #include "avb_mediafoundation_common.hpp"
 #include "avb_mediafoundation_decode_frames.hpp"
 #include "avb_mediafoundation_decode_types.hpp"
@@ -83,9 +84,9 @@ struct AvbDecoderMediaFoundation::Impl {
     std::string audio_codec_name;
     std::string video_codec_name;
 
-    std::vector<float>         audio_buf;
-    int                        audio_buf_pos = 0;
-    double                     audio_buf_pts = -1.0;
+    // Decoded interleaved-float audio waiting to be consumed (drain loop and
+    // head-PTS bookkeeping live in AvbAudioBuffer).
+    AvbAudioBuffer             audio;
     std::vector<unsigned char> video_frame_buf;
     std::vector<unsigned char> custom_packet_buf;
 
@@ -155,9 +156,7 @@ struct AvbDecoderMediaFoundation::Impl {
         duration_sec = frame_rate = 0.0;
         audio_codec_name.clear();
         video_codec_name.clear();
-        audio_buf.clear();
-        audio_buf_pos = 0;
-        audio_buf_pts = -1.0;
+        audio.clear();
         video_frame_buf.clear();
         custom_packet_buf.clear();
         seek_target_sec    = 0.0;
@@ -545,9 +544,7 @@ avb_result AvbDecoderMediaFoundation::seek(double seconds) {
         return AVB_ERROR_SEEK_FAILED;
     }
 
-    m_impl->audio_buf.clear();
-    m_impl->audio_buf_pos = 0;
-    m_impl->audio_buf_pts = -1.0;
+    m_impl->audio.clear();
     if (m_impl->custom_video_decoder && m_impl->custom_video_decoder->flush)
         m_impl->custom_video_decoder->flush(m_impl->custom_video_ctx);
 
@@ -586,59 +583,28 @@ bool AvbDecoderMediaFoundation::fill_audio_buffer() {
         DWORD len = 0;
         buf->Lock(&data, nullptr, &len);
         int n = (int)(len / sizeof(float));
-        m_impl->audio_buf.resize(n);
-        memcpy(m_impl->audio_buf.data(), data, n * sizeof(float));
+        // Each MF sample replaces the staging buffer wholesale (pos rewinds to
+        // the start), stamped with the sample's presentation time.
+        m_impl->audio.data.resize(n);
+        memcpy(m_impl->audio.data.data(), data, n * sizeof(float));
         buf->Unlock();
-        m_impl->audio_buf_pos = 0;
-        m_impl->audio_buf_pts = (double)ts / 1e7;
+        m_impl->audio.pos = 0;
+        m_impl->audio.pts = (double)ts / 1e7;
         return n > 0;
     }
 }
 
 int AvbDecoderMediaFoundation::read_audio_f32(float *dst_interleaved, int frames) {
     if (!m_impl->reader || m_impl->audio_stream_idx < 0 || m_impl->channels <= 0) return 0;
-
-    const int nb_ch          = m_impl->channels;
-    const int samples_needed = frames * nb_ch;
-    int samples_written      = 0;
-
-    while (samples_written < samples_needed) {
-        int available = (int)m_impl->audio_buf.size() - m_impl->audio_buf_pos;
-        if (available > 0) {
-            int to_copy = samples_needed - samples_written;
-            if (to_copy > available) to_copy = available;
-            memcpy(dst_interleaved + samples_written,
-                   m_impl->audio_buf.data() + m_impl->audio_buf_pos,
-                   to_copy * sizeof(float));
-            m_impl->audio_buf_pos += to_copy;
-            samples_written       += to_copy;
-            if (m_impl->audio_buf_pts >= 0.0 && m_impl->sample_rate > 0)
-                m_impl->audio_buf_pts +=
-                    (double)(to_copy / nb_ch) / m_impl->sample_rate;
-            if (m_impl->audio_buf_pos >= (int)m_impl->audio_buf.size()) {
-                m_impl->audio_buf.clear();
-                m_impl->audio_buf_pos = 0;
-                m_impl->audio_buf_pts = -1.0;
-            }
-            continue;
-        }
-
-        if (!fill_audio_buffer()) break;
-    }
-
-    return samples_written / nb_ch;
+    return m_impl->audio.read(dst_interleaved, frames, m_impl->channels,
+                              m_impl->sample_rate,
+                              [this] { return fill_audio_buffer(); });
 }
 
 double AvbDecoderMediaFoundation::audio_next_pts() {
     if (!m_impl->reader || m_impl->audio_stream_idx < 0 || m_impl->channels <= 0)
         return -1.0;
-    if (m_impl->audio_buf_pos >= (int)m_impl->audio_buf.size()) {
-        m_impl->audio_buf.clear();
-        m_impl->audio_buf_pos = 0;
-        m_impl->audio_buf_pts = -1.0;
-        if (!fill_audio_buffer()) return -1.0;
-    }
-    return m_impl->audio_buf_pts;
+    return m_impl->audio.next_pts([this] { return fill_audio_buffer(); });
 }
 
 avb_result AvbDecoderMediaFoundation::read_ivf_frame(avb_video_frame &out_frame) {

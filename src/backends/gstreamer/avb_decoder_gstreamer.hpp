@@ -1,5 +1,6 @@
 #pragma once
 
+#include "avb_audio_buffer.hpp"
 #include "avb_decoder_impl.hpp"
 #include "avb_gstreamer_loader.hpp"
 
@@ -69,11 +70,9 @@ private:
     const avb_video_decoder_plugin *m_custom_video_decoder = nullptr;
     void *m_custom_video_ctx = nullptr;
 
-    // Decoded audio waiting to be consumed (interleaved float).
-    std::vector<float> m_audio_buf;
-    int                m_audio_buf_pos = 0;
-    // Presentation time (seconds) of the sample at m_audio_buf_pos, or -1.
-    double             m_audio_buf_pts = -1.0;
+    // Decoded interleaved-float audio waiting to be consumed (drain loop and
+    // head-PTS bookkeeping live in AvbAudioBuffer).
+    AvbAudioBuffer     m_audio;
 
     // Backend-owned video frame buffer, reused per read_video_frame call.
     std::vector<unsigned char> m_video_out_buf;

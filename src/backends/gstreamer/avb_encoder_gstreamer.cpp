@@ -1,4 +1,7 @@
 #include "avb_encoder_gstreamer.hpp"
+#include "avb_dmabuf_util.hpp"
+#include "avb_drm_fourcc.hpp"
+#include "avb_plane_layout.hpp"
 #include "avb_video_plugins.hpp"
 
 #include <algorithm>
@@ -8,17 +11,7 @@
 #include <cinttypes>
 #include <cstdint>
 #include <string>
-#include <sys/stat.h>
 #include <unistd.h>
-
-static inline int round_up_4(int x) { return (x + 3) & ~3; }
-
-static constexpr uint32_t avb_drm_fourcc(char a, char b, char c, char d) {
-    return (uint32_t)(uint8_t)a |
-           ((uint32_t)(uint8_t)b << 8) |
-           ((uint32_t)(uint8_t)c << 16) |
-           ((uint32_t)(uint8_t)d << 24);
-}
 
 static bool avb_is_compressed_format(avb_pixel_format fmt) {
     return fmt == AVB_PIXEL_FORMAT_BC1_RGBA ||
@@ -38,36 +31,6 @@ static const char *gst_hw_video_encoder(avb_video_codec codec, avb_hardware_devi
         case AVB_VIDEO_CODEC_VP9:  return "vavp9lpenc";
         default: return nullptr;
     }
-}
-
-static size_t dmabuf_plane_size(const avb_video_frame &frame, int plane) {
-    int rows = frame.height;
-    if (frame.plane_count == 2 && plane == 1) rows = frame.height / 2;
-    if (frame.plane_count == 3 && plane > 0) rows = frame.height / 2;
-    if (rows <= 0 || frame.plane_stride[plane] <= 0) return 0;
-    return (size_t)frame.plane_offset[plane] +
-           (size_t)frame.plane_stride[plane] * (size_t)rows;
-}
-
-static size_t dmabuf_object_size(int fd, size_t fallback) {
-    struct stat st {};
-    if (fd >= 0 && fstat(fd, &st) == 0 && st.st_size > 0)
-        return std::max((size_t)st.st_size, fallback);
-    return fallback;
-}
-
-static bool drm_fourcc_to_string(uint32_t fourcc, char out[5]) {
-    if (!fourcc) return false;
-    out[0] = (char)(fourcc & 0xff);
-    out[1] = (char)((fourcc >> 8) & 0xff);
-    out[2] = (char)((fourcc >> 16) & 0xff);
-    out[3] = (char)((fourcc >> 24) & 0xff);
-    out[4] = '\0';
-    for (int i = 0; i < 4; ++i) {
-        unsigned char c = (unsigned char)out[i];
-        if (c < 0x20 || c > 0x7e) return false;
-    }
-    return true;
 }
 
 static GstVideoFormat gst_video_format_from_drm_fourcc(uint32_t fourcc) {
@@ -151,7 +114,7 @@ avb_result AvbEncoderGStreamer::update_dmabuf_caps(const avb_video_frame &frame)
     }
 
     char fourcc[5];
-    if (!drm_fourcc_to_string(frame.drm_format, fourcc)) {
+    if (!avb_drm_fourcc_to_string(frame.drm_format, fourcc)) {
         m_last_error = "DMABUF frame has an unsupported drm_format.";
         return AVB_ERROR_INVALID_ARGUMENT;
     }
@@ -221,8 +184,8 @@ GstBuffer *AvbEncoderGStreamer::build_dmabuf_buffer(const avb_video_frame &frame
             m_last_error = "dup(DMABUF fd) failed.";
             return nullptr;
         }
-        size_t size = dmabuf_object_size(frame.dmabuf_fd[p],
-                                         dmabuf_plane_size(frame, p));
+        size_t size = avb_dmabuf_object_size(frame.dmabuf_fd[p],
+                                             avb_dmabuf_plane_size(frame, p));
         GstMemory *mem = m_gst.gst_dmabuf_allocator_alloc(allocator, owned_fd, size);
         if (!mem) {
             close(owned_fd);
@@ -686,33 +649,12 @@ avb_result AvbEncoderGStreamer::write_video(const avb_video_frame &frame, double
 
     // Repack into the tightly-packed (GST_ROUND_UP_4 stride) layout appsrc wants.
     //   BGRA/RGBA: 1 plane; NV12: 2 (Y, CbCr); I420: 3 (Y, Cb, Cr).
-    int    dst_stride[AVB_MAX_PLANES] = {0, 0, 0};
-    int    plane_rows[AVB_MAX_PLANES] = {0, 0, 0};
-    int    plane_count = 1;
-    switch (m_input_format) {
-        case AVB_PIXEL_FORMAT_NV12:
-            plane_count = 2;
-            dst_stride[0] = round_up_4(m_width);     plane_rows[0] = m_height;
-            dst_stride[1] = round_up_4(m_width);     plane_rows[1] = m_height / 2;
-            break;
-        case AVB_PIXEL_FORMAT_I420:
-            plane_count = 3;
-            dst_stride[0] = round_up_4(m_width);     plane_rows[0] = m_height;
-            dst_stride[1] = round_up_4(m_width / 2); plane_rows[1] = m_height / 2;
-            dst_stride[2] = round_up_4(m_width / 2); plane_rows[2] = m_height / 2;
-            break;
-        default:
-            plane_count = 1;
-            dst_stride[0] = round_up_4(m_width * 4); plane_rows[0] = m_height;
-            break;
-    }
-
-    size_t plane_off[AVB_MAX_PLANES] = {0, 0, 0};
-    size_t total = 0;
-    for (int pl = 0; pl < plane_count; ++pl) {
-        plane_off[pl] = total;
-        total += (size_t)dst_stride[pl] * plane_rows[pl];
-    }
+    AvbPlaneLayout layout = avb_plane_layout(m_input_format, m_width, m_height, 4);
+    int     plane_count = layout.plane_count;
+    int    *dst_stride  = layout.stride;
+    int    *plane_rows  = layout.rows;
+    size_t *plane_off   = layout.offset;
+    size_t  total       = layout.total;
 
     m_stage.resize(total);
     for (int pl = 0; pl < plane_count && pl < frame.plane_count; ++pl) {

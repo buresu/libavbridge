@@ -1,4 +1,6 @@
 #include "avb_decoder_gstreamer.hpp"
+#include "avb_drm_fourcc.hpp"
+#include "avb_plane_layout.hpp"
 #include "avb_video_plugins.hpp"
 
 #include <cstdarg>
@@ -13,15 +15,6 @@ enum {
     AVB_GST_PLAY_FLAG_VIDEO = (1 << 0),
     AVB_GST_PLAY_FLAG_AUDIO = (1 << 1),
 };
-
-static inline int round_up_4(int x) { return (x + 3) & ~3; }
-
-static constexpr uint32_t avb_drm_fourcc(char a, char b, char c, char d) {
-    return (uint32_t)(uint8_t)a |
-           ((uint32_t)(uint8_t)b << 8) |
-           ((uint32_t)(uint8_t)c << 16) |
-           ((uint32_t)(uint8_t)d << 24);
-}
 
 static gboolean avb_gst_dmabuf_propose_allocation(
     GstAppSink *,
@@ -183,9 +176,7 @@ void AvbDecoderGStreamer::close_internal() {
         m_pipeline = nullptr;
     }
 
-    m_audio_buf.clear();
-    m_audio_buf_pos = 0;
-    m_audio_buf_pts = -1.0;
+    m_audio.clear();
     m_video_out_buf.clear();
     m_out_sample_rate = 0;
     m_out_channels    = 0;
@@ -671,9 +662,7 @@ avb_result AvbDecoderGStreamer::seek(double seconds) {
         return AVB_ERROR_SEEK_FAILED;
     }
 
-    m_audio_buf.clear();
-    m_audio_buf_pos = 0;
-    m_audio_buf_pts = -1.0;
+    m_audio.clear();
     m_audio_eof = false;
     m_seek_target = seconds;
     if (m_custom_video_decoder && m_custom_video_decoder->flush)
@@ -714,13 +703,13 @@ bool AvbDecoderGStreamer::fill_audio_buffer() {
         size_t n_floats = map.size / sizeof(float);
         const float *src = (const float *)map.data;
         // If this buffer becomes the head of an empty queue, record its PTS.
-        if (m_audio_buf_pos >= (int)m_audio_buf.size()) {
-            m_audio_buf.clear();
-            m_audio_buf_pos = 0;
-            m_audio_buf_pts = GST_BUFFER_PTS_IS_VALID(buf)
+        if (m_audio.empty()) {
+            m_audio.data.clear();
+            m_audio.pos = 0;
+            m_audio.pts = GST_BUFFER_PTS_IS_VALID(buf)
                 ? (double)GST_BUFFER_PTS(buf) / GST_SECOND : -1.0;
         }
-        m_audio_buf.insert(m_audio_buf.end(), src, src + n_floats);
+        m_audio.data.insert(m_audio.data.end(), src, src + n_floats);
         m_gst.gst_buffer_unmap(buf, &map);
     }
     m_gst.gst_mini_object_unref((GstMiniObject *)sample);
@@ -729,41 +718,13 @@ bool AvbDecoderGStreamer::fill_audio_buffer() {
 
 int AvbDecoderGStreamer::read_audio_f32(float *dst_interleaved, int frames) {
     if (!m_audio_sink || m_out_channels <= 0) return 0;
-
-    int nb_channels     = m_out_channels;
-    int samples_needed  = frames * nb_channels;
-    int samples_written = 0;
-
-    while (samples_written < samples_needed) {
-        int available = (int)m_audio_buf.size() - m_audio_buf_pos;
-        if (available > 0) {
-            int to_copy = samples_needed - samples_written;
-            if (to_copy > available) to_copy = available;
-            memcpy(dst_interleaved + samples_written,
-                   m_audio_buf.data() + m_audio_buf_pos,
-                   to_copy * sizeof(float));
-            m_audio_buf_pos += to_copy;
-            samples_written += to_copy;
-            if (m_audio_buf_pts >= 0.0)
-                m_audio_buf_pts += (double)(to_copy / nb_channels) / m_out_sample_rate;
-            if (m_audio_buf_pos >= (int)m_audio_buf.size()) {
-                m_audio_buf.clear();
-                m_audio_buf_pos = 0;
-            }
-            continue;
-        }
-        if (!fill_audio_buffer()) break;
-    }
-
-    return samples_written / nb_channels;
+    return m_audio.read(dst_interleaved, frames, m_out_channels, m_out_sample_rate,
+                        [this] { return fill_audio_buffer(); });
 }
 
 double AvbDecoderGStreamer::audio_next_pts() {
     if (!m_audio_sink || m_out_channels <= 0) return -1.0;
-    if (m_audio_buf_pos >= (int)m_audio_buf.size()) {
-        if (!fill_audio_buffer()) return -1.0;
-    }
-    return m_audio_buf_pts;
+    return m_audio.next_pts([this] { return fill_audio_buffer(); });
 }
 
 avb_result AvbDecoderGStreamer::read_custom_video_frame(avb_video_frame &out_frame) {
@@ -985,25 +946,10 @@ avb_result AvbDecoderGStreamer::read_video_frame(avb_video_frame &out_frame) {
             }
             total = map.size; // copy the whole buffer; offsets index into it
         } else {
-            int rows[AVB_MAX_PLANES] = {0, 0, 0};
-            switch (m_video_format) {
-                case AVB_PIXEL_FORMAT_NV12:
-                    plane_count = 2;
-                    stride[0] = round_up_4(w);     rows[0] = h;
-                    stride[1] = round_up_4(w);     rows[1] = h / 2;
-                    break;
-                case AVB_PIXEL_FORMAT_I420:
-                    plane_count = 3;
-                    stride[0] = round_up_4(w);     rows[0] = h;
-                    stride[1] = round_up_4(w / 2); rows[1] = h / 2;
-                    stride[2] = round_up_4(w / 2); rows[2] = h / 2;
-                    break;
-                default:
-                    plane_count = 1;
-                    stride[0] = round_up_4(w * 4); rows[0] = h;
-                    break;
-            }
-            for (int p = 0; p < plane_count; ++p) { off[p] = total; total += (size_t)stride[p] * rows[p]; }
+            AvbPlaneLayout layout = avb_plane_layout(m_video_format, w, h, 4);
+            plane_count = layout.plane_count;
+            for (int p = 0; p < plane_count; ++p) { stride[p] = layout.stride[p]; off[p] = layout.offset[p]; }
+            total = layout.total;
             if (total > map.size) total = map.size; // never read past the buffer
         }
 

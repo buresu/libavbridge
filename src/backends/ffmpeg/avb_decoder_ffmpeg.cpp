@@ -1,17 +1,12 @@
 #include "avb_decoder_ffmpeg.hpp"
+#include "avb_drm_fourcc.hpp"
+#include "avb_plane_layout.hpp"
 #include "avb_video_plugins.hpp"
 
 #include <cstdio>
 #include <cstdarg>
 #include <cstdint>
 #include <cstring>
-
-static constexpr uint32_t avb_drm_fourcc(char a, char b, char c, char d) {
-    return (uint32_t)(uint8_t)a |
-           ((uint32_t)(uint8_t)b << 8) |
-           ((uint32_t)(uint8_t)c << 16) |
-           ((uint32_t)(uint8_t)d << 24);
-}
 
 static uint32_t avb_infer_drm_frame_format(const AVDRMFrameDescriptor *drm) {
     if (!drm || drm->nb_layers <= 0) return 0;
@@ -162,9 +157,7 @@ void AvbDecoderFFmpeg::close_internal() {
     }
     m_io_cb   = avb_io_callbacks{};
     m_io_user = nullptr;
-    m_audio_buf.clear();
-    m_audio_buf_pos = 0;
-    m_audio_buf_pts = -1.0;
+    m_audio.clear();
     m_video_out_buf.clear();
     m_sws_src_w   = 0;
     m_sws_src_h   = 0;
@@ -625,9 +618,7 @@ avb_result AvbDecoderFFmpeg::seek(double seconds) {
         m_custom_video_decoder->flush(m_custom_video_ctx);
 
     clear_packet_queues();
-    m_audio_buf.clear();
-    m_audio_buf_pos = 0;
-    m_audio_buf_pts = -1.0;
+    m_audio.clear();
     m_eof = false;
     m_seek_target = seconds;
     m_audio_seek_target = seconds;
@@ -667,25 +658,25 @@ bool AvbDecoderFFmpeg::fill_audio_buffer() {
             int out_capacity =
                 (int)(((int64_t)in_samples + delay) * m_out_sample_rate / in_rate) + 1;
 
-            int buf_start = (int)m_audio_buf.size();
+            int buf_start = (int)m_audio.data.size();
 
             // When this frame becomes the head of an empty buffer, record its
             // presentation time so audio_next_pts() can report it.
-            if (buf_start == 0) m_audio_buf_pts = frame_pts;
+            if (buf_start == 0) m_audio.pts = frame_pts;
 
-            m_audio_buf.resize(buf_start + out_capacity * nb_channels);
-            float *dst = m_audio_buf.data() + buf_start;
+            m_audio.data.resize(buf_start + out_capacity * nb_channels);
+            float *dst = m_audio.data.data() + buf_start;
 
             uint8_t *dst_ptr = (uint8_t *)dst;
             int converted = m_ff.swr_convert(m_swr, &dst_ptr, out_capacity,
                 (const uint8_t **)m_audio_frame->data, in_samples);
             if (converted < 0) {
-                m_audio_buf.resize(buf_start);
+                m_audio.data.resize(buf_start);
                 set_error("swr_convert failed.");
                 return false;
             }
             // Shrink to the actual number of converted samples.
-            m_audio_buf.resize(buf_start + converted * nb_channels);
+            m_audio.data.resize(buf_start + converted * nb_channels);
 
             m_ff.av_frame_unref(m_audio_frame);
             return true;
@@ -714,43 +705,13 @@ bool AvbDecoderFFmpeg::fill_audio_buffer() {
 
 int AvbDecoderFFmpeg::read_audio_f32(float *dst_interleaved, int frames) {
     if (!m_audio_codec_ctx || m_eof) return 0;
-
-    int nb_channels    = m_out_channels;
-    int samples_needed = frames * nb_channels;
-    int samples_written = 0;
-
-    while (samples_written < samples_needed) {
-        int available = (int)m_audio_buf.size() - m_audio_buf_pos;
-        if (available > 0) {
-            int to_copy = samples_needed - samples_written;
-            if (to_copy > available) to_copy = available;
-            memcpy(dst_interleaved + samples_written,
-                   m_audio_buf.data() + m_audio_buf_pos,
-                   to_copy * sizeof(float));
-            m_audio_buf_pos += to_copy;
-            samples_written += to_copy;
-            // Advance the head timestamp by the number of frames consumed.
-            if (m_audio_buf_pts >= 0.0)
-                m_audio_buf_pts += (double)(to_copy / nb_channels) / m_out_sample_rate;
-            if (m_audio_buf_pos >= (int)m_audio_buf.size()) {
-                m_audio_buf.clear();
-                m_audio_buf_pos = 0;
-            }
-            continue;
-        }
-        if (!fill_audio_buffer()) break;
-    }
-
-    return samples_written / nb_channels;
+    return m_audio.read(dst_interleaved, frames, m_out_channels, m_out_sample_rate,
+                        [this] { return fill_audio_buffer(); });
 }
 
 double AvbDecoderFFmpeg::audio_next_pts() {
     if (!m_audio_codec_ctx) return -1.0;
-    // Ensure the buffer holds the next sample, then report its timestamp.
-    if (m_audio_buf_pos >= (int)m_audio_buf.size()) {
-        if (!fill_audio_buffer()) return -1.0;
-    }
-    return m_audio_buf_pts;
+    return m_audio.next_pts([this] { return fill_audio_buffer(); });
 }
 
 avb_result AvbDecoderFFmpeg::read_custom_video_frame(avb_video_frame &out_frame) {
@@ -914,38 +875,13 @@ avb_result AvbDecoderFFmpeg::fill_cpu_video_frame(
         m_sws_src_fmt = src_fmt;
     }
 
-    // Lay out the destination buffer per output format:
-    //   RGBA/BGRA: 1 packed plane (stride w*4)
-    //   NV12:      2 planes — Y (w), interleaved CbCr (w) at half height
-    //   I420:      3 planes — Y (w), Cb (w/2), Cr (w/2) at half height
-    int      plane_count = 1;
-    int      dst_stride[AVB_MAX_PLANES] = {0, 0, 0};
-    int      plane_rows[AVB_MAX_PLANES] = {0, 0, 0};
-    switch (m_video_format) {
-        case AVB_PIXEL_FORMAT_NV12:
-            plane_count = 2;
-            dst_stride[0] = w;     plane_rows[0] = h;
-            dst_stride[1] = w;     plane_rows[1] = h / 2;
-            break;
-        case AVB_PIXEL_FORMAT_I420:
-            plane_count = 3;
-            dst_stride[0] = w;     plane_rows[0] = h;
-            dst_stride[1] = w / 2; plane_rows[1] = h / 2;
-            dst_stride[2] = w / 2; plane_rows[2] = h / 2;
-            break;
-        default: // RGBA8 / BGRA8
-            plane_count = 1;
-            dst_stride[0] = w * 4; plane_rows[0] = h;
-            break;
-    }
-
-    size_t plane_off[AVB_MAX_PLANES] = {0, 0, 0};
-    size_t total = 0;
-    for (int p = 0; p < plane_count; ++p) {
-        plane_off[p] = total;
-        total += (size_t)dst_stride[p] * plane_rows[p];
-    }
-    m_video_out_buf.resize(total);
+    // Lay out the destination buffer per output format. FFmpeg writes its own
+    // buffer, so plane strides are the exact width (no alignment).
+    AvbPlaneLayout layout = avb_plane_layout(m_video_format, w, h, 1);
+    int    plane_count = layout.plane_count;
+    int   *dst_stride  = layout.stride;
+    size_t *plane_off  = layout.offset;
+    m_video_out_buf.resize(layout.total);
 
     uint8_t *dst_data[AVB_MAX_PLANES] = {nullptr, nullptr, nullptr};
     for (int p = 0; p < plane_count; ++p)

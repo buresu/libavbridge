@@ -1,4 +1,5 @@
 #include "avb_encoder_ffmpeg.hpp"
+#include "avb_dmabuf_util.hpp"
 #include "avb_video_plugins.hpp"
 
 #include <algorithm>
@@ -6,7 +7,6 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
-#include <sys/stat.h>
 #include <unistd.h>
 
 static AVCodecID avb_ff_video_codec_id(avb_video_codec codec) {
@@ -175,22 +175,6 @@ static void avb_free_drm_descriptor(void *, uint8_t *data) {
         if (drm->objects[i].fd >= 0) close(drm->objects[i].fd);
     }
     delete drm;
-}
-
-static size_t avb_dmabuf_plane_size(const avb_video_frame &frame, int plane) {
-    int rows = frame.height;
-    if (frame.plane_count == 2 && plane == 1) rows = frame.height / 2;
-    if (frame.plane_count == 3 && plane > 0) rows = frame.height / 2;
-    if (rows <= 0 || frame.plane_stride[plane] <= 0) return 0;
-    return (size_t)frame.plane_offset[plane] +
-           (size_t)frame.plane_stride[plane] * (size_t)rows;
-}
-
-static size_t avb_dmabuf_object_size(int fd, size_t fallback) {
-    struct stat st {};
-    if (fd >= 0 && fstat(fd, &st) == 0 && st.st_size > 0)
-        return std::max((size_t)st.st_size, fallback);
-    return fallback;
 }
 
 AvbEncoderFFmpeg::AvbEncoderFFmpeg() {
