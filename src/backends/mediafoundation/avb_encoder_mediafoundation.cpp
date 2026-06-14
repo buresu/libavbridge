@@ -1,5 +1,6 @@
 #include "avb_encoder_mediafoundation.hpp"
 #include "avb_mediafoundation_common.hpp"
+#include "avb_mediafoundation_encode_types.hpp"
 #include "avb_mediafoundation_ivf.hpp"
 #include "avb_media_rules.hpp"
 #include "avb_video_plugins.hpp"
@@ -32,27 +33,6 @@
 using Microsoft::WRL::ComPtr;
 using avb::detail::Container;
 using avb::detail::container_from_path;
-
-// MF works in 100-ns ("hns") units; convert seconds to that.
-static inline LONGLONG sec_to_hns(double s) { return (LONGLONG)std::llround(s * 1e7); }
-
-static int mf_mp3_bitrate(int requested) {
-    static const int allowed[] = {
-        320000, 256000, 224000, 192000, 160000, 128000, 112000,
-        96000, 80000, 64000, 56000, 48000, 40000, 32000
-    };
-    int want = requested > 0 ? requested : 128000;
-    int best = allowed[0];
-    int best_delta = std::abs(want - best);
-    for (int v : allowed) {
-        int delta = std::abs(want - v);
-        if (delta < best_delta) {
-            best = v;
-            best_delta = delta;
-        }
-    }
-    return best;
-}
 
 struct AvbEncoderMediaFoundation::Impl {
     ComPtr<IMFSinkWriter> writer;
@@ -189,179 +169,6 @@ const char *AvbEncoderMediaFoundation::get_last_error() const {
     return m_last_error.empty() ? nullptr : m_last_error.c_str();
 }
 
-// The Microsoft AAC encoder accepts only a fixed set of average byte rates.
-// Snap the requested bits/sec to the nearest supported value.
-static UINT32 aac_bytes_per_sec(int bitrate_bps) {
-    const UINT32 allowed[] = { 12000, 16000, 20000, 24000 }; // 96/128/160/192 kbps
-    UINT32 want = bitrate_bps > 0 ? (UINT32)(bitrate_bps / 8) : 16000;
-    UINT32 best = allowed[0];
-    UINT32 best_d = (want > best) ? want - best : best - want;
-    for (UINT32 v : allowed) {
-        UINT32 d = (want > v) ? want - v : v - want;
-        if (d < best_d) { best = v; best_d = d; }
-    }
-    return best;
-}
-
-static HRESULT init_mp3_media_type(IMFMediaType *type, int sample_rate,
-                                   int channels, int bitrate_bps) {
-    if (!type) return E_POINTER;
-
-    MPEGLAYER3WAVEFORMAT mp3{};
-    mp3.wfx.wFormatTag = WAVE_FORMAT_MPEGLAYER3;
-    mp3.wfx.nChannels = (WORD)channels;
-    mp3.wfx.nSamplesPerSec = (DWORD)sample_rate;
-    mp3.wfx.nAvgBytesPerSec = (DWORD)(bitrate_bps / 8);
-    mp3.wfx.nBlockAlign = 1;
-    mp3.wfx.wBitsPerSample = 0;
-    mp3.wfx.cbSize = MPEGLAYER3_WFX_EXTRA_BYTES;
-    mp3.wID = MPEGLAYER3_ID_MPEG;
-    mp3.fdwFlags = MPEGLAYER3_FLAG_PADDING_ISO;
-    mp3.nBlockSize = 1;
-    mp3.nFramesPerBlock = 1;
-    mp3.nCodecDelay = 0;
-    return MFInitMediaTypeFromWaveFormatEx(type, &mp3.wfx, sizeof(mp3));
-}
-
-static HRESULT select_mp3_output_type(IMFTransform *encoder,
-                                      IMFMediaType *preferred,
-                                      UINT32 sample_rate,
-                                      UINT32 channels,
-                                      IMFMediaType **selected) {
-    if (!encoder || !preferred || !selected) return E_POINTER;
-    *selected = nullptr;
-
-    HRESULT hr = encoder->SetOutputType(0, preferred, 0);
-    if (SUCCEEDED(hr)) {
-        preferred->AddRef();
-        *selected = preferred;
-        return hr;
-    }
-
-    for (DWORD i = 0; ; ++i) {
-        ComPtr<IMFMediaType> candidate;
-        HRESULT type_hr = encoder->GetOutputAvailableType(0, i, &candidate);
-        if (type_hr == MF_E_NO_MORE_TYPES) break;
-        if (FAILED(type_hr) || !candidate) continue;
-
-        UINT32 sr = 0, ch = 0;
-        candidate->GetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, &sr);
-        candidate->GetUINT32(MF_MT_AUDIO_NUM_CHANNELS, &ch);
-        if (sr != sample_rate || ch != channels) continue;
-
-        type_hr = encoder->SetOutputType(0, candidate.Get(), 0);
-        if (SUCCEEDED(type_hr)) {
-            return candidate.CopyTo(selected);
-        }
-    }
-
-    return hr;
-}
-
-static GUID mf_video_subtype_from_codec(avb_video_codec codec, uint32_t codec_tag) {
-    switch (codec) {
-        case AVB_VIDEO_CODEC_H264: return MFVideoFormat_H264;
-        case AVB_VIDEO_CODEC_HEVC: return MFVideoFormat_HEVC;
-        case AVB_VIDEO_CODEC_VP8:  return MFVideoFormat_VP80;
-        case AVB_VIDEO_CODEC_VP9:  return mf_video_subtype_from_fourcc(mf_fourcc("VP90"));
-        case AVB_VIDEO_CODEC_AV1:  return MFVideoFormat_AV1;
-        default:
-            if (codec_tag == 0) return GUID_NULL;
-            return mf_video_subtype_from_fourcc(codec_tag);
-    }
-}
-
-static const char *mf_codec_name(avb_video_codec codec) {
-    switch (codec) {
-        case AVB_VIDEO_CODEC_H264: return "H264";
-        case AVB_VIDEO_CODEC_HEVC: return "HEVC";
-        case AVB_VIDEO_CODEC_VP8:  return "VP8";
-        case AVB_VIDEO_CODEC_VP9:  return "VP9";
-        case AVB_VIDEO_CODEC_AV1:  return "AV1";
-        case AVB_VIDEO_CODEC_HAP:  return "HAP";
-        default:             return "custom";
-    }
-}
-
-static bool mf_ivf_codec(avb_video_codec codec) {
-    return codec == AVB_VIDEO_CODEC_VP8 ||
-           codec == AVB_VIDEO_CODEC_VP9 ||
-           codec == AVB_VIDEO_CODEC_AV1;
-}
-
-static HRESULT select_video_output_type(IMFTransform *encoder,
-                                        IMFMediaType *preferred,
-                                        const GUID &subtype,
-                                        UINT32 width,
-                                        UINT32 height,
-                                        UINT32 fps_num,
-                                        UINT32 fps_den) {
-    if (!encoder || !preferred) return E_POINTER;
-    HRESULT hr = encoder->SetOutputType(0, preferred, 0);
-    if (SUCCEEDED(hr)) return hr;
-
-    for (DWORD i = 0; ; ++i) {
-        ComPtr<IMFMediaType> candidate;
-        HRESULT type_hr = encoder->GetOutputAvailableType(0, i, &candidate);
-        if (type_hr == MF_E_NO_MORE_TYPES) break;
-        if (FAILED(type_hr) || !candidate) continue;
-
-        GUID cand_subtype = GUID_NULL;
-        candidate->GetGUID(MF_MT_SUBTYPE, &cand_subtype);
-        if (!IsEqualGUID(cand_subtype, subtype)) continue;
-
-        candidate->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-        MFSetAttributeSize(candidate.Get(), MF_MT_FRAME_SIZE, width, height);
-        MFSetAttributeRatio(candidate.Get(), MF_MT_FRAME_RATE, fps_num, fps_den);
-        MFSetAttributeRatio(candidate.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-        type_hr = encoder->SetOutputType(0, candidate.Get(), 0);
-        if (SUCCEEDED(type_hr)) return type_hr;
-    }
-
-    return hr;
-}
-
-static HRESULT select_video_input_type(IMFTransform *encoder,
-                                       IMFMediaType *preferred,
-                                       UINT32 width,
-                                       UINT32 height,
-                                       UINT32 fps_num,
-                                       UINT32 fps_den,
-                                       bool *use_nv12) {
-    if (!encoder || !preferred || !use_nv12) return E_POINTER;
-    HRESULT hr = encoder->SetInputType(0, preferred, 0);
-    if (SUCCEEDED(hr)) {
-        *use_nv12 = true;
-        return hr;
-    }
-
-    for (DWORD i = 0; ; ++i) {
-        ComPtr<IMFMediaType> candidate;
-        HRESULT type_hr = encoder->GetInputAvailableType(0, i, &candidate);
-        if (type_hr == MF_E_NO_MORE_TYPES) break;
-        if (FAILED(type_hr) || !candidate) continue;
-
-        GUID subtype = GUID_NULL;
-        candidate->GetGUID(MF_MT_SUBTYPE, &subtype);
-        bool nv12 = IsEqualGUID(subtype, MFVideoFormat_NV12);
-        bool i420 = IsEqualGUID(subtype, MFVideoFormat_I420);
-        if (!nv12 && !i420) continue;
-
-        candidate->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-        MFSetAttributeSize(candidate.Get(), MF_MT_FRAME_SIZE, width, height);
-        MFSetAttributeRatio(candidate.Get(), MF_MT_FRAME_RATE, fps_num, fps_den);
-        MFSetAttributeRatio(candidate.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-        candidate->SetUINT32(MF_MT_DEFAULT_STRIDE, width);
-        type_hr = encoder->SetInputType(0, candidate.Get(), 0);
-        if (SUCCEEDED(type_hr)) {
-            *use_nv12 = nv12;
-            return type_hr;
-        }
-    }
-
-    return hr;
-}
-
 avb_result AvbEncoderMediaFoundation::open_ivf_video(
     const char *path, const avb_encode_options &options) {
     if (!options.video.enable || options.audio.enable) {
@@ -369,7 +176,7 @@ avb_result AvbEncoderMediaFoundation::open_ivf_video(
         return AVB_ERROR_INVALID_ARGUMENT;
     }
     avb_video_codec codec = options.video.codec;
-    if (!mf_ivf_codec(codec)) {
+    if (!mf_encode_is_ivf_codec(codec)) {
         m_last_error = "Media Foundation IVF output supports VP8, VP9, or AV1.";
         return AVB_ERROR_INVALID_ARGUMENT;
     }
@@ -379,7 +186,7 @@ avb_result AvbEncoderMediaFoundation::open_ivf_video(
         return AVB_ERROR_INVALID_ARGUMENT;
     }
 
-    GUID out_subtype = mf_video_subtype_from_codec(codec, 0);
+    GUID out_subtype = mf_encode_video_subtype(codec, 0);
     MFT_REGISTER_TYPE_INFO encoder_type{
         MFMediaType_Video, out_subtype};
     HRESULT hr = mf_create_transform(
@@ -388,7 +195,7 @@ avb_result AvbEncoderMediaFoundation::open_ivf_video(
     if (FAILED(hr) || !m_impl->video_encoder) {
         char buf[160];
         snprintf(buf, sizeof(buf), "Create %s encoder MFT failed: 0x%08lx",
-                 mf_codec_name(codec), hr);
+                 mf_encode_video_codec_name(codec), hr);
         m_last_error = buf;
         return AVB_ERROR_OPEN_FAILED;
     }
@@ -431,18 +238,18 @@ avb_result AvbEncoderMediaFoundation::open_ivf_video(
     in_type->SetUINT32(MF_MT_DEFAULT_STRIDE, (UINT32)m_impl->width);
 
     bool input_type_set = false;
-    hr = select_video_output_type(
+    hr = mf_encode_select_video_output_type(
         m_impl->video_encoder.Get(), out_type.Get(), out_subtype,
         (UINT32)m_impl->width, (UINT32)m_impl->height,
         m_impl->fps_num, m_impl->fps_den);
     if (FAILED(hr)) {
         bool ignored_nv12 = true;
-        HRESULT input_first = select_video_input_type(
+        HRESULT input_first = mf_encode_select_video_input_type(
             m_impl->video_encoder.Get(), in_type.Get(),
             (UINT32)m_impl->width, (UINT32)m_impl->height,
             m_impl->fps_num, m_impl->fps_den, &ignored_nv12);
         if (SUCCEEDED(input_first)) {
-            hr = select_video_output_type(
+            hr = mf_encode_select_video_output_type(
                 m_impl->video_encoder.Get(), out_type.Get(), out_subtype,
                 (UINT32)m_impl->width, (UINT32)m_impl->height,
                 m_impl->fps_num, m_impl->fps_den);
@@ -454,21 +261,21 @@ avb_result AvbEncoderMediaFoundation::open_ivf_video(
         if (FAILED(hr)) {
             char buf[160];
             snprintf(buf, sizeof(buf), "SetOutputType (%s encoder) failed: 0x%08lx",
-                     mf_codec_name(codec), hr);
+                     mf_encode_video_codec_name(codec), hr);
             m_last_error = buf;
             return AVB_ERROR_OPEN_FAILED;
         }
     }
 
     if (!input_type_set) {
-        hr = select_video_input_type(
+        hr = mf_encode_select_video_input_type(
             m_impl->video_encoder.Get(), in_type.Get(),
             (UINT32)m_impl->width, (UINT32)m_impl->height,
             m_impl->fps_num, m_impl->fps_den, &m_impl->ivf_mft_input_nv12);
         if (FAILED(hr)) {
             char buf[160];
             snprintf(buf, sizeof(buf), "SetInputType (%s encoder) failed: 0x%08lx",
-                     mf_codec_name(codec), hr);
+                     mf_encode_video_codec_name(codec), hr);
             m_last_error = buf;
             return AVB_ERROR_OPEN_FAILED;
         }
@@ -606,7 +413,9 @@ avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_op
         m_impl->height     = options.video.height;
         m_impl->input_memory = options.video.input_memory;
         m_impl->frame_rate = options.video.frame_rate > 0 ? options.video.frame_rate : 30.0;
-        MFAverageTimePerFrameToFrameRate(sec_to_hns(1.0 / m_impl->frame_rate),
+        MFAverageTimePerFrameToFrameRate(
+                                         mf_encode_seconds_to_hns(
+                                             1.0 / m_impl->frame_rate),
                                          &m_impl->fps_num, &m_impl->fps_den);
         if (m_impl->fps_den == 0) { m_impl->fps_num = 30; m_impl->fps_den = 1; }
 
@@ -660,7 +469,7 @@ avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_op
                 return cres;
             }
 
-            GUID out_subtype = mf_video_subtype_from_codec(
+            GUID out_subtype = mf_encode_video_subtype(
                 stream.codec != AVB_VIDEO_CODEC_AUTO ? stream.codec : options.video.codec,
                 stream.codec_tag);
             if (IsEqualGUID(out_subtype, GUID_NULL)) {
@@ -690,7 +499,10 @@ avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_op
                 char buf[192];
                 snprintf(buf, sizeof(buf),
                          "AddStream (custom video/%s) failed: 0x%08lx",
-                         stream.codec_name ? stream.codec_name : mf_codec_name(stream.codec), hr);
+                         stream.codec_name
+                             ? stream.codec_name
+                             : mf_encode_video_codec_name(stream.codec),
+                         hr);
                 m_last_error = buf;
                 return AVB_ERROR_OPEN_FAILED;
             }
@@ -875,9 +687,10 @@ avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_op
             out_type->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, pcm_bytes_per_sec);
             out_type->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
         } else if (audio_codec == AVB_AUDIO_CODEC_MP3) {
-            int bitrate = mf_mp3_bitrate(options.audio.bitrate);
-            hr = init_mp3_media_type(out_type.Get(), m_impl->sample_rate,
-                                     m_impl->channels, bitrate);
+            int bitrate = mf_encode_mp3_bitrate(options.audio.bitrate);
+            hr = mf_encode_init_mp3_media_type(
+                out_type.Get(), m_impl->sample_rate,
+                m_impl->channels, bitrate);
             if (FAILED(hr)) {
                 char buf[160];
                 snprintf(buf, sizeof(buf),
@@ -898,7 +711,8 @@ avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_op
             out_type->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_AAC);
             out_type->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
             out_type->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
-                                aac_bytes_per_sec(options.audio.bitrate));
+                                mf_encode_aac_bytes_per_sec(
+                                    options.audio.bitrate));
         }
         if (audio_codec != AVB_AUDIO_CODEC_MP3) {
             out_type->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND,
@@ -940,7 +754,7 @@ avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_op
             }
 
             ComPtr<IMFMediaType> selected_out_type;
-            hr = select_mp3_output_type(
+            hr = mf_encode_select_mp3_output_type(
                 m_impl->audio_encoder.Get(), out_type.Get(),
                 (UINT32)m_impl->sample_rate, (UINT32)m_impl->channels,
                 &selected_out_type);
@@ -1001,22 +815,6 @@ avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_op
     }
     m_impl->began = true;
     return AVB_OK;
-}
-
-// Wrap a freshly filled, MF-allocated buffer in a sample with timing and write
-// it to the given stream. Takes ownership semantics of `buf` via ComPtr.
-static HRESULT write_buffer(IMFSinkWriter *writer, DWORD stream,
-                            ComPtr<IMFMediaBuffer> &buf, DWORD length,
-                            LONGLONG time_hns, LONGLONG dur_hns) {
-    buf->SetCurrentLength(length);
-    ComPtr<IMFSample> sample;
-    HRESULT hr = MFCreateSample(&sample);
-    if (FAILED(hr)) return hr;
-    hr = sample->AddBuffer(buf.Get());
-    if (FAILED(hr)) return hr;
-    sample->SetSampleTime(time_hns);
-    sample->SetSampleDuration(dur_hns);
-    return writer->WriteSample(stream, sample.Get());
 }
 
 avb_result AvbEncoderMediaFoundation::drain_video_mft(long long,
@@ -1207,8 +1005,9 @@ avb_result AvbEncoderMediaFoundation::drain_audio_mft(long long time_hns,
         DWORD length = 0;
         if (encoded) encoded->GetCurrentLength(&length);
         if (encoded && length > 0) {
-            hr = write_buffer(m_impl->writer.Get(), m_impl->audio_stream, encoded,
-                              length, (LONGLONG)time_hns, (LONGLONG)dur_hns);
+            hr = mf_encode_write_buffer(
+                m_impl->writer.Get(), m_impl->audio_stream, encoded.Get(),
+                length, time_hns, dur_hns);
             if (FAILED(hr)) {
                 char b[160];
                 snprintf(b, sizeof(b), "WriteSample (MP3) failed: 0x%08lx", hr);
@@ -1258,8 +1057,11 @@ avb_result AvbEncoderMediaFoundation::write_video(const avb_video_frame &frame, 
         memcpy(data, packet.data, packet.size);
         buf->Unlock();
 
-        hr = write_buffer(m_impl->writer.Get(), m_impl->video_stream, buf,
-                          (DWORD)packet.size, sec_to_hns(pts), sec_to_hns(dur));
+        hr = mf_encode_write_buffer(
+            m_impl->writer.Get(), m_impl->video_stream, buf.Get(),
+            (DWORD)packet.size,
+            mf_encode_seconds_to_hns(pts),
+            mf_encode_seconds_to_hns(dur));
         if (m_impl->custom_video_encoder->release_packet)
             m_impl->custom_video_encoder->release_packet(m_impl->custom_video_ctx, &packet);
         if (FAILED(hr)) {
@@ -1284,8 +1086,9 @@ avb_result AvbEncoderMediaFoundation::write_video(const avb_video_frame &frame, 
     double pts = pts_sec >= 0.0       ? pts_sec
                : frame.pts_sec >= 0.0 ? frame.pts_sec
                : (double)m_impl->video_index / m_impl->frame_rate;
-    LONGLONG time_hns = sec_to_hns(pts);
-    LONGLONG dur_hns  = sec_to_hns(1.0 / m_impl->frame_rate);
+    LONGLONG time_hns = mf_encode_seconds_to_hns(pts);
+    LONGLONG dur_hns =
+        mf_encode_seconds_to_hns(1.0 / m_impl->frame_rate);
 
     if (m_impl->input_memory == AVB_VIDEO_MEMORY_NATIVE) {
         if (frame.memory_type != AVB_VIDEO_MEMORY_NATIVE ||
@@ -1489,7 +1292,9 @@ avb_result AvbEncoderMediaFoundation::write_video(const avb_video_frame &frame, 
         return AVB_OK;
     }
 
-    hr = write_buffer(m_impl->writer.Get(), m_impl->video_stream, buf, total, time_hns, dur_hns);
+    hr = mf_encode_write_buffer(
+        m_impl->writer.Get(), m_impl->video_stream, buf.Get(),
+        total, time_hns, dur_hns);
     if (FAILED(hr)) {
         char b[128];
         snprintf(b, sizeof(b), "WriteSample (video) failed: 0x%08lx", hr);
@@ -1533,8 +1338,10 @@ avb_result AvbEncoderMediaFoundation::write_audio_f32(const float *src_interleav
     memcpy(data, audio_data, nbytes);
     buf->Unlock();
 
-    LONGLONG time_hns = sec_to_hns((double)m_impl->audio_samples / m_impl->sample_rate);
-    LONGLONG dur_hns  = sec_to_hns((double)frames / m_impl->sample_rate);
+    LONGLONG time_hns = mf_encode_seconds_to_hns(
+        (double)m_impl->audio_samples / m_impl->sample_rate);
+    LONGLONG dur_hns = mf_encode_seconds_to_hns(
+        (double)frames / m_impl->sample_rate);
 
     if (m_impl->audio_encoded_by_mft) {
         buf->SetCurrentLength(nbytes);
@@ -1567,7 +1374,9 @@ avb_result AvbEncoderMediaFoundation::write_audio_f32(const float *src_interleav
         return AVB_OK;
     }
 
-    hr = write_buffer(m_impl->writer.Get(), m_impl->audio_stream, buf, nbytes, time_hns, dur_hns);
+    hr = mf_encode_write_buffer(
+        m_impl->writer.Get(), m_impl->audio_stream, buf.Get(),
+        nbytes, time_hns, dur_hns);
     if (FAILED(hr)) {
         char b[128];
         snprintf(b, sizeof(b), "WriteSample (audio) failed: 0x%08lx", hr);
@@ -1589,7 +1398,9 @@ avb_result AvbEncoderMediaFoundation::finish() {
         avb_result drained = m_impl->video_encoder_async
             ? drain_async_video_mft()
             : drain_video_mft(
-                sec_to_hns((double)m_impl->video_index / m_impl->frame_rate), 0);
+                mf_encode_seconds_to_hns(
+                    (double)m_impl->video_index / m_impl->frame_rate),
+                0);
         if (drained != AVB_OK) return drained;
 
         if (m_impl->ivf_file) {
@@ -1628,8 +1439,11 @@ avb_result AvbEncoderMediaFoundation::finish() {
                 if (FAILED(buf->Lock(&data, nullptr, nullptr))) return AVB_ERROR_ENCODE_FAILED;
                 memcpy(data, packet.data, packet.size);
                 buf->Unlock();
-                bhr = write_buffer(m_impl->writer.Get(), m_impl->video_stream, buf,
-                                   (DWORD)packet.size, sec_to_hns(pts), sec_to_hns(dur));
+                bhr = mf_encode_write_buffer(
+                    m_impl->writer.Get(), m_impl->video_stream, buf.Get(),
+                    (DWORD)packet.size,
+                    mf_encode_seconds_to_hns(pts),
+                    mf_encode_seconds_to_hns(dur));
                 if (FAILED(bhr)) return AVB_ERROR_ENCODE_FAILED;
                 m_impl->video_index++;
             }
@@ -1642,7 +1456,9 @@ avb_result AvbEncoderMediaFoundation::finish() {
         m_impl->audio_encoder->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
         m_impl->audio_encoder->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
         avb_result drained = drain_audio_mft(
-            sec_to_hns((double)m_impl->audio_samples / m_impl->sample_rate), 0);
+            mf_encode_seconds_to_hns(
+                (double)m_impl->audio_samples / m_impl->sample_rate),
+            0);
         if (drained != AVB_OK) return drained;
     }
 
