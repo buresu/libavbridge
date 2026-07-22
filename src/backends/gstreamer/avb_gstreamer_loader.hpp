@@ -1,13 +1,11 @@
 #pragma once
 
-extern "C" {
 #include <gst/gst.h>
 #include <gst/app/gstappsink.h>
 #include <gst/app/gstappsrc.h>
 #include <gst/pbutils/pbutils.h>
 #include <gst/video/video.h>
 #include <gst/allocators/gstdmabuf.h>
-}
 
 #include <stdbool.h>
 
