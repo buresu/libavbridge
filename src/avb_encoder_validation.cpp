@@ -63,7 +63,8 @@ static bool is_compressed_video_format(avb_pixel_format format) {
            format == AVB_PIXEL_FORMAT_BC4_R ||
            format == AVB_PIXEL_FORMAT_BC5_RG ||
            format == AVB_PIXEL_FORMAT_BC7_RGBA ||
-           format == AVB_PIXEL_FORMAT_BC3_YCOCG;
+           format == AVB_PIXEL_FORMAT_BC3_YCOCG ||
+           format == AVB_PIXEL_FORMAT_BC3_YCOCG_BC4_A;
 }
 
 } // namespace

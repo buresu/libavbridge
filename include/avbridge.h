@@ -115,6 +115,11 @@ typedef enum avb_pixel_format {
      * to BC3_RGBA; what differs is the meaning of the channels, which only the
      * codec knows and only a shader (or a CPU pass) can undo. */
     AVB_PIXEL_FORMAT_BC3_YCOCG,
+    /* Two compressed planes covering the same width and height (HAP Q Alpha):
+     * plane 0 is BC3 scaled YCoCg, plane 1 is BC4 alpha on its own. The only
+     * compressed format with plane_count 2 -- BC3's alpha channel is already
+     * spent on luma, so the alpha cannot ride along in it. */
+    AVB_PIXEL_FORMAT_BC3_YCOCG_BC4_A,
 } avb_pixel_format;
 
 typedef enum avb_video_memory_type {

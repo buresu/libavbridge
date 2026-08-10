@@ -113,7 +113,8 @@ static bool avb_is_compressed_format(avb_pixel_format fmt) {
            fmt == AVB_PIXEL_FORMAT_BC4_R ||
            fmt == AVB_PIXEL_FORMAT_BC5_RG ||
            fmt == AVB_PIXEL_FORMAT_BC7_RGBA ||
-           fmt == AVB_PIXEL_FORMAT_BC3_YCOCG;
+           fmt == AVB_PIXEL_FORMAT_BC3_YCOCG ||
+           fmt == AVB_PIXEL_FORMAT_BC3_YCOCG_BC4_A;
 }
 
 static FourCharCode avb_video_codec_fourcc(avb_video_codec codec) {
