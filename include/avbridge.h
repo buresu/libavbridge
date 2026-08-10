@@ -111,6 +111,10 @@ typedef enum avb_pixel_format {
     AVB_PIXEL_FORMAT_BC4_R,    /* compressed, 4x4 blocks, 8 bytes/block */
     AVB_PIXEL_FORMAT_BC5_RG,   /* compressed, 4x4 blocks, 16 bytes/block */
     AVB_PIXEL_FORMAT_BC7_RGBA, /* compressed, 4x4 blocks, 16 bytes/block */
+    /* BC3 blocks holding scaled YCoCg rather than RGBA (HAP Q). Byte-identical
+     * to BC3_RGBA; what differs is the meaning of the channels, which only the
+     * codec knows and only a shader (or a CPU pass) can undo. */
+    AVB_PIXEL_FORMAT_BC3_YCOCG,
 } avb_pixel_format;
 
 typedef enum avb_video_memory_type {
@@ -330,6 +334,13 @@ typedef struct avb_decode_options {
     /* 1 = allow registered custom video decoders to handle matching video
      * streams before the backend's built-in video decoder is opened. */
     int enable_custom_video_decoders;
+    /* 1 = the caller can accept decoded frames in a block-compressed format
+     * (BC1/BC3/BC4/BC5/BC7), whatever video_format asked for. Custom decoders
+     * for GPU-ready codecs such as HAP produce those blocks, so this is what
+     * lets one be selected without the caller naming a specific compressed
+     * video_format up front -- the codec is only known once the file is open.
+     * Leaving it 0 keeps the guarantee that frames arrive in video_format. */
+    int accept_compressed_video;
     /* Optional device context for decoded hardware/external frames.
      * Media Foundation interprets this as ID3D11Device*. The caller retains
      * ownership; the decoder takes its own reference while open. */

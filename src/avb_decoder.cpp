@@ -91,6 +91,7 @@ avb_decode_options avb_decode_options_default(void) {
     o.audio_sample_rate  = 0;
     o.audio_channels     = 0;
     o.enable_custom_video_decoders = 1;
+    o.accept_compressed_video = 0;
     return o;
 }
 

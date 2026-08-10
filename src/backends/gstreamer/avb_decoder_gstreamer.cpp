@@ -36,8 +36,28 @@ static bool avb_is_compressed_format(avb_pixel_format fmt) {
            fmt == AVB_PIXEL_FORMAT_BC3_RGBA ||
            fmt == AVB_PIXEL_FORMAT_BC4_R ||
            fmt == AVB_PIXEL_FORMAT_BC5_RG ||
-           fmt == AVB_PIXEL_FORMAT_BC7_RGBA;
+           fmt == AVB_PIXEL_FORMAT_BC7_RGBA ||
+           fmt == AVB_PIXEL_FORMAT_BC3_YCOCG;
 }
+
+// Whether it is worth building the packet-passthrough pipeline at all. The
+// plugins do the real deciding in can_decode(), but that needs stream caps,
+// which needs the pipeline -- so this asks the cheaper question first: has the
+// caller said it can take what a custom decoder produces? A caller that named a
+// compressed video_format plainly has; accept_compressed_video is how one that
+// cannot know the codec yet says the same thing.
+static bool avb_wants_custom_video(const avb_decode_options &options) {
+    return options.enable_video && options.enable_custom_video_decoders &&
+           (avb_is_compressed_format(options.video_format) ||
+            options.accept_compressed_video);
+}
+
+// audioconvert cannot map an unpositioned multi-channel stream (a 5.1 track
+// whose layout the container did not state) onto positioned stereo, and refuses
+// with not-negotiated -- which fails the whole pipeline, video included. An
+// empty mix-matrix tells it to derive one itself, which is what makes the
+// downmix legal. Positioned sources are unaffected.
+#define AVB_AUDIOCONVERT "audioconvert mix-matrix=\"<>\""
 
 static std::string gst_launch_quote(const char *s) {
     std::string out = "\"";
@@ -183,6 +203,22 @@ static std::string caps_to_codec_name(const AvbGstFuncs &gst, const GstCaps *cap
     return name;
 }
 
+// The container fourcc, when the caps carry one. GStreamer does not expose the
+// sample entry directly, but codecs whose variants are distinct fourccs (HAP:
+// Hap1/Hap5/HapY/HapM) surface them as a four-character "variant" string, which
+// is the same four bytes a plugin would read from codec_tag under FFmpeg.
+static uint32_t caps_to_codec_tag(const AvbGstFuncs &gst, const GstCaps *caps) {
+    if (!caps) return 0;
+    const GstStructure *s = gst.gst_caps_get_structure(caps, 0);
+    if (!s) return 0;
+    const char *variant = gst.gst_structure_get_string(s, "variant");
+    if (!variant || strlen(variant) != 4) return 0;
+    return (uint32_t)(unsigned char)variant[0] |
+           ((uint32_t)(unsigned char)variant[1] << 8) |
+           ((uint32_t)(unsigned char)variant[2] << 16) |
+           ((uint32_t)(unsigned char)variant[3] << 24);
+}
+
 AvbDecoderGStreamer::AvbDecoderGStreamer() {
     char err_buf[512];
     m_libs_loaded = avb_gst_load(m_gst, err_buf, sizeof(err_buf));
@@ -292,17 +328,28 @@ avb_result AvbDecoderGStreamer::open_custom_file(
     const char *path,
     const avb_decode_options &options
 ) {
-    if (!options.enable_video || !options.enable_custom_video_decoders ||
-        !avb_is_compressed_format(options.video_format)) {
+    if (!avb_wants_custom_video(options)) {
         return AVB_ERROR_STREAM_NOT_FOUND;
     }
+
+    // What the file actually contains, before naming pads that must exist.
+    // gst_parse_launch links demux.audio_0 statically, so asking for it on a
+    // file with no audio track leaves the pipeline forever pre-rolling and the
+    // first pull_sample() never returns.
+    gchar *probe_uri = m_gst.gst_filename_to_uri(path, nullptr);
+    if (probe_uri) {
+        discover_codec_names(probe_uri);
+        m_gst.g_free(probe_uri);
+    }
+    const bool want_audio = options.enable_audio && !m_audio_codec_name.empty();
 
     std::string desc = "filesrc location=" + gst_launch_quote(path) +
         " ! qtdemux name=demux "
         "demux.video_0 ! queue ! appsink name=avb_vsink sync=false max-buffers=16";
 
-    if (options.enable_audio) {
-        desc += " demux.audio_0 ! queue ! decodebin ! audioconvert ! audioresample ! "
+    if (want_audio) {
+        desc += " demux.audio_0 ! queue ! decodebin ! "
+                AVB_AUDIOCONVERT " ! audioresample ! "
                 "appsink name=avb_asink sync=false max-buffers=0 "
                 "caps=audio/x-raw,format=F32LE,layout=interleaved";
         if (options.audio_channels > 0) {
@@ -328,7 +375,7 @@ avb_result AvbDecoderGStreamer::open_custom_file(
 
     m_video_sink = m_gst.gst_bin_get_by_name((GstBin *)m_pipeline, "avb_vsink");
     if (m_video_sink) m_gst.gst_app_sink_set_drop((GstAppSink *)m_video_sink, FALSE);
-    if (options.enable_audio) {
+    if (want_audio) {
         m_audio_sink = m_gst.gst_bin_get_by_name((GstBin *)m_pipeline, "avb_asink");
         if (m_audio_sink) m_gst.gst_app_sink_set_drop((GstAppSink *)m_audio_sink, FALSE);
     }
@@ -378,6 +425,7 @@ avb_result AvbDecoderGStreamer::open_custom_file(
     stream.width = m_width;
     stream.height = m_height;
     stream.frame_rate = m_frame_rate;
+    stream.codec_tag = caps_to_codec_tag(m_gst, vcaps);
 
     const avb_video_decoder_plugin *plugin =
         avb_find_video_decoder_plugin(stream, options);
@@ -418,17 +466,6 @@ avb_result AvbDecoderGStreamer::open_custom_file(
         m_audio_track_count = m_audio_sink ? 1 : 0;
     }
 
-    GError *uri_err = nullptr;
-    gchar *uri = m_gst.gst_filename_to_uri(path, &uri_err);
-    if (uri) {
-        std::string custom_video_codec = m_video_codec_name;
-        discover_codec_names(uri);
-        m_video_codec_name = custom_video_codec;
-        m_gst.g_free(uri);
-    } else {
-        m_gst.g_clear_error(&uri_err);
-    }
-
     m_gst.gst_element_set_state(m_pipeline, GST_STATE_PLAYING);
     return AVB_OK;
 }
@@ -443,8 +480,7 @@ avb_result AvbDecoderGStreamer::open_file(const char *path, const avb_decode_opt
         return AVB_ERROR_INVALID_ARGUMENT;
     }
 
-    if (options.enable_video && options.enable_custom_video_decoders &&
-        avb_is_compressed_format(options.video_format)) {
+    if (avb_wants_custom_video(options)) {
         avb_result custom_res = open_custom_file(path, options);
         if (custom_res == AVB_OK) return AVB_OK;
         if (custom_res != AVB_ERROR_STREAM_NOT_FOUND) return custom_res;
@@ -505,8 +541,9 @@ avb_result AvbDecoderGStreamer::open_file(const char *path, const avb_decode_opt
 
         char desc[512];
         int n = snprintf(desc, sizeof(desc),
-            "audioconvert ! audioresample ! appsink name=avb_asink sync=false "
-            "max-buffers=0 caps=audio/x-raw,format=F32LE,layout=interleaved");
+            AVB_AUDIOCONVERT " ! audioresample ! appsink name=avb_asink "
+            "sync=false max-buffers=0 "
+            "caps=audio/x-raw,format=F32LE,layout=interleaved");
         if (m_req_channels > 0)
             n += snprintf(desc + n, sizeof(desc) - n, ",channels=%d", m_req_channels);
         if (m_req_sample_rate > 0)

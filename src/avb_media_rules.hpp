@@ -167,6 +167,7 @@ inline bool valid_pixel_format(avb_pixel_format format) {
         case AVB_PIXEL_FORMAT_BC4_R:
         case AVB_PIXEL_FORMAT_BC5_RG:
         case AVB_PIXEL_FORMAT_BC7_RGBA:
+        case AVB_PIXEL_FORMAT_BC3_YCOCG:
             return true;
     }
     return false;

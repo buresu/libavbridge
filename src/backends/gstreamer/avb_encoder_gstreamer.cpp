@@ -18,7 +18,8 @@ static bool avb_is_compressed_format(avb_pixel_format fmt) {
            fmt == AVB_PIXEL_FORMAT_BC3_RGBA ||
            fmt == AVB_PIXEL_FORMAT_BC4_R ||
            fmt == AVB_PIXEL_FORMAT_BC5_RG ||
-           fmt == AVB_PIXEL_FORMAT_BC7_RGBA;
+           fmt == AVB_PIXEL_FORMAT_BC7_RGBA ||
+           fmt == AVB_PIXEL_FORMAT_BC3_YCOCG;
 }
 
 static const char *gst_hw_video_encoder(avb_video_codec codec, avb_hardware_device device) {
