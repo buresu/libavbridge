@@ -125,12 +125,11 @@ static avb_result open_decoder(avb_decoder **out_dec, const avb_decode_options &
     // Media Foundation's MOV source omits video tracks whose sample entry it
     // does not understand. That includes HAP, so a registered custom decoder
     // never gets a packet (and a video-only open reports no streams). When the
-    // caller explicitly accepts compressed custom-decoder output, retry AUTO
-    // through the optional runtime FFmpeg demuxer. Keep a successful Media
-    // Foundation result when FFmpeg is absent or also finds no video.
-    if (options.backend == AVB_BACKEND_AUTO && options.enable_video &&
-        options.enable_custom_video_decoders &&
-        options.accept_compressed_video) {
+    // AUTO must still find those streams even when the caller wants ordinary
+    // pixels: FFmpeg can either invoke a matching custom decoder or use its own
+    // decoder and convert the result. Keep a successful Media Foundation
+    // result when FFmpeg is absent or also finds no video.
+    if (options.backend == AVB_BACKEND_AUTO && options.enable_video) {
         bool missing_video = res != AVB_OK;
         if (res == AVB_OK) {
             avb_media_info info{};

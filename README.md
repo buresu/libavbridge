@@ -18,10 +18,10 @@ FFmpeg is an optional cross-platform backend selected explicitly with
 `AVB_BACKEND_FFMPEG`.
 
 When both Media Foundation and FFmpeg are enabled on Windows, `AUTO` also
-retries through FFmpeg if Media Foundation omits the requested video stream and
-the decode request accepts compressed custom-decoder output. This allows custom
-codecs such as HAP to use FFmpeg for demuxing while the registered plugin still
-decodes each packet.
+retries through FFmpeg if Media Foundation omits the requested video stream.
+This allows codecs such as HAP to use FFmpeg for demuxing while a registered
+custom decoder handles packets, or to use FFmpeg's decoder when ordinary pixel
+output was requested.
 
 GStreamer and FFmpeg are loaded dynamically at runtime. Applications must
 install the corresponding libraries and codec plugins separately.
@@ -126,6 +126,10 @@ working VA driver and GStreamer VA plugins.
 FFmpeg requires `libavformat`, `libavcodec`, `libavutil`, `libswresample`, and
 `libswscale`. DMABUF/VAAPI paths require FFmpeg hardware-context support and a
 working VA driver.
+
+On Windows, the runtime loader first uses the normal DLL search path and then
+checks `FFMPEG_DIR\\bin` (or `FFMPEG_DIR` itself). Scoop's `ffmpeg-shared`
+package sets `FFMPEG_DIR` to its package root.
 
 ## Examples
 

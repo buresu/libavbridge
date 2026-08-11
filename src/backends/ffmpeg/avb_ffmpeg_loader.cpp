@@ -2,13 +2,63 @@
 
 #include <cstdio>
 #include <cstring>
+#include <string>
 
 // Cross-platform dynamic loading: LoadLibrary/GetProcAddress on Windows,
 // dlopen/dlsym elsewhere. FFmpeg is loaded at runtime on every platform and
 // never linked at build time.
 #ifdef _WIN32
 #  include <windows.h>
-static void *lib_open(const char *name) { return (void *)LoadLibraryA(name); }
+
+static HMODULE lib_open_from_ffmpeg_dir(const char *name) {
+    const DWORD required = GetEnvironmentVariableW(L"FFMPEG_DIR", nullptr, 0);
+    if (required == 0) return nullptr;
+
+    std::wstring root(required, L'\0');
+    const DWORD copied =
+        GetEnvironmentVariableW(L"FFMPEG_DIR", root.data(), required);
+    if (copied == 0 || copied >= required) return nullptr;
+    root.resize(copied);
+
+    const int name_length = MultiByteToWideChar(CP_ACP, 0, name, -1,
+                                                 nullptr, 0);
+    if (name_length <= 1) return nullptr;
+    std::wstring wide_name(static_cast<size_t>(name_length), L'\0');
+    if (MultiByteToWideChar(CP_ACP, 0, name, -1, wide_name.data(),
+                            name_length) == 0) {
+        return nullptr;
+    }
+    wide_name.resize(static_cast<size_t>(name_length - 1));
+
+    const auto join = [](const std::wstring &directory,
+                         const std::wstring &file) {
+        std::wstring path = directory;
+        if (!path.empty() && path.back() != L'\\' && path.back() != L'/') {
+            path.push_back(L'\\');
+        }
+        path += file;
+        return path;
+    };
+
+    // Scoop's ffmpeg-shared manifest sets FFMPEG_DIR to the package root.
+    // LOAD_WITH_ALTERED_SEARCH_PATH also lets dependencies of the first FFmpeg
+    // DLL resolve beside that DLL without modifying the process-wide PATH.
+    const std::wstring bin_path = join(join(root, L"bin"), wide_name);
+    if (HMODULE handle = LoadLibraryExW(
+            bin_path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH)) {
+        return handle;
+    }
+
+    // Also accept FFMPEG_DIR pointing directly at the DLL directory.
+    const std::wstring root_path = join(root, wide_name);
+    return LoadLibraryExW(root_path.c_str(), nullptr,
+                          LOAD_WITH_ALTERED_SEARCH_PATH);
+}
+
+static void *lib_open(const char *name) {
+    if (HMODULE handle = LoadLibraryA(name)) return (void *)handle;
+    return (void *)lib_open_from_ffmpeg_dir(name);
+}
 static void *lib_sym(void *h, const char *s) { return (void *)GetProcAddress((HMODULE)h, s); }
 static void  lib_close(void *h) { FreeLibrary((HMODULE)h); }
 #else

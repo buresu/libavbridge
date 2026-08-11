@@ -146,6 +146,7 @@ if(AVB_ENABLE_FFMPEG)
         HINTS /usr/include /usr/local/include
               /opt/homebrew/include            # macOS (Apple Silicon Homebrew)
               "$ENV{FFMPEG_ROOT}/include"      # Windows/manual installs
+              "$ENV{FFMPEG_DIR}/include"       # Windows/Scoop ffmpeg-shared
               "${FFMPEG_RUNTIME_ROOT}/include" # Runtime packages with bin/include
     )
     if(FFMPEG_INCLUDE_DIR)
