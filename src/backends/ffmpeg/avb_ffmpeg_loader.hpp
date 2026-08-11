@@ -34,6 +34,11 @@ struct AvbFFmpegFuncs {
     // avcodec
     const AVCodec *(*avcodec_find_decoder)(enum AVCodecID);
     const AVCodecHWConfig *(*avcodec_get_hw_config)(const AVCodec *, int);
+#if LIBAVCODEC_VERSION_MAJOR >= 61
+    int (*avcodec_get_supported_config)(const AVCodecContext *, const AVCodec *,
+                                        enum AVCodecConfig, unsigned,
+                                        const void **, int *);
+#endif
     AVCodecContext *(*avcodec_alloc_context3)(const AVCodec *);
     int (*avcodec_parameters_to_context)(AVCodecContext *, const AVCodecParameters *);
     int (*avcodec_open2)(AVCodecContext *, const AVCodec *, AVDictionary **);

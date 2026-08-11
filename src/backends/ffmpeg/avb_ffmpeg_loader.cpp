@@ -170,6 +170,9 @@ bool avb_ffmpeg_load(AvbFFmpegFuncs &out_funcs, char *err_buf, int err_buf_size)
 
     LOAD_SYM(g_handle_avcodec, out_funcs, avcodec_find_decoder);
     LOAD_SYM(g_handle_avcodec, out_funcs, avcodec_get_hw_config);
+#if LIBAVCODEC_VERSION_MAJOR >= 61
+    LOAD_SYM(g_handle_avcodec, out_funcs, avcodec_get_supported_config);
+#endif
     LOAD_SYM(g_handle_avcodec, out_funcs, avcodec_alloc_context3);
     LOAD_SYM(g_handle_avcodec, out_funcs, avcodec_parameters_to_context);
     LOAD_SYM(g_handle_avcodec, out_funcs, avcodec_open2);

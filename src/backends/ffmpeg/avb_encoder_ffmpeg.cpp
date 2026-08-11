@@ -28,22 +28,51 @@ static AVCodecID avb_ff_video_codec_id(avb_video_codec codec) {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 #endif
-static bool avb_ff_sample_fmt_supported(const AVCodec *codec, AVSampleFormat fmt) {
+static bool avb_ff_sample_fmt_supported(const AvbFFmpegFuncs &ff,
+                                        const AVCodec *codec,
+                                        AVSampleFormat fmt) {
+#if LIBAVCODEC_VERSION_MAJOR >= 61
+    if (!codec) return true;
+    const void *configs = nullptr;
+    int count = 0;
+    if (ff.avcodec_get_supported_config(
+            nullptr, codec, AV_CODEC_CONFIG_SAMPLE_FORMAT, 0,
+            &configs, &count) < 0 || !configs) {
+        return true;
+    }
+    const auto *sample_fmts = static_cast<const AVSampleFormat *>(configs);
+    for (int i = 0; i < count; ++i) {
+        if (sample_fmts[i] == fmt) return true;
+    }
+#else
     if (!codec || !codec->sample_fmts) return true;
     for (const AVSampleFormat *p = codec->sample_fmts; *p != AV_SAMPLE_FMT_NONE; ++p) {
         if (*p == fmt) return true;
     }
+#endif
     return false;
 }
 
-static AVSampleFormat avb_ff_pick_sample_fmt(const AVCodec *codec,
+static AVSampleFormat avb_ff_pick_sample_fmt(const AvbFFmpegFuncs &ff,
+                                             const AVCodec *codec,
                                              const AVSampleFormat *preferred) {
     for (const AVSampleFormat *p = preferred; *p != AV_SAMPLE_FMT_NONE; ++p) {
-        if (avb_ff_sample_fmt_supported(codec, *p)) return *p;
+        if (avb_ff_sample_fmt_supported(ff, codec, *p)) return *p;
     }
+#if LIBAVCODEC_VERSION_MAJOR >= 61
+    const void *configs = nullptr;
+    int count = 0;
+    if (codec && ff.avcodec_get_supported_config(
+                     nullptr, codec, AV_CODEC_CONFIG_SAMPLE_FORMAT, 0,
+                     &configs, &count) >= 0 && configs && count > 0) {
+        return static_cast<const AVSampleFormat *>(configs)[0];
+    }
+    return preferred[0];
+#else
     return codec && codec->sample_fmts && codec->sample_fmts[0] != AV_SAMPLE_FMT_NONE
         ? codec->sample_fmts[0]
         : preferred[0];
+#endif
 }
 #if defined(__GNUC__)
 #pragma GCC diagnostic pop
@@ -536,7 +565,8 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
             return AVB_ERROR_INVALID_ARGUMENT;
         }
         if (!acodec) { set_error("No %s encoder available in this FFmpeg build.", aname); return AVB_ERROR_OPEN_FAILED; }
-        AVSampleFormat asfmt = avb_ff_pick_sample_fmt(acodec, preferred_sample_fmts);
+        AVSampleFormat asfmt =
+            avb_ff_pick_sample_fmt(m_ff, acodec, preferred_sample_fmts);
 
         m_astream = m_ff.avformat_new_stream(m_fmt_ctx, nullptr);
         if (!m_astream) { set_error("avformat_new_stream (audio) failed."); return AVB_ERROR_OPEN_FAILED; }

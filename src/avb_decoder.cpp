@@ -118,9 +118,44 @@ static avb_result open_decoder(avb_decoder **out_dec, const avb_decode_options &
         dec->set_error("Requested backend is not available on this platform.");
         return AVB_ERROR_BACKEND_NOT_AVAILABLE;
     }
-    dec->impl = std::move(impl);
 
-    avb_result res = open(*dec->impl);
+    avb_result res = open(*impl);
+
+#if defined(_WIN32) && defined(AVB_ENABLE_FFMPEG)
+    // Media Foundation's MOV source omits video tracks whose sample entry it
+    // does not understand. That includes HAP, so a registered custom decoder
+    // never gets a packet (and a video-only open reports no streams). When the
+    // caller explicitly accepts compressed custom-decoder output, retry AUTO
+    // through the optional runtime FFmpeg demuxer. Keep a successful Media
+    // Foundation result when FFmpeg is absent or also finds no video.
+    if (options.backend == AVB_BACKEND_AUTO && options.enable_video &&
+        options.enable_custom_video_decoders &&
+        options.accept_compressed_video) {
+        bool missing_video = res != AVB_OK;
+        if (res == AVB_OK) {
+            avb_media_info info{};
+            missing_video = impl->get_media_info(info) != AVB_OK ||
+                            info.video.available == 0;
+        }
+
+        if (missing_video) {
+            auto fallback =
+                avb_create_decoder_backend(AVB_BACKEND_FFMPEG);
+            if (fallback) {
+                const avb_result fallback_res = open(*fallback);
+                avb_media_info fallback_info{};
+                if (fallback_res == AVB_OK &&
+                    fallback->get_media_info(fallback_info) == AVB_OK &&
+                    fallback_info.video.available != 0) {
+                    impl = std::move(fallback);
+                    res = AVB_OK;
+                }
+            }
+        }
+    }
+#endif
+
+    dec->impl = std::move(impl);
     if (res != AVB_OK) capture_error(dec);
     else               cache_media(dec);
     return res;

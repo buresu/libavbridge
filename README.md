@@ -17,6 +17,12 @@ backends without bundling codec libraries.
 FFmpeg is an optional cross-platform backend selected explicitly with
 `AVB_BACKEND_FFMPEG`.
 
+When both Media Foundation and FFmpeg are enabled on Windows, `AUTO` also
+retries through FFmpeg if Media Foundation omits the requested video stream and
+the decode request accepts compressed custom-decoder output. This allows custom
+codecs such as HAP to use FFmpeg for demuxing while the registered plugin still
+decodes each packet.
+
 GStreamer and FFmpeg are loaded dynamically at runtime. Applications must
 install the corresponding libraries and codec plugins separately.
 

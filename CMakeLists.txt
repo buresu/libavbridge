@@ -137,10 +137,16 @@ if(AVB_ENABLE_FFMPEG)
 
     # Find FFmpeg headers for compilation only (no link-time dependency on
     # FFmpeg). Cross-platform hints; set FFMPEG_INCLUDE_DIR manually if needed.
+    find_program(FFMPEG_EXECUTABLE NAMES ffmpeg)
+    if(FFMPEG_EXECUTABLE)
+        get_filename_component(FFMPEG_BIN_DIR "${FFMPEG_EXECUTABLE}" DIRECTORY)
+        get_filename_component(FFMPEG_RUNTIME_ROOT "${FFMPEG_BIN_DIR}" DIRECTORY)
+    endif()
     find_path(FFMPEG_INCLUDE_DIR libavformat/avformat.h
         HINTS /usr/include /usr/local/include
               /opt/homebrew/include            # macOS (Apple Silicon Homebrew)
               "$ENV{FFMPEG_ROOT}/include"      # Windows/manual installs
+              "${FFMPEG_RUNTIME_ROOT}/include" # Runtime packages with bin/include
     )
     if(FFMPEG_INCLUDE_DIR)
         target_include_directories(avbridge PRIVATE ${FFMPEG_INCLUDE_DIR})
@@ -150,7 +156,7 @@ if(AVB_ENABLE_FFMPEG)
                             "Install ffmpeg-dev (or equivalent) to enable video decode.")
         endif()
     else()
-        message(WARNING "FFmpeg headers not found. FFmpeg backend may not compile correctly.")
+        message(FATAL_ERROR "FFmpeg headers not found. Set FFMPEG_INCLUDE_DIR or install an FFmpeg shared/development package.")
     endif()
     if(NOT WIN32)
         target_link_libraries(avbridge PRIVATE ${CMAKE_DL_LIBS})
