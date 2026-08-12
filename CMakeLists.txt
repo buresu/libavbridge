@@ -96,6 +96,10 @@ else()
     add_library(avbridge STATIC ${AVB_SOURCES})
 endif()
 
+if(MSVC)
+    target_compile_options(avbridge PRIVATE /utf-8)
+endif()
+
 target_include_directories(avbridge
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
