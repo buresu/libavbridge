@@ -54,6 +54,7 @@ static bool parse_hardware_device(const char *name, avb_hardware_device *out) {
     if (std::strcmp(name, "d3d11va") == 0) { *out = AVB_HW_DEVICE_D3D11VA; return true; }
     if (std::strcmp(name, "videotoolbox") == 0) { *out = AVB_HW_DEVICE_VIDEOTOOLBOX; return true; }
     if (std::strcmp(name, "amf") == 0) { *out = AVB_HW_DEVICE_AMF; return true; }
+    if (std::strcmp(name, "v4l2") == 0) { *out = AVB_HW_DEVICE_V4L2; return true; }
     return false;
 }
 

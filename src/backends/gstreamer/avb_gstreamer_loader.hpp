@@ -60,6 +60,18 @@ struct AvbGstFuncs {
     void (*gst_message_parse_error)(GstMessage *, GError **, gchar **);
     void (*gst_query_add_allocation_meta)(GstQuery *, GType, const GstStructure *);
 
+    // Which elements a pipeline ended up with (decoder selection is playbin's).
+    GstIterator *(*gst_bin_iterate_recurse)(GstBin *);
+    GstIteratorResult (*gst_iterator_next)(GstIterator *, GValue *);
+    void (*gst_iterator_resync)(GstIterator *);
+    void (*gst_iterator_free)(GstIterator *);
+    GstElementFactory *(*gst_element_get_factory)(GstElement *);
+    const gchar *(*gst_element_factory_get_metadata)(GstElementFactory *, const gchar *);
+    GstPad *(*gst_element_get_static_pad)(GstElement *, const gchar *);
+    GstCaps *(*gst_pad_get_current_caps)(GstPad *);
+    const GValue *(*gst_structure_get_value)(const GstStructure *, const gchar *);
+    GType (*gst_buffer_get_type)(void);
+
     // libgstapp-1.0
     GstSample *(*gst_app_sink_pull_sample)(GstAppSink *);
     GstSample *(*gst_app_sink_try_pull_preroll)(GstAppSink *, GstClockTime);
@@ -95,6 +107,9 @@ struct AvbGstFuncs {
     void (*g_object_set)(gpointer, const gchar *, ...);
     void (*g_object_get)(gpointer, const gchar *, ...);
     void (*g_object_unref)(gpointer);
+    gpointer (*g_value_get_object)(const GValue *);
+    gpointer (*g_value_get_boxed)(const GValue *);
+    void (*g_value_unset)(GValue *);
 
     // libglib-2.0
     void (*g_free)(gpointer);

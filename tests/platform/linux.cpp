@@ -1,9 +1,11 @@
-// Linux-specific DMABUF descriptor and lifetime contract.
+// Linux-specific DMABUF descriptor and lifetime contract, and the hardware
+// policy contract for frames read back into CPU memory.
 //
 // Usage: avb_platform_linux <fixture.mp4>
 
 #include "test.hpp"
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <set>
@@ -131,6 +133,151 @@ bool check_backend(Context &test, const char *path, avb_backend backend) {
   return true;
 }
 
+// What a decode under one hardware policy produced: the first frame's luma,
+// tightly packed, what decoded it, and how many frames followed.
+struct CpuDecode {
+  avb_result open_result = AVB_ERROR_UNKNOWN;
+  avb_hardware_device device = AVB_HW_DEVICE_AUTO;
+  avb_color_range color_range = AVB_COLOR_RANGE_UNKNOWN;
+  avb_color_matrix color_matrix = AVB_COLOR_MATRIX_UNKNOWN;
+  int width = 0;
+  int height = 0;
+  int frames = 0;
+  bool cpu_memory = true;
+  bool survived_audio_read = true;
+  std::vector<unsigned char> luma;
+};
+
+std::vector<unsigned char> tight_luma(const avb_video_frame &frame) {
+  std::vector<unsigned char> luma(static_cast<size_t>(frame.width) *
+                                  frame.height);
+  for (int y = 0; y < frame.height; ++y)
+    std::memcpy(luma.data() + static_cast<size_t>(y) * frame.width,
+                frame.plane_data[0] +
+                    static_cast<size_t>(y) * frame.plane_stride[0],
+                static_cast<size_t>(frame.width));
+  return luma;
+}
+
+CpuDecode decode_cpu(const char *path, avb_backend backend,
+                     avb_hardware_policy policy) {
+  CpuDecode out;
+  avb_decode_options options = avb_decode_options_default();
+  options.backend = backend;
+  options.video_format = AVB_PIXEL_FORMAT_NV12;
+  options.video_memory = AVB_VIDEO_MEMORY_CPU;
+  options.hardware_policy = policy;
+
+  avb_decoder *decoder = nullptr;
+  out.open_result = avb_decoder_open(&decoder, path, &options);
+  if (out.open_result != AVB_OK) {
+    avb_decoder_close(decoder);
+    return out;
+  }
+
+  std::vector<float> audio(4096);
+  avb_video_frame frame{};
+  while (avb_decoder_read_video_frame(decoder, &frame) == AVB_OK) {
+    out.cpu_memory = out.cpu_memory &&
+                     frame.memory_type == AVB_VIDEO_MEMORY_CPU &&
+                     frame.format == AVB_PIXEL_FORMAT_NV12 &&
+                     frame.plane_count == 2 && frame.plane_data[0] &&
+                     frame.plane_data[1];
+    if (!out.cpu_memory) {
+      avb_decoder_release_video_frame(decoder, &frame);
+      break;
+    }
+    if (out.frames == 0) {
+      out.device = frame.hardware_device;
+      out.color_range = frame.color_range;
+      out.color_matrix = frame.color_matrix;
+      out.width = frame.width;
+      out.height = frame.height;
+      out.luma = tight_luma(frame);
+      // The frame is the caller's until it is released, whatever else the
+      // decoder is asked for in between.
+      avb_decoder_read_audio_f32(decoder, audio.data(), 1024, nullptr);
+      out.survived_audio_read = tight_luma(frame) == out.luma;
+    }
+    avb_decoder_release_video_frame(decoder, &frame);
+    ++out.frames;
+    avb_decoder_read_audio_f32(decoder, audio.data(), 1024, nullptr);
+  }
+  avb_decoder_close(decoder);
+  return out;
+}
+
+double mean_luma_difference(const CpuDecode &a, const CpuDecode &b) {
+  if (a.luma.size() != b.luma.size() || a.luma.empty())
+    return 255.0;
+  double sum = 0.0;
+  for (size_t i = 0; i < a.luma.size(); ++i)
+    sum += std::fabs(static_cast<double>(a.luma[i]) - b.luma[i]);
+  return sum / static_cast<double>(a.luma.size());
+}
+
+// CPU frames come from either kind of decoder, and the policy decides which:
+// DISABLED is software, REQUIRE is hardware or nothing, PREFER is hardware
+// where there is some and always opens. All three show the same picture.
+bool check_cpu_readback(Context &test, const char *path, avb_backend backend) {
+  if (!avb_backend_is_available(backend))
+    return false;
+  const char *name = avb_backend_name(backend);
+
+  const CpuDecode software = decode_cpu(path, backend, AVB_HARDWARE_DISABLED);
+  if (software.open_result != AVB_OK) {
+    std::printf("SKIP: %s runtime is unavailable\n", name);
+    return false;
+  }
+  test.check(software.cpu_memory, "DISABLED yields NV12 CPU frames");
+  test.equal(software.device, AVB_HW_DEVICE_AUTO,
+             "DISABLED decodes in software");
+  test.check(software.frames > 0, "software decode yields frames");
+  test.check(software.survived_audio_read,
+             "a software frame stays intact until it is released");
+
+  const CpuDecode required = decode_cpu(path, backend, AVB_HARDWARE_REQUIRE);
+  const bool hardware = required.open_result == AVB_OK;
+  const CpuDecode preferred = decode_cpu(path, backend, AVB_HARDWARE_PREFER);
+  test.equal(preferred.open_result, AVB_OK,
+             "PREFER opens with or without a hardware decoder");
+  test.check(preferred.cpu_memory, "PREFER yields NV12 CPU frames");
+  test.equal(preferred.frames, software.frames,
+             "PREFER decodes as many frames as software");
+  test.near(mean_luma_difference(preferred, software), 0.0, 1.0,
+            "PREFER shows the picture software decodes");
+  test.check(preferred.survived_audio_read,
+             "a PREFER frame stays intact until it is released");
+
+  if (!hardware) {
+    test.equal(preferred.device, AVB_HW_DEVICE_AUTO,
+               "PREFER falls back to software without a hardware decoder");
+    std::printf("SKIP: %s has no hardware decoder for this stream\n", name);
+    return false;
+  }
+
+  test.check(required.cpu_memory, "REQUIRE yields NV12 CPU frames");
+  test.check(required.device != AVB_HW_DEVICE_AUTO,
+             "a frame read back from hardware names what decoded it");
+  test.equal(required.frames, software.frames,
+             "hardware decodes as many frames as software");
+  test.near(mean_luma_difference(required, software), 0.0, 1.0,
+            "a frame read back from hardware matches the software decode");
+  test.check(required.survived_audio_read,
+             "a hardware frame stays intact until it is released");
+  test.equal(preferred.device, required.device,
+             "PREFER takes the hardware decoder when there is one");
+  // Same pixels read with a different range are a different picture. The
+  // software decoder parses the stream; the hardware one must agree with it.
+  test.equal(required.color_range, software.color_range,
+             "hardware decode reports the color range software reads");
+  test.equal(required.color_matrix, software.color_matrix,
+             "hardware decode reports the color matrix software reads");
+  std::printf("%s Linux CPU readback contract passed (device %d)\n", name,
+              static_cast<int>(required.device));
+  return true;
+}
+
 } // namespace
 
 int main(int argc, char *argv[]) {
@@ -144,6 +291,10 @@ int main(int argc, char *argv[]) {
   bool exercised = false;
   exercised |= check_backend(test, argv[1], AVB_BACKEND_GSTREAMER);
   exercised |= check_backend(test, argv[1], AVB_BACKEND_FFMPEG);
+
+  test.section("Linux hardware policy for CPU frames");
+  exercised |= check_cpu_readback(test, argv[1], AVB_BACKEND_GSTREAMER);
+  exercised |= check_cpu_readback(test, argv[1], AVB_BACKEND_FFMPEG);
 
   const int result = test.finish("platform_linux");
   if (result != 0)

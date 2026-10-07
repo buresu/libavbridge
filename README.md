@@ -70,6 +70,18 @@ Hardware behavior is controlled with:
 - `AVB_HARDWARE_PREFER`
 - `AVB_HARDWARE_REQUIRE`
 
+The policy applies to CPU frames too: with `AVB_VIDEO_MEMORY_CPU`, `PREFER` and
+`REQUIRE` decode on the GPU and read the frames back, and
+`avb_video_frame::hardware_device` names what decoded each one (`AUTO` for
+software). `PREFER` falls back to software when no hardware decoder takes the
+stream; `REQUIRE` fails instead.
+
+On GStreamer the decoder is playbin's choice by rank, so `DISABLED` forces
+software decoders, `PREFER` takes that choice, and `REQUIRE` checks it. A
+hardware decoder there only knows the colorimetry the caps carry, and
+`h264parse` leaves the range out of them, so for H.264 the backend reads it
+from the stream's SPS itself.
+
 The caller must release decoded frames with
 `avb_decoder_release_video_frame`. For encoder input, the caller retains
 ownership until `avb_encoder_write_video` returns.

@@ -166,12 +166,11 @@ void check_cpu_frame_layout(Context &test, const avb_video_frame &frame,
       format.format == AVB_PIXEL_FORMAT_I420) {
     test.equal(frame.color_matrix, AVB_COLOR_MATRIX_BT601,
                "YUV frame preserves the source color matrix");
-    if (backend == AVB_BACKEND_FFMPEG) {
+    // Software decoders read the range from the stream. (A GStreamer hardware
+    // decoder only has the caps, and h264parse leaves the range out of them.)
+    if (backend == AVB_BACKEND_FFMPEG || backend == AVB_BACKEND_GSTREAMER) {
       test.equal(frame.color_range, AVB_COLOR_RANGE_LIMITED,
-                 "FFmpeg preserves the source color range");
-    } else if (backend == AVB_BACKEND_GSTREAMER) {
-      test.equal(frame.color_range, AVB_COLOR_RANGE_UNKNOWN,
-                 "GStreamer reports an unavailable source color range");
+                 "software decode preserves the source color range");
     }
   }
 
@@ -213,8 +212,10 @@ void check_cpu_frame_layout(Context &test, const avb_video_frame &frame,
   default:
     break;
   }
+  // At least: a frame lent straight from a decoder keeps the decoder's
+  // padding between and after its planes.
   if (expected_size > 0) {
-    test.equal(static_cast<long long>(frame.data_size), expected_size,
+    test.check(static_cast<long long>(frame.data_size) >= expected_size,
                "frame data size covers all planes");
   }
 }

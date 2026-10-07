@@ -91,6 +91,16 @@ bool avb_gst_load(AvbGstFuncs &out_funcs, char *err_buf, int err_buf_size) {
     LOAD_SYM(g_handle_gst, out_funcs, gst_bus_timed_pop_filtered);
     LOAD_SYM(g_handle_gst, out_funcs, gst_message_parse_error);
     LOAD_SYM(g_handle_gst, out_funcs, gst_query_add_allocation_meta);
+    LOAD_SYM(g_handle_gst, out_funcs, gst_bin_iterate_recurse);
+    LOAD_SYM(g_handle_gst, out_funcs, gst_iterator_next);
+    LOAD_SYM(g_handle_gst, out_funcs, gst_iterator_resync);
+    LOAD_SYM(g_handle_gst, out_funcs, gst_iterator_free);
+    LOAD_SYM(g_handle_gst, out_funcs, gst_element_get_factory);
+    LOAD_SYM(g_handle_gst, out_funcs, gst_element_factory_get_metadata);
+    LOAD_SYM(g_handle_gst, out_funcs, gst_element_get_static_pad);
+    LOAD_SYM(g_handle_gst, out_funcs, gst_pad_get_current_caps);
+    LOAD_SYM(g_handle_gst, out_funcs, gst_structure_get_value);
+    LOAD_SYM(g_handle_gst, out_funcs, gst_buffer_get_type);
 
     LOAD_SYM(g_handle_gstapp, out_funcs, gst_app_sink_pull_sample);
     LOAD_SYM(g_handle_gstapp, out_funcs, gst_app_sink_try_pull_preroll);
@@ -119,6 +129,9 @@ bool avb_gst_load(AvbGstFuncs &out_funcs, char *err_buf, int err_buf_size) {
     LOAD_SYM(g_handle_gobject, out_funcs, g_object_set);
     LOAD_SYM(g_handle_gobject, out_funcs, g_object_get);
     LOAD_SYM(g_handle_gobject, out_funcs, g_object_unref);
+    LOAD_SYM(g_handle_gobject, out_funcs, g_value_get_object);
+    LOAD_SYM(g_handle_gobject, out_funcs, g_value_get_boxed);
+    LOAD_SYM(g_handle_gobject, out_funcs, g_value_unset);
 
     LOAD_SYM(g_handle_glib, out_funcs, g_free);
     LOAD_SYM(g_handle_glib, out_funcs, g_clear_error);

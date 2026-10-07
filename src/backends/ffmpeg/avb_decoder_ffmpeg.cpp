@@ -1104,10 +1104,17 @@ avb_result AvbDecoderFFmpeg::read_video_frame(avb_video_frame &out_frame) {
                         set_ff_error("av_hwframe_transfer_data (video)", transfer_res);
                         return AVB_ERROR_DECODE_FAILED;
                     }
+                    // The transfer moves pixels, not properties: what the
+                    // stream declared is on the hardware frame.
                     m_hw_transfer_frame->pts = m_video_frame->pts;
+                    m_hw_transfer_frame->color_range = m_video_frame->color_range;
+                    m_hw_transfer_frame->colorspace = m_video_frame->colorspace;
                     output_frame = m_hw_transfer_frame;
                 }
                 frame_res = fill_cpu_video_frame(output_frame, frame_pts, out_frame);
+                // A frame read back from the GPU still says what decoded it.
+                if (frame_res == AVB_OK && is_hw_frame)
+                    out_frame.hardware_device = m_hw_device;
             }
 
             m_ff.av_frame_unref(m_video_frame);

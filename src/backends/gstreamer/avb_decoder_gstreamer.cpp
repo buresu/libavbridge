@@ -1,5 +1,6 @@
 #include "avb_decoder_gstreamer.hpp"
 #include "avb_drm_fourcc.hpp"
+#include "avb_h264_sps.hpp"
 #include "avb_plane_layout.hpp"
 #include "avb_video_plugins.hpp"
 
@@ -14,9 +15,15 @@
 enum {
     AVB_GST_PLAY_FLAG_VIDEO = (1 << 0),
     AVB_GST_PLAY_FLAG_AUDIO = (1 << 1),
+    AVB_GST_PLAY_FLAG_FORCE_SW_DECODERS = (1 << 12), // GStreamer 1.18
 };
 
-static gboolean avb_gst_dmabuf_propose_allocation(
+// Tells upstream the sink reads GstVideoMeta. A decoder whose buffers are not
+// laid out the default way (every hardware one: its surfaces have their own
+// strides) otherwise copies each frame into one that is before pushing it --
+// for a VA surface that is a second full-frame readback, and it costs more
+// than the decode.
+static gboolean avb_gst_propose_video_meta(
     GstAppSink *,
     GstQuery *query,
     gpointer user_data
@@ -220,6 +227,19 @@ static uint32_t caps_to_codec_tag(const AvbGstFuncs &gst, const GstCaps *caps) {
            ((uint32_t)(unsigned char)variant[3] << 24);
 }
 
+// The device family behind a hardware decoder element, from its factory name.
+// AUTO for one this API has no name for.
+static avb_hardware_device hardware_family(const char *factory) {
+    auto starts = [factory](const char *prefix) {
+        return strncmp(factory, prefix, strlen(prefix)) == 0;
+    };
+    if (starts("va")) return AVB_HW_DEVICE_VAAPI; // va*, vaapi*
+    if (starts("nv")) return AVB_HW_DEVICE_CUDA;  // nvcodec
+    if (starts("qsv") || starts("msdk")) return AVB_HW_DEVICE_QSV;
+    if (starts("v4l2")) return AVB_HW_DEVICE_V4L2;
+    return AVB_HW_DEVICE_AUTO;
+}
+
 AvbDecoderGStreamer::AvbDecoderGStreamer() {
     char err_buf[512];
     m_libs_loaded = avb_gst_load(m_gst, err_buf, sizeof(err_buf));
@@ -248,9 +268,112 @@ void AvbDecoderGStreamer::set_error(const char *fmt, ...) {
     m_last_error = buf;
 }
 
+void AvbDecoderGStreamer::release_cpu_video_frame() {
+    if (!m_cpu_video_sample) return;
+    if (GstBuffer *buf = m_gst.gst_sample_get_buffer(m_cpu_video_sample))
+        m_gst.gst_buffer_unmap(buf, &m_cpu_video_map);
+    m_gst.gst_mini_object_unref((GstMiniObject *)m_cpu_video_sample);
+    m_cpu_video_sample = nullptr;
+}
+
+// The colour range of the stream a decoder element was handed, from the
+// codec_data in its sink caps. A hardware decoder takes its colorimetry from
+// those caps, and h264parse writes the matrix there but not the range: a
+// full-range H.264 track in an MP4 without a colr atom would otherwise be
+// shown as limited. The software decoders read it from the bitstream, so only
+// the hardware ones are asked.
+avb_color_range AvbDecoderGStreamer::declared_color_range(GstElement *decoder) {
+    GstPad *pad = m_gst.gst_element_get_static_pad(decoder, "sink");
+    if (!pad) return AVB_COLOR_RANGE_UNKNOWN;
+    GstCaps *caps = m_gst.gst_pad_get_current_caps(pad);
+    m_gst.gst_object_unref(pad);
+    if (!caps) return AVB_COLOR_RANGE_UNKNOWN;
+
+    avb_color_range range = AVB_COLOR_RANGE_UNKNOWN;
+    const GstStructure *s = m_gst.gst_caps_get_structure(caps, 0);
+    const char *name = s ? m_gst.gst_structure_get_name(s) : nullptr;
+    if (name && strcmp(name, "video/x-h264") == 0) {
+        const GValue *value = m_gst.gst_structure_get_value(s, "codec_data");
+        GstBuffer *record =
+            value && G_VALUE_TYPE(value) == m_gst.gst_buffer_get_type()
+                ? (GstBuffer *)m_gst.g_value_get_boxed(value)
+                : nullptr;
+        GstMapInfo map;
+        memset(&map, 0, sizeof(map));
+        if (record && m_gst.gst_buffer_map(record, &map, GST_MAP_READ)) {
+            range = avb::detail::h264_avcc_color_range(map.data, map.size);
+            m_gst.gst_buffer_unmap(record, &map);
+        }
+    }
+    m_gst.gst_mini_object_unref((GstMiniObject *)caps);
+    return range;
+}
+
+void AvbDecoderGStreamer::fill_color_metadata(
+    const GstCaps *caps,
+    avb_video_frame &frame
+) {
+    fill_gst_color_metadata(m_gst, caps, frame);
+    if (frame.color_range == AVB_COLOR_RANGE_UNKNOWN)
+        frame.color_range = m_stream_color_range;
+}
+
+// Whether the pipeline holds a hardware video decoder, going by the class its
+// factory declares ("Codec/Decoder/Video/Hardware"). Which decoder playbin
+// plugs is its own decision, so this is asked of the result.
+bool AvbDecoderGStreamer::find_hardware_video_decoder(
+    avb_hardware_device &out_device
+) {
+    out_device = AVB_HW_DEVICE_AUTO;
+    m_stream_color_range = AVB_COLOR_RANGE_UNKNOWN;
+    if (!m_pipeline) return false;
+    GstIterator *it = m_gst.gst_bin_iterate_recurse((GstBin *)m_pipeline);
+    if (!it) return false;
+
+    bool found = false;
+    GValue item = G_VALUE_INIT;
+    for (bool done = false; !done;) {
+        switch (m_gst.gst_iterator_next(it, &item)) {
+            case GST_ITERATOR_OK: {
+                auto *element = (GstElement *)m_gst.g_value_get_object(&item);
+                GstElementFactory *factory =
+                    element ? m_gst.gst_element_get_factory(element) : nullptr;
+                const char *klass = factory
+                    ? m_gst.gst_element_factory_get_metadata(
+                          factory, GST_ELEMENT_METADATA_KLASS)
+                    : nullptr;
+                if (klass && strstr(klass, "Decoder") && strstr(klass, "Video") &&
+                    strstr(klass, "Hardware")) {
+                    found = true;
+                    const char *name = GST_OBJECT_NAME(factory);
+                    if (name && out_device == AVB_HW_DEVICE_AUTO)
+                        out_device = hardware_family(name);
+                    if (m_stream_color_range == AVB_COLOR_RANGE_UNKNOWN)
+                        m_stream_color_range = declared_color_range(element);
+                }
+                m_gst.g_value_unset(&item);
+                break;
+            }
+            case GST_ITERATOR_RESYNC:
+                m_gst.gst_iterator_resync(it);
+                found = false;
+                out_device = AVB_HW_DEVICE_AUTO;
+                m_stream_color_range = AVB_COLOR_RANGE_UNKNOWN;
+                break;
+            default:
+                done = true;
+                break;
+        }
+    }
+    m_gst.g_value_unset(&item);
+    m_gst.gst_iterator_free(it);
+    return found;
+}
+
 void AvbDecoderGStreamer::close_internal() {
     if (!m_libs_loaded) return;
 
+    release_cpu_video_frame();
     if (m_video_preroll_sample) {
         m_gst.gst_mini_object_unref((GstMiniObject *)m_video_preroll_sample);
         m_video_preroll_sample = nullptr;
@@ -274,7 +397,6 @@ void AvbDecoderGStreamer::close_internal() {
     }
 
     m_audio.clear();
-    m_video_out_buf.clear();
     m_out_sample_rate = 0;
     m_out_channels    = 0;
     m_audio_track       = 0;
@@ -290,6 +412,8 @@ void AvbDecoderGStreamer::close_internal() {
     m_video_memory = AVB_VIDEO_MEMORY_CPU;
     m_video_external_type = AVB_VIDEO_EXTERNAL_NONE;
     m_hw_device = AVB_HW_DEVICE_AUTO;
+    m_cpu_hw_device = AVB_HW_DEVICE_AUTO;
+    m_stream_color_range = AVB_COLOR_RANGE_UNKNOWN;
 }
 
 void AvbDecoderGStreamer::discover_codec_names(const char *uri) {
@@ -488,6 +612,32 @@ avb_result AvbDecoderGStreamer::open_file(const char *path, const avb_decode_opt
         close_internal();
     }
 
+    const bool cpu_video = options.enable_video &&
+                           options.video_memory == AVB_VIDEO_MEMORY_CPU;
+    const bool software_only =
+        cpu_video && options.hardware_policy == AVB_HARDWARE_DISABLED;
+    avb_result res = open_playbin(path, options, software_only);
+    if (!cpu_video || options.hardware_policy != AVB_HARDWARE_PREFER)
+        return res;
+
+    // PREFER keeps the file playable. A hardware decoder that was plugged and
+    // then produced no video -- the driver refused the stream once it saw it,
+    // or had no decoder instance left -- is retried in software. Nothing else
+    // is: a file software cannot play either should fail once, not twice.
+    avb_hardware_device plugged = AVB_HW_DEVICE_AUTO;
+    if ((res == AVB_OK && m_video_sink) || !find_hardware_video_decoder(plugged))
+        return res;
+    close_internal();
+    res = open_playbin(path, options, true);
+    if (res == AVB_OK) m_last_error.clear();
+    return res;
+}
+
+avb_result AvbDecoderGStreamer::open_playbin(
+    const char *path,
+    const avb_decode_options &options,
+    bool software_only
+) {
     m_video_memory = options.video_memory;
     m_video_external_type = options.video_external_type;
     m_hw_device = options.hardware_device == AVB_HW_DEVICE_AUTO
@@ -594,6 +744,10 @@ avb_result AvbDecoderGStreamer::open_file(const char *path, const avb_decode_opt
                 "videoconvert ! appsink name=avb_vsink sync=false max-buffers=16 "
                 "caps=video/x-raw,format=%s", vfmt);
         }
+        const bool reads_video_meta =
+            m_video_memory == AVB_VIDEO_MEMORY_CPU ||
+            (m_video_memory == AVB_VIDEO_MEMORY_EXTERNAL &&
+             m_video_external_type == AVB_VIDEO_EXTERNAL_DMABUF);
 
         GstElement *vbin = m_gst.gst_parse_bin_from_description(desc, TRUE, &err);
         if (!vbin) {
@@ -607,10 +761,9 @@ avb_result AvbDecoderGStreamer::open_file(const char *path, const avb_decode_opt
         m_video_sink = m_gst.gst_bin_get_by_name((GstBin *)vbin, "avb_vsink");
         if (m_video_sink) {
             m_gst.gst_app_sink_set_drop((GstAppSink *)m_video_sink, FALSE);
-            if (m_video_memory == AVB_VIDEO_MEMORY_EXTERNAL &&
-                m_video_external_type == AVB_VIDEO_EXTERNAL_DMABUF) {
+            if (reads_video_meta) {
                 GstAppSinkCallbacks callbacks{};
-                callbacks.propose_allocation = avb_gst_dmabuf_propose_allocation;
+                callbacks.propose_allocation = avb_gst_propose_video_meta;
                 m_gst.gst_app_sink_set_callbacks(
                     (GstAppSink *)m_video_sink, &callbacks, &m_gst, nullptr);
             }
@@ -619,6 +772,12 @@ avb_result AvbDecoderGStreamer::open_file(const char *path, const avb_decode_opt
     }
 
     m_gst.g_object_set(m_pipeline, "flags", flags, nullptr);
+    // A second set: a playbin too old to know the flag rejects the whole value,
+    // and must be left holding the one above.
+    if (software_only && (flags & AVB_GST_PLAY_FLAG_VIDEO)) {
+        m_gst.g_object_set(m_pipeline, "flags",
+                           flags | AVB_GST_PLAY_FLAG_FORCE_SW_DECODERS, nullptr);
+    }
 
     // Preroll: move to PAUSED and wait for the state change to settle so that
     // negotiated caps and duration are available.
@@ -681,6 +840,16 @@ avb_result AvbDecoderGStreamer::open_file(const char *path, const avb_decode_opt
         set_error("No supported audio or video stream found.");
         m_gst.g_free(uri);
         return AVB_ERROR_STREAM_NOT_FOUND;
+    }
+
+    if (m_video_sink) {
+        const bool hardware = find_hardware_video_decoder(m_cpu_hw_device);
+        if (!hardware && m_video_memory == AVB_VIDEO_MEMORY_CPU &&
+            options.hardware_policy == AVB_HARDWARE_REQUIRE) {
+            set_error("GStreamer plugged no hardware video decoder for this stream.");
+            m_gst.g_free(uri);
+            return AVB_ERROR_OPEN_FAILED;
+        }
     }
 
     // Start decoding.
@@ -923,7 +1092,7 @@ avb_result AvbDecoderGStreamer::fill_dmabuf_video_frame(
     out_frame.height = h;
     out_frame.format = AVB_PIXEL_FORMAT_UNKNOWN;
     out_frame.pts_sec = pts_sec;
-    fill_gst_color_metadata(m_gst, caps, out_frame);
+    fill_color_metadata(caps, out_frame);
     out_frame.memory_type = AVB_VIDEO_MEMORY_EXTERNAL;
     out_frame.external_type = AVB_VIDEO_EXTERNAL_DMABUF;
     out_frame.hardware_device = m_hw_device;
@@ -1001,7 +1170,7 @@ avb_result AvbDecoderGStreamer::read_video_frame(avb_video_frame &out_frame) {
             out_frame.height = h;
             out_frame.format = m_video_format;
             out_frame.pts_sec = pts_sec;
-            fill_gst_color_metadata(m_gst, caps, out_frame);
+            fill_color_metadata(caps, out_frame);
             out_frame.memory_type = AVB_VIDEO_MEMORY_BACKEND_NATIVE;
             out_frame.hardware_device = m_hw_device;
             out_frame.native_handle = buf;
@@ -1018,16 +1187,20 @@ avb_result AvbDecoderGStreamer::read_video_frame(avb_video_frame &out_frame) {
             return res;
         }
 
-        GstMapInfo map;
+        // The frame is the decoder's buffer, mapped and lent until release:
+        // for a hardware decoder the mapping is the readback itself, and a
+        // copy made here would be one the caller repeats into its own storage.
+        release_cpu_video_frame();
+        GstMapInfo &map = m_cpu_video_map;
         memset(&map, 0, sizeof(map));
         if (!m_gst.gst_buffer_map(buf, &map, GST_MAP_READ)) {
             m_gst.gst_mini_object_unref((GstMiniObject *)sample);
             return AVB_ERROR_DECODE_FAILED;
         }
+        m_cpu_video_sample = sample;
 
         // Plane layout. When the buffer carries a GstVideoMeta, honour its
-        // per-plane stride/offset (decoders may use non-default strides); the
-        // whole mapped buffer is copied verbatim so those offsets stay valid.
+        // per-plane stride/offset (decoders may use non-default strides).
         // Otherwise GStreamer raw video uses GST_ROUND_UP_4 plane strides laid
         // out tightly per output format:
         //   RGBA/BGRA: 1 plane; NV12: 2 (Y, CbCr); I420: 3 (Y, Cb, Cr).
@@ -1044,39 +1217,43 @@ avb_result AvbDecoderGStreamer::read_video_frame(avb_video_frame &out_frame) {
                 stride[p] = (int)vmeta->stride[p];
                 off[p]    = (size_t)vmeta->offset[p];
             }
-            total = map.size; // copy the whole buffer; offsets index into it
+            total = map.size; // the offsets index into the whole buffer
         } else {
             AvbPlaneLayout layout = avb_plane_layout(m_video_format, w, h, 4);
             plane_count = layout.plane_count;
             for (int p = 0; p < plane_count; ++p) { stride[p] = layout.stride[p]; off[p] = layout.offset[p]; }
             total = layout.total;
-            if (total > map.size) total = map.size; // never read past the buffer
         }
-
-        m_video_out_buf.resize(total);
-        memcpy(m_video_out_buf.data(), map.data, total);
+        // Plane 0 leads in every format this hands out, so it is where the
+        // frame starts: a decoder that pads above it shifts everything.
+        bool fits = total <= map.size;
+        for (int p = 0; p < plane_count; ++p)
+            fits = fits && off[p] >= off[0] && off[p] < total;
+        if (!fits) {
+            release_cpu_video_frame();
+            set_error("GStreamer video buffer is smaller than its format.");
+            return AVB_ERROR_DECODE_FAILED;
+        }
 
         out_frame = {};
         out_frame.width       = w;
         out_frame.height      = h;
         out_frame.format      = m_video_format;
         out_frame.pts_sec     = pts_sec;
-        fill_gst_color_metadata(m_gst, caps, out_frame);
+        fill_color_metadata(caps, out_frame);
         out_frame.memory_type = AVB_VIDEO_MEMORY_CPU;
-        out_frame.hardware_device = AVB_HW_DEVICE_AUTO;
+        out_frame.hardware_device = m_cpu_hw_device;
+        out_frame.native_owner = sample;
         out_frame.plane_count = plane_count;
         for (int p = 0; p < AVB_MAX_PLANES; ++p) out_frame.dmabuf_fd[p] = -1;
         for (int p = 0; p < plane_count; ++p) {
-            out_frame.plane_data[p]   = m_video_out_buf.data() + off[p];
+            out_frame.plane_data[p]   = map.data + off[p];
             out_frame.plane_stride[p] = stride[p];
-            out_frame.plane_offset[p] = (int)off[p];
+            out_frame.plane_offset[p] = (int)(off[p] - off[0]);
         }
         out_frame.data      = out_frame.plane_data[0];
         out_frame.stride    = out_frame.plane_stride[0];
-        out_frame.data_size = (int)m_video_out_buf.size();
-
-        m_gst.gst_buffer_unmap(buf, &map);
-        m_gst.gst_mini_object_unref((GstMiniObject *)sample);
+        out_frame.data_size = (int)(total - off[0]);
         return AVB_OK;
     }
 }
@@ -1085,6 +1262,11 @@ void AvbDecoderGStreamer::release_video_frame(avb_video_frame &frame) {
     if (m_custom_pipeline) {
         if (m_custom_video_decoder && m_custom_video_decoder->release_frame)
             m_custom_video_decoder->release_frame(m_custom_video_ctx, &frame);
+        return;
+    }
+    if (frame.memory_type == AVB_VIDEO_MEMORY_CPU) {
+        if (frame.native_owner && frame.native_owner == m_cpu_video_sample)
+            release_cpu_video_frame();
         return;
     }
     if ((frame.memory_type == AVB_VIDEO_MEMORY_BACKEND_NATIVE ||

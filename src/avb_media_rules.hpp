@@ -214,6 +214,7 @@ inline bool valid_hardware_device(avb_hardware_device device) {
         case AVB_HW_DEVICE_D3D11VA:
         case AVB_HW_DEVICE_VIDEOTOOLBOX:
         case AVB_HW_DEVICE_AMF:
+        case AVB_HW_DEVICE_V4L2:
             return true;
     }
     return false;

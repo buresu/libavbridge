@@ -151,7 +151,11 @@ typedef enum avb_hardware_policy {
     AVB_HARDWARE_DISABLED = 0,
     /* Prefer hardware acceleration, but keep the selected backend usable when a
      * CPU fallback exists. Requests for BACKEND_NATIVE/EXTERNAL memory may fail
-     * when the selected backend cannot produce or consume that memory type. */
+     * when the selected backend cannot produce or consume that memory type.
+     *
+     * With CPU video memory this decodes on the GPU and reads the frames back;
+     * a frame's hardware_device then names what decoded it, and stays AUTO for
+     * a frame that fell back to software. */
     AVB_HARDWARE_PREFER = 1,
     /* Opening fails unless the selected backend can use hardware acceleration
      * for the requested codec, device, and memory type. */
@@ -166,6 +170,8 @@ typedef enum avb_hardware_device {
     AVB_HW_DEVICE_D3D11VA,
     AVB_HW_DEVICE_VIDEOTOOLBOX,
     AVB_HW_DEVICE_AMF,
+    /* V4L2 stateful/stateless codecs (Raspberry Pi and other SBC SoCs). */
+    AVB_HW_DEVICE_V4L2,
 } avb_hardware_device;
 
 typedef enum avb_color_range {

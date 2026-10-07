@@ -55,6 +55,7 @@ static const char *hardware_device_name(avb_hardware_device device) {
         case AVB_HW_DEVICE_D3D11VA:      return "d3d11va";
         case AVB_HW_DEVICE_VIDEOTOOLBOX: return "videotoolbox";
         case AVB_HW_DEVICE_AMF:          return "amf";
+        case AVB_HW_DEVICE_V4L2:         return "v4l2";
     }
     return "invalid";
 }
