@@ -1,19 +1,28 @@
-// AVFoundation-specific CVPixelBuffer and frame-lease contract.
+// AVFoundation-specific CVPixelBuffer and frame-lease contract, and the
+// hardware policy contract for frames copied out to CPU memory.
 //
 // Usage: avb_platform_avfoundation <fixture.mp4>
 
+#include "cpu_decode.hpp"
 #include "test.hpp"
 
+#import <AVFoundation/AVFoundation.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreVideo/CoreVideo.h>
 #include <IOSurface/IOSurface.h>
+#import <VideoToolbox/VideoToolbox.h>
 
 #include <array>
 #include <cstdio>
+#include <cstring>
+#include <vector>
 
 namespace {
 
 using avb::test::Context;
+using avb::test::CpuDecode;
+using avb::test::decode_cpu;
+using avb::test::mean_luma_difference;
 
 bool has_external(const avb_decoder_capabilities &caps,
                   avb_video_external_type type) {
@@ -25,6 +34,162 @@ bool has_device(const avb_decoder_capabilities &caps,
                 avb_hardware_device device) {
   return avb::test::contains(caps.hardware_devices, caps.hardware_device_count,
                              device);
+}
+
+// The first frame as VideoToolbox's software decoder produces it, decoded here
+// without avbridge: the picture a frame from the hardware decoder is held to.
+// Empty luma when there is no software decoder for the stream.
+CpuDecode decode_software_reference(const char *path) {
+  CpuDecode out;
+  @autoreleasepool {
+    AVAsset *asset =
+        [AVAsset assetWithURL:[NSURL fileURLWithPath:@(path)]];
+    __block AVAssetTrack *track = nil;
+    dispatch_semaphore_t loaded = dispatch_semaphore_create(0);
+    [asset loadTracksWithMediaType:AVMediaTypeVideo
+                 completionHandler:^(NSArray<AVAssetTrack *> *tracks,
+                                     NSError *) {
+                   track = tracks.firstObject;
+                   dispatch_semaphore_signal(loaded);
+                 }];
+    dispatch_semaphore_wait(loaded, DISPATCH_TIME_FOREVER);
+    if (!track || track.formatDescriptions.count == 0)
+      return out;
+
+    // No output settings: the reader hands over the samples still compressed.
+    AVAssetReader *reader = [AVAssetReader assetReaderWithAsset:asset
+                                                          error:nil];
+    AVAssetReaderTrackOutput *samples =
+        [AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:track
+                                                   outputSettings:nil];
+    if (!reader || ![reader canAddOutput:samples])
+      return out;
+    [reader addOutput:samples];
+    if (![reader startReading])
+      return out;
+    CMSampleBufferRef sample = [samples copyNextSampleBuffer];
+    while (sample && CMSampleBufferGetNumSamples(sample) == 0) {
+      CFRelease(sample);
+      sample = [samples copyNextSampleBuffer];
+    }
+    if (!sample)
+      return out;
+
+    NSDictionary *software = @{
+      (NSString *)
+      kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder : @NO,
+    };
+    NSDictionary *nv12 = @{
+      (NSString *)kCVPixelBufferPixelFormatTypeKey :
+          @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
+    };
+    VTDecompressionSessionRef session = nullptr;
+    const OSStatus created = VTDecompressionSessionCreate(
+        kCFAllocatorDefault,
+        (__bridge CMVideoFormatDescriptionRef)track.formatDescriptions[0],
+        (__bridge CFDictionaryRef)software, (__bridge CFDictionaryRef)nv12,
+        nullptr, &session);
+    if (created == noErr && session) {
+      CpuDecode *decoded = &out;
+      VTDecompressionSessionDecodeFrameWithOutputHandler(
+          session, sample, 0, nullptr,
+          ^(OSStatus status, VTDecodeInfoFlags, CVImageBufferRef image, CMTime,
+            CMTime) {
+            if (status != noErr || !image || !decoded->luma.empty())
+              return;
+            CVPixelBufferLockBaseAddress(image, kCVPixelBufferLock_ReadOnly);
+            decoded->width = static_cast<int>(CVPixelBufferGetWidth(image));
+            decoded->height = static_cast<int>(CVPixelBufferGetHeight(image));
+            const auto *base = static_cast<const unsigned char *>(
+                CVPixelBufferGetBaseAddressOfPlane(image, 0));
+            const size_t stride = CVPixelBufferGetBytesPerRowOfPlane(image, 0);
+            decoded->luma.resize(static_cast<size_t>(decoded->width) *
+                                 decoded->height);
+            for (int y = 0; y < decoded->height; ++y)
+              std::memcpy(decoded->luma.data() +
+                              static_cast<size_t>(y) * decoded->width,
+                          base + static_cast<size_t>(y) * stride,
+                          static_cast<size_t>(decoded->width));
+            CVPixelBufferUnlockBaseAddress(image, kCVPixelBufferLock_ReadOnly);
+          });
+      VTDecompressionSessionWaitForAsynchronousFrames(session);
+      VTDecompressionSessionInvalidate(session);
+      CFRelease(session);
+    }
+    CFRelease(sample);
+    [reader cancelReading];
+  }
+  return out;
+}
+
+// CPU frames under each hardware policy. The decoder is VideoToolbox's choice
+// and AVAssetReader has no switch for it, so here the policy does not decide
+// which one decodes the way it does on the other backends: REQUIRE checks the
+// choice, PREFER and DISABLED take it, and a frame says what it was each time.
+void check_cpu_frames(Context &test, const char *path) {
+  const CpuDecode disabled =
+      decode_cpu(path, AVB_BACKEND_AVFOUNDATION, AVB_HARDWARE_DISABLED);
+  test.equal(disabled.open_result, AVB_OK, "DISABLED opens");
+  test.check(disabled.cpu_memory, "DISABLED yields NV12 CPU frames");
+  test.check(disabled.frames > 0, "DISABLED yields frames");
+
+  const CpuDecode required =
+      decode_cpu(path, AVB_BACKEND_AVFOUNDATION, AVB_HARDWARE_REQUIRE);
+  const bool hardware = required.open_result == AVB_OK;
+  const CpuDecode preferred =
+      decode_cpu(path, AVB_BACKEND_AVFOUNDATION, AVB_HARDWARE_PREFER);
+  test.equal(preferred.open_result, AVB_OK,
+             "PREFER opens with or without a hardware decoder");
+  test.check(preferred.cpu_memory, "PREFER yields NV12 CPU frames");
+  test.equal(preferred.frames, disabled.frames,
+             "PREFER decodes as many frames as DISABLED");
+  test.check(preferred.survived_audio_read,
+             "a PREFER frame stays intact until it is released");
+  test.equal(preferred.color_range, AVB_COLOR_RANGE_LIMITED,
+             "NV12 frames are video range and say so");
+  test.equal(disabled.device, preferred.device,
+             "a frame names what decoded it whatever the policy");
+
+  avb_decode_options elsewhere = avb_decode_options_default();
+  elsewhere.backend = AVB_BACKEND_AVFOUNDATION;
+  elsewhere.video_format = AVB_PIXEL_FORMAT_NV12;
+  elsewhere.hardware_policy = AVB_HARDWARE_REQUIRE;
+  elsewhere.hardware_device = AVB_HW_DEVICE_VAAPI;
+  avb_decoder *decoder = nullptr;
+  test.check(avb_decoder_open(&decoder, path, &elsewhere) != AVB_OK,
+             "REQUIRE does not open for another platform's device");
+  avb_decoder_close(decoder);
+
+  if (!hardware) {
+    test.equal(preferred.device, AVB_HW_DEVICE_AUTO,
+               "PREFER falls back to software without a hardware decoder");
+    std::printf("SKIP: VideoToolbox has no hardware decoder for this stream\n");
+    return;
+  }
+
+  test.check(required.cpu_memory, "REQUIRE yields NV12 CPU frames");
+  test.equal(required.device, AVB_HW_DEVICE_VIDEOTOOLBOX,
+             "a frame copied out of the hardware decoder reports VideoToolbox");
+  test.equal(preferred.device, AVB_HW_DEVICE_VIDEOTOOLBOX,
+             "PREFER takes the hardware decoder when there is one");
+  test.equal(required.frames, disabled.frames,
+             "REQUIRE decodes as many frames as DISABLED");
+  test.check(required.survived_audio_read,
+             "a hardware frame stays intact until it is released");
+
+  const CpuDecode software = decode_software_reference(path);
+  if (software.luma.empty()) {
+    std::printf("SKIP: VideoToolbox has no software decoder for this stream\n");
+    return;
+  }
+  test.equal(required.width, software.width,
+             "hardware and software decode the same width");
+  test.equal(required.height, software.height,
+             "hardware and software decode the same height");
+  test.near(mean_luma_difference(required, software), 0.0, 1.0,
+            "a frame copied out of the hardware decoder matches the software "
+            "decode");
+  std::printf("AVFoundation CPU frame contract passed (VideoToolbox)\n");
 }
 
 } // namespace
@@ -55,6 +220,10 @@ int main(int argc, char *argv[]) {
   test.check(has_device(caps, AVB_HW_DEVICE_VIDEOTOOLBOX),
              "AVFoundation advertises VideoToolbox");
 
+  test.section("AVFoundation hardware policy for CPU frames");
+  check_cpu_frames(test, argv[1]);
+
+  test.section("AVFoundation CVPixelBuffer frames");
   avb_decode_options options = avb_decode_options_default();
   options.backend = AVB_BACKEND_AVFOUNDATION;
   options.enable_audio = 0;

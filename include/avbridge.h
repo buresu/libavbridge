@@ -147,7 +147,9 @@ typedef enum avb_video_external_type {
 } avb_video_external_type;
 
 typedef enum avb_hardware_policy {
-    /* Always use CPU/system-memory codec paths. */
+    /* Always use CPU/system-memory codec paths. AVFoundation cannot: there
+     * the decoder is VideoToolbox's choice, and a frame's hardware_device says
+     * what it was. */
     AVB_HARDWARE_DISABLED = 0,
     /* Prefer hardware acceleration, but keep the selected backend usable when a
      * CPU fallback exists. Requests for BACKEND_NATIVE/EXTERNAL memory may fail

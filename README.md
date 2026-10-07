@@ -82,6 +82,11 @@ hardware decoder there only knows the colorimetry the caps carry, and
 `h264parse` leaves the range out of them, so for H.264 the backend reads it
 from the stream's SPS itself.
 
+On AVFoundation the decoder is VideoToolbox's choice, and `AVAssetReader` has
+no switch for it: `REQUIRE` checks that choice, `PREFER` takes it, and
+`DISABLED` cannot turn the hardware decoder off. A frame's `hardware_device`
+says what decoded it under all three.
+
 The caller must release decoded frames with
 `avb_decoder_release_video_frame`. For encoder input, the caller retains
 ownership until `avb_encoder_write_video` returns.

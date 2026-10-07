@@ -7,6 +7,7 @@
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
 #import <Foundation/Foundation.h>
+#import <VideoToolbox/VideoToolbox.h>
 
 #include <cstring>
 #include <vector>
@@ -142,6 +143,68 @@ static FourCharCode avb_track_codec(AVAssetTrack *track) {
     return CMFormatDescriptionGetMediaSubType(fmt);
 }
 
+// Whether VideoToolbox decodes this track on hardware. AVAssetReader builds the
+// decompression session itself and exposes neither the session nor a switch
+// for it (decoder specification keys handed in through
+// AVVideoDecompressionPropertiesKey are ignored), so this builds one the same
+// way -- no specification, the choice VideoToolbox's -- and asks what it chose.
+static bool avb_decodes_on_hardware(AVAssetTrack *track) {
+    NSArray *formats = track.formatDescriptions;
+    if (formats.count == 0) return false;
+    CMVideoFormatDescriptionRef format =
+        (__bridge CMVideoFormatDescriptionRef)formats[0];
+    if (@available(macOS 10.9, iOS 17.0, tvOS 17.0, *)) {
+        VTDecompressionSessionRef session = NULL;
+        if (VTDecompressionSessionCreate(kCFAllocatorDefault, format, NULL,
+                                         NULL, NULL, &session) != noErr ||
+            !session)
+            return false;
+        // A software decoder does not know the property at all.
+        CFBooleanRef value = NULL;
+        bool hardware =
+            VTSessionCopyProperty(
+                session,
+                kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder,
+                kCFAllocatorDefault, &value) == noErr &&
+            value && CFBooleanGetValue(value);
+        if (value) CFRelease(value);
+        VTDecompressionSessionInvalidate(session);
+        CFRelease(session);
+        return hardware;
+    }
+    // Before iOS 17 a session cannot be asked; the codec can.
+    return VTIsHardwareDecodeSupported(
+        CMFormatDescriptionGetMediaSubType(format));
+}
+
+// The YUV encoding a decoded buffer declares: the range is the pixel format's,
+// the matrix an attachment VideoToolbox carries over from the stream. RGB
+// buffers are already converted and have nothing left to declare.
+static void avb_fill_color(CVPixelBufferRef pb, avb_video_frame &frame) {
+    switch (CVPixelBufferGetPixelFormatType(pb)) {
+        case kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange:
+        case kCVPixelFormatType_420YpCbCr8Planar:
+            frame.color_range = AVB_COLOR_RANGE_LIMITED;
+            break;
+        case kCVPixelFormatType_420YpCbCr8BiPlanarFullRange:
+        case kCVPixelFormatType_420YpCbCr8PlanarFullRange:
+            frame.color_range = AVB_COLOR_RANGE_FULL;
+            break;
+        default:
+            return;
+    }
+    CFTypeRef matrix =
+        CVBufferCopyAttachment(pb, kCVImageBufferYCbCrMatrixKey, NULL);
+    if (!matrix) return;
+    if (CFEqual(matrix, kCVImageBufferYCbCrMatrix_ITU_R_601_4))
+        frame.color_matrix = AVB_COLOR_MATRIX_BT601;
+    else if (CFEqual(matrix, kCVImageBufferYCbCrMatrix_ITU_R_709_2))
+        frame.color_matrix = AVB_COLOR_MATRIX_BT709;
+    else if (CFEqual(matrix, kCVImageBufferYCbCrMatrix_ITU_R_2020))
+        frame.color_matrix = AVB_COLOR_MATRIX_BT2020_NCL;
+    CFRelease(matrix);
+}
+
 static uint32_t avb_bswap32(uint32_t v) {
     return ((v & 0x000000ffu) << 24) |
            ((v & 0x0000ff00u) << 8)  |
@@ -174,6 +237,30 @@ struct AvbDecoderAVFoundation::Impl {
     avb_pixel_format video_avb_fmt  = AVB_PIXEL_FORMAT_BGRA8;
     bool swizzle_rgba               = false; // request BGRA, emit RGBA
     avb_video_memory_type video_memory = AVB_VIDEO_MEMORY_CPU;
+    // What decodes the video: VIDEOTOOLBOX for its hardware decoder, AUTO for
+    // software. Asking costs about as much as the rest of an open, so the
+    // question runs beside it and whoever needs the answer waits for it.
+    dispatch_group_t hw_probe = nil;
+    avb_hardware_device video_hw_device = AVB_HW_DEVICE_AUTO;
+
+    void probe_hardware(AVAssetTrack *track) {
+        hw_probe = dispatch_group_create();
+        dispatch_group_async(
+            hw_probe, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                @autoreleasepool {
+                    if (avb_decodes_on_hardware(track))
+                        video_hw_device = AVB_HW_DEVICE_VIDEOTOOLBOX;
+                }
+            });
+    }
+
+    avb_hardware_device hardware_device() {
+        if (hw_probe) {
+            dispatch_group_wait(hw_probe, DISPATCH_TIME_FOREVER);
+            hw_probe = nil;
+        }
+        return video_hw_device;
+    }
 
     std::string audio_codec_name;
     std::string video_codec_name;
@@ -193,6 +280,7 @@ AvbDecoderAVFoundation::AvbDecoderAVFoundation() {
 AvbDecoderAVFoundation::~AvbDecoderAVFoundation() {
     if (m_impl) {
         if (m_impl->reader) [m_impl->reader cancelReading];
+        m_impl->hardware_device(); // the probe answers into the Impl
         if (m_impl->custom_video_decoder) {
             if (m_impl->custom_video_decoder->close && m_impl->custom_video_ctx)
                 m_impl->custom_video_decoder->close(m_impl->custom_video_ctx);
@@ -347,6 +435,18 @@ avb_result AvbDecoderAVFoundation::open_file(const char *path, const avb_decode_
                 }
 
                 if (!m_impl->custom_video_decoder) {
+                    // The decoder is VideoToolbox's choice, which the policy
+                    // cannot change: REQUIRE checks it, and the frames say
+                    // what it was under every policy.
+                    m_impl->probe_hardware(track);
+                    if (options.hardware_policy == AVB_HARDWARE_REQUIRE &&
+                        m_impl->hardware_device() !=
+                            AVB_HW_DEVICE_VIDEOTOOLBOX) {
+                        m_last_error =
+                            "VideoToolbox has no hardware decoder for this stream.";
+                        return AVB_ERROR_OPEN_FAILED;
+                    }
+
                     bool external = m_impl->video_memory == AVB_VIDEO_MEMORY_EXTERNAL;
                     // External output defaults to NV12, the format VideoToolbox
                     // decodes into, so the IOSurface is handed back untouched.
@@ -649,6 +749,7 @@ avb_result AvbDecoderAVFoundation::read_video_frame(avb_video_frame &out_frame) 
             out_frame.external_type =
                 AVB_VIDEO_EXTERNAL_CVPIXEL_BUFFER;
             out_frame.hardware_device = AVB_HW_DEVICE_VIDEOTOOLBOX;
+            avb_fill_color(pb, out_frame);
             out_frame.plane_count = 0;
             out_frame.native_handle = pb;
             out_frame.native_owner  = this;
@@ -701,7 +802,9 @@ avb_result AvbDecoderAVFoundation::read_video_frame(avb_video_frame &out_frame) 
         out_frame.format      = m_impl->video_avb_fmt;
         out_frame.pts_sec     = CMTimeGetSeconds(pts);
         out_frame.memory_type = AVB_VIDEO_MEMORY_CPU;
-        out_frame.hardware_device = AVB_HW_DEVICE_AUTO;
+        // A frame copied out of the GPU's decoder still says what decoded it.
+        out_frame.hardware_device = m_impl->hardware_device();
+        avb_fill_color(image, out_frame);
         out_frame.plane_count = (int)plane_count;
         out_frame.data_size   = (int)total;
         for (int p = 0; p < AVB_MAX_PLANES; ++p) out_frame.dmabuf_fd[p] = -1;

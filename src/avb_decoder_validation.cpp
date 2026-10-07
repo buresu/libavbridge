@@ -33,6 +33,18 @@ bool platform_video_output(
     return false;
 }
 
+// Hardware decode into CPU frames, on a platform backend that can tell whether
+// the stream got it -- the answer REQUIRE depends on. AVFoundation asks
+// VideoToolbox; Media Foundation's read-back is best effort and cannot say.
+bool platform_hardware_cpu_output(
+    avb_backend backend,
+    const avb_decode_options &options) {
+    return backend == AVB_BACKEND_AVFOUNDATION &&
+           options.video_memory == AVB_VIDEO_MEMORY_CPU &&
+           (options.hardware_device == AVB_HW_DEVICE_AUTO ||
+            options.hardware_device == AVB_HW_DEVICE_VIDEOTOOLBOX);
+}
+
 }  // namespace
 
 extern "C" {
@@ -123,7 +135,8 @@ avb_result avb_decoder_validate_options(
     if (platform_backend(out->backend) &&
         ((options->video_memory != AVB_VIDEO_MEMORY_CPU && !platform_output) ||
          (options->hardware_policy == AVB_HARDWARE_REQUIRE &&
-          !platform_output))) {
+          !platform_output &&
+          !platform_hardware_cpu_output(out->backend, *options)))) {
         set_validation_result(
             *out,
             AVB_ERROR_OPEN_FAILED,

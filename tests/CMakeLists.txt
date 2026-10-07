@@ -48,11 +48,18 @@ if(AVB_ENABLE_AVFOUNDATION)
     avb_add_test_binary(
         avb_platform_avfoundation
         platform/avfoundation.mm)
+    set_source_files_properties(
+        platform/avfoundation.mm
+        PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_link_libraries(
         avb_platform_avfoundation PRIVATE
+        "-framework AVFoundation"
         "-framework CoreFoundation"
+        "-framework CoreMedia"
         "-framework CoreVideo"
-        "-framework IOSurface")
+        "-framework Foundation"
+        "-framework IOSurface"
+        "-framework VideoToolbox")
 endif()
 
 if(UNIX AND NOT APPLE)
