@@ -591,6 +591,11 @@ avb_result AvbDecoderGStreamer::open_custom_file(
         m_audio_track_count = m_audio_sink ? 1 : 0;
     }
 
+    // Preroll was inspected for metadata only. appsink also returns this
+    // packet as the first pull_sample(), so passing both to the plugin would
+    // decode the first frame twice.
+    m_gst.gst_mini_object_unref((GstMiniObject *)m_video_preroll_sample);
+    m_video_preroll_sample = nullptr;
     m_gst.gst_element_set_state(m_pipeline, GST_STATE_PLAYING);
     return AVB_OK;
 }
@@ -999,10 +1004,7 @@ avb_result AvbDecoderGStreamer::read_custom_video_frame(avb_video_frame &out_fra
         return AVB_ERROR_STREAM_NOT_FOUND;
 
     while (true) {
-        GstSample *sample = m_video_preroll_sample;
-        m_video_preroll_sample = nullptr;
-        if (!sample)
-            sample = m_gst.gst_app_sink_pull_sample((GstAppSink *)m_video_sink);
+        GstSample *sample = m_gst.gst_app_sink_pull_sample((GstAppSink *)m_video_sink);
         if (!sample) return AVB_ERROR_EOF;
 
         GstBuffer *buf = m_gst.gst_sample_get_buffer(sample);

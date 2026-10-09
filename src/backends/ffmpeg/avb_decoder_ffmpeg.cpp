@@ -541,6 +541,21 @@ avb_result AvbDecoderFFmpeg::setup_after_open(const avb_decode_options &options)
             : m_ff.av_find_best_stream(m_fmt_ctx, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
     }
 
+    // Explicit indices address the container stream table, and must name a
+    // stream of the requested media type before any codecpar access.
+    if (m_audio_stream_idx >= 0 &&
+        ((unsigned)m_audio_stream_idx >= m_fmt_ctx->nb_streams ||
+         m_fmt_ctx->streams[m_audio_stream_idx]->codecpar->codec_type != AVMEDIA_TYPE_AUDIO)) {
+        set_error("Audio stream index %d does not identify an audio stream.", m_audio_stream_idx);
+        return AVB_ERROR_STREAM_NOT_FOUND;
+    }
+    if (m_video_stream_idx >= 0 &&
+        ((unsigned)m_video_stream_idx >= m_fmt_ctx->nb_streams ||
+         m_fmt_ctx->streams[m_video_stream_idx]->codecpar->codec_type != AVMEDIA_TYPE_VIDEO)) {
+        set_error("Video stream index %d does not identify a video stream.", m_video_stream_idx);
+        return AVB_ERROR_STREAM_NOT_FOUND;
+    }
+
     if (m_audio_stream_idx < 0 && m_video_stream_idx < 0) {
         set_error("No audio or video stream found.");
         return AVB_ERROR_STREAM_NOT_FOUND;
@@ -743,12 +758,19 @@ avb_result AvbDecoderFFmpeg::seek(double seconds) {
     m_eof = false;
     m_seek_target = seconds;
     m_audio_seek_target = seconds;
+    // Codec flushing does not discard the resampler's filter history or its
+    // delayed samples, which belong to the old playback position.
+    if (m_swr) ret = m_ff.swr_init(m_swr);
     start_reader();
+    if (ret < 0) {
+        set_ff_error("swr_init after seek", ret);
+        return AVB_ERROR_SEEK_FAILED;
+    }
     return AVB_OK;
 }
 
 bool AvbDecoderFFmpeg::fill_audio_buffer() {
-    if (!m_audio_codec_ctx) return false;
+    if (!m_audio_codec_ctx || m_eof) return false;
 
     while (true) {
         int ret = m_ff.avcodec_receive_frame(m_audio_codec_ctx, m_audio_frame);
@@ -784,16 +806,19 @@ bool AvbDecoderFFmpeg::fill_audio_buffer() {
 
             // When this frame becomes the head of an empty buffer, record its
             // presentation time so audio_next_pts() can report it.
-            if (buf_start == 0) m_audio.pts = frame_pts;
+            if (buf_start == 0)
+                m_audio.pts = frame_pts >= 0.0
+                    ? frame_pts - (double)delay / in_rate : -1.0;
 
             m_audio.data.resize(buf_start + out_capacity * nb_channels);
             float *dst = m_audio.data.data() + buf_start;
 
             uint8_t *dst_ptr = (uint8_t *)dst;
             int converted = m_ff.swr_convert(m_swr, &dst_ptr, out_capacity,
-                (const uint8_t **)m_audio_frame->data, in_samples);
+                (const uint8_t **)m_audio_frame->extended_data, in_samples);
             if (converted < 0) {
                 m_audio.data.resize(buf_start);
+                m_ff.av_frame_unref(m_audio_frame);
                 set_error("swr_convert failed.");
                 return false;
             }
@@ -801,11 +826,29 @@ bool AvbDecoderFFmpeg::fill_audio_buffer() {
             m_audio.data.resize(buf_start + converted * nb_channels);
 
             m_ff.av_frame_unref(m_audio_frame);
-            return true;
+            if (converted > 0) return true;
+            continue;
         }
 
         if (ret != AVERROR(EAGAIN)) {
-            if (ret == AVERROR_EOF) m_eof = true;
+            if (ret == AVERROR_EOF) {
+                // The codec is drained, but rate conversion can still hold
+                // output. Keep its PTS at the end of the last consumed block.
+                int capacity = (int)m_ff.swr_get_delay(m_swr, m_out_sample_rate) + 1;
+                m_audio.data.resize((size_t)capacity * m_out_channels);
+                uint8_t *dst = (uint8_t *)m_audio.data.data();
+                int converted = m_ff.swr_convert(m_swr, &dst, capacity, nullptr, 0);
+                if (converted < 0) {
+                    m_audio.data.clear();
+                    set_ff_error("swr_convert (drain)", converted);
+                    return false;
+                }
+                m_audio.data.resize((size_t)converted * m_out_channels);
+                if (converted > 0) return true;
+                m_eof = true;
+            } else {
+                set_ff_error("avcodec_receive_frame (audio)", ret);
+            }
             return false;
         }
 

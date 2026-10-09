@@ -398,7 +398,11 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
         m_input_memory = options.video.input_memory;
         m_input_external_type = options.video.input_external_type;
         m_frame_rate = options.video.frame_rate > 0 ? options.video.frame_rate : 30.0;
-        m_fps    = std::max(1L, std::lround(m_frame_rate));
+        m_fps = m_ff.av_d2q(m_frame_rate, 1000000);
+        if (m_fps.num <= 0 || m_fps.den <= 0) {
+            set_error("Video frame rate cannot be represented by FFmpeg.");
+            return AVB_ERROR_INVALID_ARGUMENT;
+        }
 
         avb_video_encode_info custom_info{};
         custom_info.width = m_width;
@@ -441,8 +445,8 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
                 memset(m_vstream->codecpar->extradata + stream.extradata_size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
                 m_vstream->codecpar->extradata_size = stream.extradata_size;
             }
-            int tb_den = stream.time_base_den > 0 ? stream.time_base_den : m_fps;
-            int tb_num = stream.time_base_num > 0 ? stream.time_base_num : 1;
+            int tb_den = stream.time_base_den > 0 ? stream.time_base_den : m_fps.num;
+            int tb_num = stream.time_base_num > 0 ? stream.time_base_num : m_fps.den;
             m_vstream->time_base = AVRational{tb_num, tb_den};
             m_custom_video_encoder = plugin;
             m_custom_video_ctx = ctx;
@@ -485,8 +489,8 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
         m_venc->width     = m_width;
         m_venc->height    = m_height;
         m_venc->pix_fmt   = m_hw_upload ? m_hw_pix_fmt : AV_PIX_FMT_YUV420P;
-        m_venc->time_base = AVRational{1, m_fps};
-        m_venc->framerate = AVRational{m_fps, 1};
+        m_venc->time_base = AVRational{m_fps.den, m_fps.num};
+        m_venc->framerate = m_fps;
         if (options.video.bitrate > 0) m_venc->bit_rate = options.video.bitrate;
         if (global_header) m_venc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
         if (m_hw_upload) {
@@ -514,6 +518,7 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
         ret = m_ff.avcodec_parameters_from_context(m_vstream->codecpar, m_venc);
         if (ret < 0) { set_ff_error("avcodec_parameters_from_context (video)", ret); return AVB_ERROR_OPEN_FAILED; }
         m_vstream->time_base = m_venc->time_base;
+        m_vstream->avg_frame_rate = m_fps;
 
         m_vframe = m_ff.av_frame_alloc();
         if (!m_vframe) { set_error("av_frame_alloc (video) failed."); return AVB_ERROR_OPEN_FAILED; }
@@ -645,6 +650,10 @@ avb_result AvbEncoderFFmpeg::encode_and_mux(AVCodecContext *enc, AVStream *strea
             return AVB_ERROR_ENCODE_FAILED;
         }
         m_packet->stream_index = stream->index;
+        // Some video encoders leave duration unset. Without the final frame's
+        // duration, MP4 can end its edit list at that frame's start and omit
+        // it on decode. One codec time-base tick is one configured frame.
+        if (enc == m_venc && m_packet->duration <= 0) m_packet->duration = 1;
         m_ff.av_packet_rescale_ts(m_packet, enc->time_base, stream->time_base);
         ret = m_ff.av_interleaved_write_frame(m_fmt_ctx, m_packet);
         m_ff.av_packet_unref(m_packet); // already unref'd by write_frame; harmless
@@ -689,7 +698,7 @@ avb_result AvbEncoderFFmpeg::prepare_software_video_frame(
     m_ff.sws_scale(m_sws, src_data, src_lines, 0, m_height,
                    m_vframe->data, m_vframe->linesize);
 
-    m_vframe->pts = std::llround(pts * m_fps);
+    m_vframe->pts = std::llround(pts / av_q2d(m_venc->time_base));
     *out_frame = m_vframe;
     return AVB_OK;
 }
@@ -714,7 +723,7 @@ avb_result AvbEncoderFFmpeg::prepare_hardware_video_frame(
     if (frame.memory_type == AVB_VIDEO_MEMORY_BACKEND_NATIVE && frame.native_handle) {
         auto *native = static_cast<AVFrame *>(frame.native_handle);
         if ((AVPixelFormat)native->format == m_hw_pix_fmt) {
-            native->pts = std::llround(pts * m_fps);
+            native->pts = std::llround(pts / av_q2d(m_venc->time_base));
             *out_frame = native;
             return AVB_OK;
         }
@@ -838,7 +847,7 @@ avb_result AvbEncoderFFmpeg::prepare_dmabuf_video_frame(
     double pts = pts_sec >= 0.0        ? pts_sec
                : frame.pts_sec >= 0.0 ? frame.pts_sec
                                        : (double)m_video_index / m_frame_rate;
-    m_hw_vframe->pts = std::llround(pts * m_fps);
+    m_hw_vframe->pts = std::llround(pts / av_q2d(m_venc->time_base));
     *out_frame = m_hw_vframe;
     return AVB_OK;
 #endif

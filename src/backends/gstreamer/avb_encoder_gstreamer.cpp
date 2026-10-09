@@ -125,13 +125,13 @@ avb_result AvbEncoderGStreamer::update_dmabuf_caps(const avb_video_frame &frame)
     if (modifier == 0 || modifier == UINT64_MAX) {
         snprintf(caps_str, sizeof(caps_str),
                  "video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format=(string)%s,"
-                 "width=%d,height=%d,framerate=%d/1",
-                 fourcc, m_width, m_height, m_fps_n);
+                 "width=%d,height=%d,framerate=%d/%d",
+                 fourcc, m_width, m_height, m_fps_n, m_fps_d);
     } else {
         snprintf(caps_str, sizeof(caps_str),
                  "video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format=(string)%s:0x%016" PRIx64 ","
-                 "width=%d,height=%d,framerate=%d/1",
-                 fourcc, modifier, m_width, m_height, m_fps_n);
+                 "width=%d,height=%d,framerate=%d/%d",
+                 fourcc, modifier, m_width, m_height, m_fps_n, m_fps_d);
     }
 
     GstCaps *caps = m_gst.gst_caps_from_string(caps_str);
@@ -346,7 +346,11 @@ avb_result AvbEncoderGStreamer::open(const char *path, const avb_encode_options 
         m_width      = options.video.width;
         m_height     = options.video.height;
         m_frame_rate = options.video.frame_rate > 0 ? options.video.frame_rate : 30.0;
-        m_fps_n      = std::max(1L, std::lround(m_frame_rate));
+        m_gst.gst_util_double_to_fraction(m_frame_rate, &m_fps_n, &m_fps_d);
+        if (m_fps_n <= 0 || m_fps_d <= 0) {
+            m_last_error = "Video frame rate cannot be represented by GStreamer.";
+            return AVB_ERROR_INVALID_ARGUMENT;
+        }
 
         avb_video_encode_info custom_info{};
         custom_info.width = m_width;
@@ -374,7 +378,7 @@ avb_result AvbEncoderGStreamer::open(const char *path, const avb_encode_options 
             if (stream.gst_caps && stream.gst_caps[0]) {
                 custom_vcaps = stream.gst_caps;
             } else if (stream.codec == AVB_VIDEO_CODEC_HAP || options.video.codec == AVB_VIDEO_CODEC_HAP) {
-                custom_vcaps = "video/x-hap,width=%d,height=%d,framerate=%d/1";
+                custom_vcaps = "video/x-hap,width=%d,height=%d,framerate=%d/%d";
             } else {
                 m_last_error = "Custom GStreamer video encoder requires gst_caps.";
                 return AVB_ERROR_INVALID_ARGUMENT;
@@ -533,25 +537,34 @@ avb_result AvbEncoderGStreamer::open(const char *path, const avb_encode_options 
         m_vsrc = m_gst.gst_bin_get_by_name((GstBin *)m_pipeline, "vsrc");
         char caps_str[256];
         if (m_custom_video) {
+            // Preserve legacy plugin templates while allowing fractional
+            // rates in the caps generated from their placeholders.
+            const std::string legacy_rate = "framerate=%d/1";
+            const size_t rate_pos = custom_vcaps.find(legacy_rate);
+            const size_t rate_end = rate_pos == std::string::npos
+                ? std::string::npos : rate_pos + legacy_rate.size();
+            if (rate_end != std::string::npos &&
+                (rate_end == custom_vcaps.size() || custom_vcaps[rate_end] == ','))
+                custom_vcaps.replace(rate_pos, legacy_rate.size(), "framerate=%d/%d");
             if (custom_vcaps.find("%d") != std::string::npos) {
                 snprintf(caps_str, sizeof(caps_str), custom_vcaps.c_str(),
-                         m_width, m_height, m_fps_n);
+                         m_width, m_height, m_fps_n, m_fps_d);
             } else {
                 snprintf(caps_str, sizeof(caps_str), "%s", custom_vcaps.c_str());
             }
         } else {
             if (m_input_memory == AVB_VIDEO_MEMORY_BACKEND_NATIVE) {
                 snprintf(caps_str, sizeof(caps_str),
-                         "video/x-raw(memory:VASurface),width=%d,height=%d,framerate=%d/1",
-                         m_width, m_height, m_fps_n);
+                         "video/x-raw(memory:VASurface),width=%d,height=%d,framerate=%d/%d",
+                         m_width, m_height, m_fps_n, m_fps_d);
             } else if (m_input_memory == AVB_VIDEO_MEMORY_EXTERNAL) {
                 snprintf(caps_str, sizeof(caps_str),
-                         "video/x-raw(memory:DMABuf),format=DMA_DRM,width=%d,height=%d,framerate=%d/1",
-                         m_width, m_height, m_fps_n);
+                         "video/x-raw(memory:DMABuf),format=DMA_DRM,width=%d,height=%d,framerate=%d/%d",
+                         m_width, m_height, m_fps_n, m_fps_d);
             } else {
                 snprintf(caps_str, sizeof(caps_str),
-                         "video/x-raw,format=%s,width=%d,height=%d,framerate=%d/1",
-                         vfmt, m_width, m_height, m_fps_n);
+                         "video/x-raw,format=%s,width=%d,height=%d,framerate=%d/%d",
+                         vfmt, m_width, m_height, m_fps_n, m_fps_d);
             }
         }
         GstCaps *caps = m_gst.gst_caps_from_string(caps_str);

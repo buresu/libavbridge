@@ -138,6 +138,15 @@ int main(int argc, char **argv) {
     check(g_release_count == 1, "custom frame released once", &failures);
     check(frame.data == nullptr && frame.width == 0 && frame.height == 0,
           "released frame is cleared by the API", &failures);
+    int frame_count = read_res == AVB_OK ? 1 : 0;
+    while (frame_count < 100) {
+        read_res = avb_decoder_read_video_frame(dec, &frame);
+        if (read_res != AVB_OK) break;
+        ++frame_count;
+        avb_decoder_release_video_frame(dec, &frame);
+    }
+    check(read_res == AVB_ERROR_EOF, "custom decoder reaches EOF", &failures);
+    check(frame_count == 75, "each of the 75 packets is delivered exactly once", &failures);
     avb_decoder_close(dec);
 
     check(g_open_count == 1, "custom decoder opened once", &failures);

@@ -43,7 +43,8 @@ private:
     avb_encoded_video_stream m_custom_video_stream{};
     int    m_width = 0, m_height = 0;
     double m_frame_rate = 30.0;
-    int    m_fps_n = 30; // framerate numerator (denominator fixed at 1)
+    int    m_fps_n = 30;
+    int    m_fps_d = 1;
     avb_pixel_format m_input_format = AVB_PIXEL_FORMAT_BGRA8;
     avb_video_memory_type m_input_memory = AVB_VIDEO_MEMORY_CPU;
     avb_video_external_type m_input_external_type =

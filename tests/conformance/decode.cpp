@@ -151,6 +151,31 @@ void check_audio_conversion(Context &test, const char *path,
   avb_decoder_close(decoder);
 }
 
+void check_stream_selection(Context &test, const char *path,
+                            avb_backend backend, const avb_media_info &info) {
+  // FFmpeg stream indices refer to the container's complete stream table.
+  if (backend != AVB_BACKEND_FFMPEG) return;
+  test.section("invalid stream selection");
+  for (bool audio : {true, false}) {
+    for (int index : {1000000, audio ? info.video.stream_index
+                                     : info.audio.stream_index}) {
+      avb_decode_options options = avb_decode_options_default();
+      options.backend = backend;
+      options.enable_audio = audio;
+      options.enable_video = !audio;
+      if (audio) options.audio_stream_index = index;
+      else options.video_stream_index = index;
+      avb_decoder *decoder = nullptr;
+      test.equal(avb_decoder_open(&decoder, path, &options),
+                 AVB_ERROR_STREAM_NOT_FOUND,
+                 "missing or wrong-type stream index is rejected");
+      const char *error = avb_decoder_get_last_error(decoder);
+      test.check(error && *error, "invalid stream selection has a diagnostic");
+      avb_decoder_close(decoder);
+    }
+  }
+}
+
 void check_cpu_frame_layout(Context &test, const avb_video_frame &frame,
                             const FormatCase &format, avb_backend backend) {
   test.equal(frame.format, format.format, "requested format is returned");
@@ -370,5 +395,6 @@ int main(int argc, char *argv[]) {
   check_audio_conversion(test, argv[1], backend);
   check_video(test, argv[1], backend);
   check_seek(test, argv[1], backend, info.duration_sec);
+  check_stream_selection(test, argv[1], backend, info);
   return test.finish("conformance");
 }

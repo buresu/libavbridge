@@ -58,6 +58,7 @@ bool avb_gst_load(AvbGstFuncs &out_funcs, char *err_buf, int err_buf_size) {
     }
 
     LOAD_SYM(g_handle_gst, out_funcs, gst_init);
+    LOAD_SYM(g_handle_gst, out_funcs, gst_util_double_to_fraction);
     LOAD_SYM(g_handle_gst, out_funcs, gst_element_factory_make);
     LOAD_SYM(g_handle_gst, out_funcs, gst_parse_bin_from_description);
     LOAD_SYM(g_handle_gst, out_funcs, gst_element_set_state);

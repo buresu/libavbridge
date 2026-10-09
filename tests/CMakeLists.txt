@@ -27,6 +27,7 @@ avb_add_test_binary(avb_api_contract contract/api.cpp)
 avb_add_test_binary(avb_c_api_contract contract/c_api.c)
 set_target_properties(avb_c_api_contract PROPERTIES LINKER_LANGUAGE CXX)
 avb_add_test_binary(avb_conformance conformance/decode.cpp)
+avb_add_test_binary(avb_audio_resample conformance/audio_resample.cpp)
 avb_add_test_binary(avb_io conformance/io.cpp)
 avb_add_test_binary(avb_roundtrip integration/roundtrip.cpp)
 avb_add_test_binary(avb_codecs integration/codecs.cpp)
@@ -97,6 +98,16 @@ if(FFMPEG_EXECUTABLE)
         VERBATIM
     )
     add_custom_target(avb_conformance_fixture DEPENDS "${AVB_FIXTURE}")
+    set(AVB_AUDIO_FIXTURE "${AVB_OUT}/resample.wav")
+    add_custom_command(
+        OUTPUT "${AVB_AUDIO_FIXTURE}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${AVB_OUT}"
+        COMMAND ${FFMPEG_EXECUTABLE} -y -loglevel error
+                -f lavfi -i "sine=frequency=997:duration=1:sample_rate=44100"
+                -c:a pcm_s16le "${AVB_AUDIO_FIXTURE}"
+        VERBATIM)
+    add_custom_target(avb_audio_fixture DEPENDS "${AVB_AUDIO_FIXTURE}")
+    add_dependencies(avb_audio_resample avb_audio_fixture)
     set(AVB_MF_RUNTIME_CODEC_ARGS)
     if(WIN32 AND AVB_ENABLE_MEDIAFOUNDATION)
         include(platform/mediafoundation_fixtures.cmake)
@@ -150,6 +161,12 @@ if(FFMPEG_EXECUTABLE)
     list(APPEND _avb_backends ${_avb_explicit_backends})
 
     foreach(be ${_avb_backends})
+        if(be STREQUAL "ffmpeg")
+            avb_add_ctest(
+                audio_resample_${be} avb_audio_resample
+                "conformance;decode;audio;backend-${be}"
+                "${AVB_AUDIO_FIXTURE}" ${be})
+        endif()
         avb_add_ctest(
             conformance_${be}
             avb_conformance
