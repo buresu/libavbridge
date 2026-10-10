@@ -26,7 +26,7 @@ private:
     // produces into `stream`.
     avb_result encode_and_mux(AVCodecContext *enc, AVStream *stream, AVFrame *frame);
     avb_result encode_audio_frame(int nb_samples); // consumes from m_audio_fifo
-    avb_result write_custom_video_packet(avb_encoded_packet &packet);
+    avb_result write_custom_video_packet(avb_encoded_packet &packet, double fallback_pts);
     avb_result setup_hardware_video_encoder(const avb_encode_options &options,
                                             const AVCodec **out_codec);
     avb_result prepare_software_video_frame(const avb_video_frame &frame, double pts_sec,

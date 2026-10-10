@@ -661,16 +661,16 @@ avb_result AvbEncoderGStreamer::write_video(const avb_video_frame &frame, double
     // Repack into the tightly-packed (GST_ROUND_UP_4 stride) layout appsrc wants.
     //   BGRA/RGBA: 1 plane; NV12: 2 (Y, CbCr); I420: 3 (Y, Cb, Cr).
     AvbPlaneLayout layout = avb_plane_layout(m_input_format, m_width, m_height, 4);
+    const AvbPlaneLayout active = avb_plane_layout(m_input_format, m_width, m_height, 1);
     int     plane_count = layout.plane_count;
     int    *dst_stride  = layout.stride;
-    int    *plane_rows  = layout.rows;
     size_t *plane_off   = layout.offset;
     size_t  total       = layout.total;
 
     m_stage.resize(total);
     for (int pl = 0; pl < plane_count && pl < frame.plane_count; ++pl) {
-        int copy = std::min(frame.plane_stride[pl], dst_stride[pl]);
-        for (int y = 0; y < plane_rows[pl]; ++y) {
+        int copy = active.stride[pl];
+        for (int y = 0; y < active.rows[pl]; ++y) {
             memcpy(m_stage.data() + plane_off[pl] + (size_t)y * dst_stride[pl],
                    frame.plane_data[pl] + (size_t)y * frame.plane_stride[pl],
                    copy);
@@ -704,13 +704,26 @@ avb_result AvbEncoderGStreamer::write_custom_video_packet(
         return AVB_ERROR_ENCODE_FAILED;
     }
     m_gst.gst_buffer_fill(buf, 0, packet.data, packet.size);
-    double pts = packet.pts_sec >= 0.0 ? packet.pts_sec : fallback_pts;
-    double dur = packet.duration_sec > 0.0 ? packet.duration_sec : 1.0 / m_frame_rate;
-    buf->pts = (GstClockTime)std::llround(pts * GST_SECOND);
-    buf->dts = packet.dts >= 0
-        ? (GstClockTime)packet.dts
-        : buf->pts;
-    buf->duration = (GstClockTime)std::llround(dur * GST_SECOND);
+    int tb_num = packet.time_base_num, tb_den = packet.time_base_den;
+    if (tb_num <= 0 || tb_den <= 0) {
+        tb_num = m_custom_video_stream.time_base_num;
+        tb_den = m_custom_video_stream.time_base_den;
+    }
+    if (tb_num <= 0 || tb_den <= 0) {
+        tb_num = m_fps_d;
+        tb_den = m_fps_n;
+    }
+    auto to_clock_time = [&](int64_t value) {
+        return m_gst.gst_util_uint64_scale_round(
+            (guint64)value, (guint64)tb_num * GST_SECOND, (guint64)tb_den);
+    };
+    const double pts = packet.pts_sec >= 0.0 ? packet.pts_sec : fallback_pts;
+    const double dur = packet.duration_sec > 0.0 ? packet.duration_sec : 1.0 / m_frame_rate;
+    buf->pts = packet.pts >= 0 ? to_clock_time(packet.pts)
+                              : (GstClockTime)std::llround(pts * GST_SECOND);
+    buf->dts = packet.dts >= 0 ? to_clock_time(packet.dts) : buf->pts;
+    buf->duration = packet.duration >= 0 ? to_clock_time(packet.duration)
+                                        : (GstClockTime)std::llround(dur * GST_SECOND);
     if (!packet.keyframe)
         GST_BUFFER_FLAG_SET(buf, GST_BUFFER_FLAG_DELTA_UNIT);
 

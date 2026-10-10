@@ -7,6 +7,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -17,8 +18,10 @@ struct DummyEnc {
     int height = 0;
     double frame_rate = 30.0;
     std::vector<unsigned char> packet;
+    bool flushed = false;
 };
 
+static std::string g_timing_mode;
 static int g_open_count = 0;
 static int g_encode_count = 0;
 static int g_release_count = 0;
@@ -50,6 +53,8 @@ static avb_result open_encoder(void **out_ctx,
     out_stream->codec_tag = fourcc_le("Hap1");
     out_stream->codec_name = "hap";
     out_stream->gst_caps = "video/x-raw,format=RGB,width=%d,height=%d,framerate=%d/1";
+    if (!g_timing_mode.empty())
+        out_stream->gst_caps = "video/x-raw,format=RGB,width=32,height=32,framerate=2/1";
     out_stream->time_base_num = 1;
     out_stream->time_base_den = (int)ctx->frame_rate;
     ++g_open_count;
@@ -76,17 +81,42 @@ static avb_result encode_frame(void *user, const avb_video_frame *frame,
     out_packet->data = ctx->packet.data();
     out_packet->size = (int)ctx->packet.size();
     out_packet->pts_sec = pts_sec >= 0.0 ? pts_sec : frame->pts_sec;
-    out_packet->duration_sec = 1.0 / ctx->frame_rate;
+    out_packet->duration_sec = g_timing_mode.empty() ? 1.0 / ctx->frame_rate : 0.5;
     out_packet->keyframe = 1;
     out_packet->pts = -1;
     out_packet->dts = -1;
     out_packet->duration = -1;
+    if (g_timing_mode == "ticks" || g_timing_mode == "stream_ticks" || g_timing_mode == "flush_ticks") {
+        const int scale = g_timing_mode == "stream_ticks" ? 30 : 1000;
+        out_packet->pts = out_packet->dts = (int64_t)std::llround(g_encode_count * 0.5 * scale);
+        out_packet->duration = scale / 2;
+        out_packet->pts_sec = out_packet->duration_sec = -1.0;
+        if (g_timing_mode != "stream_ticks") {
+            out_packet->time_base_num = 1;
+            out_packet->time_base_den = scale;
+        }
+    } else if (g_timing_mode == "fallback" || g_timing_mode == "frame_fallback") {
+        out_packet->pts_sec = -1.0;
+    }
     ++g_encode_count;
     return AVB_OK;
 }
 
-static avb_result flush_encoder(void *, avb_encoded_packet *) {
-    return AVB_ERROR_EOF;
+static avb_result flush_encoder(void *user, avb_encoded_packet *packet) {
+    auto *ctx = static_cast<DummyEnc *>(user);
+    if (g_timing_mode == "flush_error") return AVB_ERROR_ENCODE_FAILED;
+    if (g_timing_mode != "flush_ticks" || ctx->flushed) return AVB_ERROR_EOF;
+    ctx->flushed = true;
+    *packet = {};
+    packet->data = ctx->packet.data();
+    packet->size = (int)ctx->packet.size();
+    packet->pts = packet->dts = 1500;
+    packet->duration = 500;
+    packet->time_base_num = 1;
+    packet->time_base_den = 1000;
+    packet->pts_sec = packet->duration_sec = -1.0;
+    packet->keyframe = 1;
+    return AVB_OK;
 }
 
 static void release_packet(void *, avb_encoded_packet *packet) {
@@ -109,6 +139,8 @@ int main(int argc, char **argv) {
         std::fprintf(stderr, "Usage: %s <out.mov> <backend>\n", argv[0]);
         return 2;
     }
+
+    if (argc > 3) g_timing_mode = argv[3];
 
     avb_backend backend = AVB_BACKEND_AUTO;
     if (avb_backend_from_name(argv[2], &backend) != AVB_OK) {
@@ -177,21 +209,36 @@ int main(int argc, char **argv) {
     frame.data_size = (int)pixels.size();
 
     if (open_res == AVB_OK) {
-        check(avb_encoder_write_video(enc, &frame, 0.0) == AVB_OK,
-              "write custom video packet", &failures);
+        const int frames = g_timing_mode.empty() ? 1 : g_timing_mode == "flush_ticks" ? 3 : 4;
+        for (int i = 0; i < frames; ++i) {
+            frame.pts_sec = i * 0.5;
+            check(avb_encoder_write_video(enc, &frame,
+                      g_timing_mode == "frame_fallback" ? -1.0 :
+                      (g_timing_mode == "ticks" || g_timing_mode == "stream_ticks" || g_timing_mode == "flush_ticks")
+                          ? i / 30.0 : frame.pts_sec) == AVB_OK,
+                  "write custom video packet", &failures);
+        }
         avb_result finish_res = avb_encoder_finish(enc);
         if (finish_res != AVB_OK) {
             std::printf("    finish error: %s\n",
                         avb_encoder_get_last_error(enc)
                             ? avb_encoder_get_last_error(enc) : "(none)");
         }
-        check(finish_res == AVB_OK, "finish custom encoder mux", &failures);
+        if (g_timing_mode == "flush_error") {
+            check(finish_res == AVB_ERROR_ENCODE_FAILED, "flush failure propagates", &failures);
+            check(avb_encoder_finish(enc) == AVB_ERROR_INVALID_ARGUMENT,
+                  "failed finish cannot be retried as success", &failures);
+            check(avb_encoder_write_video(enc, &frame, 2.0) == AVB_ERROR_INVALID_ARGUMENT,
+                  "failed finish rejects further input", &failures);
+        } else {
+            check(finish_res == AVB_OK, "finish custom encoder mux", &failures);
+        }
     }
     avb_encoder_close(enc);
 
     check(g_open_count == 1, "custom encoder opened once", &failures);
-    check(g_encode_count == 1, "custom encoder received frame", &failures);
-    check(g_release_count == g_encode_count,
+    check(g_encode_count == (g_timing_mode.empty() ? 1 : g_timing_mode == "flush_ticks" ? 3 : 4), "custom encoder received frame", &failures);
+    check(g_release_count == g_encode_count + (g_timing_mode == "flush_ticks" ? 1 : 0),
           "custom encoder packets released once", &failures);
     check(g_close_count == 1, "custom encoder closed once", &failures);
     check(avb_unregister_video_encoder(&plugin) == AVB_OK,

@@ -695,8 +695,12 @@ avb_result AvbEncoderFFmpeg::prepare_software_video_frame(
         src_data[p]  = frame.plane_data[p];
         src_lines[p] = frame.plane_stride[p];
     }
-    m_ff.sws_scale(m_sws, src_data, src_lines, 0, m_height,
-                   m_vframe->data, m_vframe->linesize);
+    ret = m_ff.sws_scale(m_sws, src_data, src_lines, 0, m_height,
+                         m_vframe->data, m_vframe->linesize);
+    if (ret != m_height) {
+        set_error("sws_scale (video encode) did not produce a complete frame.");
+        return AVB_ERROR_ENCODE_FAILED;
+    }
 
     m_vframe->pts = std::llround(pts / av_q2d(m_venc->time_base));
     *out_frame = m_vframe;
@@ -868,7 +872,10 @@ avb_result AvbEncoderFFmpeg::write_video(const avb_video_frame &frame, double pt
         if (res != AVB_OK) return res;
         AvbVideoEncoderPacketScope packet_scope(
             m_custom_video_encoder, m_custom_video_ctx, packet);
-        res = write_custom_video_packet(packet);
+        const double fallback_pts = pts_sec >= 0.0 ? pts_sec
+            : frame.pts_sec >= 0.0 ? frame.pts_sec
+            : (double)m_video_index / m_frame_rate;
+        res = write_custom_video_packet(packet, fallback_pts);
         if (res == AVB_OK) m_video_index++;
         return res;
     }
@@ -889,7 +896,8 @@ avb_result AvbEncoderFFmpeg::write_video(const avb_video_frame &frame, double pt
     return res;
 }
 
-avb_result AvbEncoderFFmpeg::write_custom_video_packet(avb_encoded_packet &packet) {
+avb_result AvbEncoderFFmpeg::write_custom_video_packet(
+    avb_encoded_packet &packet, double fallback_pts) {
     if (!packet.data || packet.size <= 0) return AVB_ERROR_INVALID_ARGUMENT;
 
     AVPacket pkt;
@@ -898,17 +906,25 @@ avb_result AvbEncoderFFmpeg::write_custom_video_packet(avb_encoded_packet &packe
     if (ret < 0) { set_ff_error("av_new_packet (custom video)", ret); return AVB_ERROR_ENCODE_FAILED; }
     memcpy(pkt.data, packet.data, packet.size);
     pkt.stream_index = m_vstream->index;
-    pkt.pts = packet.pts >= 0
-        ? packet.pts
-        : (int64_t)std::llround((packet.pts_sec >= 0.0
-            ? packet.pts_sec
-            : (double)m_video_index / m_frame_rate) / av_q2d(m_vstream->time_base));
-    pkt.dts = packet.dts >= 0 ? packet.dts : pkt.pts;
-    pkt.duration = packet.duration >= 0
-        ? packet.duration
-        : (int64_t)std::llround((packet.duration_sec > 0.0
-            ? packet.duration_sec
-            : 1.0 / m_frame_rate) / av_q2d(m_vstream->time_base));
+    // The muxer may replace AVStream::time_base when writing its header.
+    // Raw plugin timestamps remain in the packet (or plugin stream) time base.
+    AVRational source_tb = {packet.time_base_num, packet.time_base_den};
+    if (source_tb.num <= 0 || source_tb.den <= 0)
+        source_tb = {m_custom_video_stream.time_base_num,
+                     m_custom_video_stream.time_base_den};
+    if (source_tb.num <= 0 || source_tb.den <= 0)
+        source_tb = {m_fps.den, m_fps.num};
+    pkt.pts = packet.pts >= 0 ? packet.pts : AV_NOPTS_VALUE;
+    pkt.dts = packet.dts >= 0 ? packet.dts : AV_NOPTS_VALUE;
+    pkt.duration = packet.duration > 0 ? packet.duration : 0;
+    m_ff.av_packet_rescale_ts(&pkt, source_tb, m_vstream->time_base);
+    if (pkt.pts == AV_NOPTS_VALUE)
+        pkt.pts = (int64_t)std::llround((packet.pts_sec >= 0.0
+            ? packet.pts_sec : fallback_pts) / av_q2d(m_vstream->time_base));
+    if (pkt.dts == AV_NOPTS_VALUE) pkt.dts = pkt.pts;
+    if (packet.duration < 0)
+        pkt.duration = (int64_t)std::llround((packet.duration_sec > 0.0
+            ? packet.duration_sec : 1.0 / m_frame_rate) / av_q2d(m_vstream->time_base));
     if (packet.keyframe) pkt.flags |= AV_PKT_FLAG_KEY;
 
     ret = m_ff.av_interleaved_write_frame(m_fmt_ctx, &pkt);
@@ -977,7 +993,7 @@ avb_result AvbEncoderFFmpeg::finish() {
                 if (r != AVB_OK) return r;
                 AvbVideoEncoderPacketScope packet_scope(
                     m_custom_video_encoder, m_custom_video_ctx, packet);
-                r = write_custom_video_packet(packet);
+                r = write_custom_video_packet(packet, (double)m_video_index / m_frame_rate);
                 if (r != AVB_OK) return r;
             }
         } else {

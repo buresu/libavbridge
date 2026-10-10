@@ -9,8 +9,10 @@
 // Backends that hand out (or repack into) a contiguous CPU buffer all need the
 // same per-plane stride/rows/offset arithmetic for the packed/planar formats:
 //   RGBA8 / BGRA8 : 1 plane,  stride = w*4
-//   NV12          : 2 planes, Y (w) + interleaved CbCr (w) at half height
-//   I420          : 3 planes, Y (w) + Cb (w/2) + Cr (w/2) at half height
+//   NV12          : 2 planes, Y (w) + interleaved CbCr (2*ceil(w/2))
+//   I420          : 3 planes, Y (w) + Cb (ceil(w/2)) + Cr (ceil(w/2))
+// Chroma height is ceil(h/2). GStreamer's default 4-byte-aligned layout also
+// pads the allocated luma height to an even number (not an extra source row).
 //
 // `align` rounds each plane stride up to a multiple of that many bytes:
 //   1 -> exact (FFmpeg decoder writes its own buffer with stride == width)
@@ -33,14 +35,14 @@ inline AvbPlaneLayout avb_plane_layout(avb_pixel_format fmt, int w, int h, int a
     switch (fmt) {
         case AVB_PIXEL_FORMAT_NV12:
             l.plane_count = 2;
-            l.stride[0] = aligned(w);     l.rows[0] = h;
-            l.stride[1] = aligned(w);     l.rows[1] = h / 2;
+            l.stride[0] = aligned(w); l.rows[0] = align == 4 ? ((h + 1) & ~1) : h;
+            l.stride[1] = aligned(((w + 1) / 2) * 2); l.rows[1] = (h + 1) / 2;
             break;
         case AVB_PIXEL_FORMAT_I420:
             l.plane_count = 3;
-            l.stride[0] = aligned(w);     l.rows[0] = h;
-            l.stride[1] = aligned(w / 2); l.rows[1] = h / 2;
-            l.stride[2] = aligned(w / 2); l.rows[2] = h / 2;
+            l.stride[0] = aligned(w); l.rows[0] = align == 4 ? ((h + 1) & ~1) : h;
+            l.stride[1] = aligned((w + 1) / 2); l.rows[1] = (h + 1) / 2;
+            l.stride[2] = aligned((w + 1) / 2); l.rows[2] = (h + 1) / 2;
             break;
         default: // RGBA8 / BGRA8
             l.plane_count = 1;

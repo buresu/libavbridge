@@ -78,15 +78,25 @@ static void check_fractional_rate(const char *base_path, avb_backend backend,
     int count = 0;
     double first_pts = 0.0;
     double max_pts_error = 0.0;
+    int max_pixel_error = 0;
     avb_result result;
     while ((result = avb_decoder_read_video_frame(decoder, &frame)) == AVB_OK) {
         if (count == 0) first_pts = frame.pts_sec;
+        for (int y = 0; y < frame.height; ++y) {
+            for (int x = 0; x < frame.width; ++x) {
+                for (int c = 0; c < 3; ++c) {
+                    const int delta = std::abs((int)frame.data[y * frame.stride + x * 4 + c] - 127);
+                    if (delta > max_pixel_error) max_pixel_error = delta;
+                }
+            }
+        }
         max_pts_error = std::fmax(max_pts_error,
             std::fabs(frame.pts_sec - first_pts - count / rate));
         ++count;
         avb_decoder_release_video_frame(decoder, &frame);
     }
     check(result == AVB_ERROR_EOF && count == 60, "all fractional-rate frames decode");
+    check(max_pixel_error <= 8, "packed data/stride input preserves pixels");
     check_near(max_pts_error, 0.0, 0.000002, "derived timestamps preserve fractional rate");
     avb_decoder_close(decoder);
     std::remove(path.c_str());

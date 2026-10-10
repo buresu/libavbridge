@@ -24,6 +24,7 @@
 struct AvbGstFuncs {
     // libgstreamer-1.0
     void (*gst_init)(int *, char ***);
+    guint64 (*gst_util_uint64_scale_round)(guint64, guint64, guint64);
     void (*gst_util_double_to_fraction)(gdouble, gint *, gint *);
     GstElement *(*gst_element_factory_make)(const gchar *, const gchar *);
     GstElement *(*gst_parse_bin_from_description)(const gchar *, gboolean, GError **);

@@ -28,6 +28,9 @@ avb_add_test_binary(avb_c_api_contract contract/c_api.c)
 set_target_properties(avb_c_api_contract PROPERTIES LINKER_LANGUAGE CXX)
 avb_add_test_binary(avb_conformance conformance/decode.cpp)
 avb_add_test_binary(avb_audio_resample conformance/audio_resample.cpp)
+avb_add_test_binary(avb_encoder_input conformance/encoder_input.cpp)
+avb_add_test_binary(avb_odd_dimensions conformance/odd_dimensions.cpp)
+target_include_directories(avb_odd_dimensions PRIVATE ${PROJECT_SOURCE_DIR}/src)
 avb_add_test_binary(avb_io conformance/io.cpp)
 if(AVB_ENABLE_FFMPEG AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
     avb_add_test_binary(avb_ffmpeg_read_errors platform/ffmpeg_read_errors.cpp)
@@ -89,6 +92,7 @@ avb_add_ctest(
     c_api_contract avb_c_api_contract "contract;api;c-abi")
 
 find_program(FFMPEG_EXECUTABLE ffmpeg)
+find_program(FFPROBE_EXECUTABLE ffprobe)
 
 if(FFMPEG_EXECUTABLE)
     set(AVB_FIXTURE "${CMAKE_CURRENT_BINARY_DIR}/fixtures/conformance.mp4")
@@ -108,6 +112,17 @@ if(FFMPEG_EXECUTABLE)
         VERBATIM
     )
     add_custom_target(avb_conformance_fixture DEPENDS "${AVB_FIXTURE}")
+    set(AVB_ODD_FIXTURE "${AVB_OUT}/odd_dimensions.mp4")
+    add_custom_command(
+        OUTPUT "${AVB_ODD_FIXTURE}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${AVB_OUT}"
+        COMMAND ${FFMPEG_EXECUTABLE} -y -loglevel error
+                -f lavfi -i "nullsrc=size=65x49:rate=3,format=yuv444p,geq=lum=81:cb=90:cr=240"
+                -frames:v 3 -c:v libx264 -pix_fmt yuv444p
+                -color_range tv -colorspace smpte170m "${AVB_ODD_FIXTURE}"
+        VERBATIM)
+    add_custom_target(avb_odd_fixture DEPENDS "${AVB_ODD_FIXTURE}")
+    add_dependencies(avb_odd_dimensions avb_odd_fixture)
     if(TARGET avb_ffmpeg_read_errors)
         set(AVB_READ_ERROR_FIXTURE "${AVB_OUT}/read_errors.mp4")
         add_custom_command(
@@ -163,6 +178,7 @@ if(FFMPEG_EXECUTABLE)
     endif()
 
     add_dependencies(avb_conformance avb_conformance_fixture)
+    add_dependencies(avb_encoder_input avb_conformance_fixture)
     add_dependencies(avb_roundtrip avb_conformance_fixture)
     add_dependencies(avb_codecs avb_conformance_fixture)
     add_dependencies(avb_io avb_conformance_fixture)
@@ -238,6 +254,14 @@ if(FFMPEG_EXECUTABLE)
     endforeach()
 
     foreach(be ${_avb_explicit_backends})
+        if(be STREQUAL "ffmpeg" OR be STREQUAL "gstreamer")
+            avb_add_ctest(odd_dimensions_${be} avb_odd_dimensions
+                "conformance;decode;backend-${be}" "${AVB_ODD_FIXTURE}" ${be})
+        endif()
+        avb_add_ctest(
+            encoder_input_${be} avb_encoder_input
+            "conformance;encode;backend-${be}"
+            "${AVB_OUT}/encoder_input_${be}.mp4" ${be})
         avb_add_ctest(
             custom_decoder_${be}
             avb_custom_decoder
@@ -254,6 +278,16 @@ if(FFMPEG_EXECUTABLE)
             "integration;plugin;encode;backend-${be}"
             "${AVB_OUT}/custom_encoder_${be}.${_custom_extension}"
             ${be})
+        if(FFPROBE_EXECUTABLE AND (be STREQUAL "ffmpeg" OR be STREQUAL "gstreamer"))
+            avb_add_ctest(
+                custom_encoder_timestamps_${be} ${CMAKE_COMMAND}
+                "integration;plugin;encode;backend-${be}"
+                "-DENCODER=$<TARGET_FILE:avb_custom_encoder>"
+                "-DPROBE=${FFPROBE_EXECUTABLE}"
+                "-DOUTPUT=${AVB_OUT}/custom_timestamps_${be}.${_custom_extension}"
+                "-DBACKEND=${be}"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/integration/custom_timestamps.cmake")
+        endif()
     endforeach()
 
     # Wide codec coverage is backend-specific because runtime plugin sets vary.

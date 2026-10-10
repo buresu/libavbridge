@@ -206,6 +206,8 @@ typedef enum avb_color_matrix {
  * Encoder input:
  * - For CPU memory, the caller fills width/height/format and plane_data/
  *   plane_stride for plane_count planes (data/stride alias plane 0).
+ *   Strides must be positive and cover a complete row. RGBA8/BGRA8 input
+ *   may instead set data/stride with plane_count == 0.
  * - For BACKEND_NATIVE/EXTERNAL input, the caller owns the handles/fds it supplies.
  *   Backends retain or duplicate what they need during avb_encoder_write_video();
  *   the caller must keep the frame valid until that call returns.
@@ -498,6 +500,14 @@ typedef struct avb_video_stream_info {
     int time_base_num;
     int time_base_den;
 } avb_video_stream_info;
+
+/* FFmpeg/GStreamer custom encoder packet timing:
+ * Nonnegative pts/dts/duration are ticks in the packet's positive time base;
+ * if absent, the encoded stream's time base (or inverse frame rate) is used.
+ * Set unused tick fields to -1. PTS then falls back to pts_sec, followed by
+ * the input frame timestamp; DTS falls back to PTS. Duration falls back to
+ * positive duration_sec, followed by one configured frame interval.
+ * Flush packets without PTS use the next frame-count timestamp. */
 
 typedef struct avb_encoded_packet {
     const unsigned char *data;
@@ -882,8 +892,9 @@ AVB_API avb_result avb_encoder_write_audio_f32(
     int frames
 );
 
-/* Flush encoders and finalize the container. Only avb_encoder_close is valid
- * afterwards. */
+/* Flush encoders and finalize the container. After this call, including on
+ * failure, only avb_encoder_get_last_error and avb_encoder_close are valid.
+ * Further write/finish calls return AVB_ERROR_INVALID_ARGUMENT. */
 AVB_API avb_result avb_encoder_finish(
     avb_encoder *enc
 );
