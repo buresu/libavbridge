@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <string>
 
 // Cross-platform dynamic loading: LoadLibrary/GetProcAddress on Windows,
@@ -19,6 +20,16 @@ static HMODULE lib_open_from_ffmpeg_dir(const char *name) {
         GetEnvironmentVariableW(L"FFMPEG_DIR", root.data(), required);
     if (copied == 0 || copied >= required) return nullptr;
     root.resize(copied);
+
+    // LOAD_WITH_ALTERED_SEARCH_PATH requires an absolute path.
+    const DWORD absolute_size = GetFullPathNameW(root.c_str(), 0, nullptr, nullptr);
+    if (!absolute_size) return nullptr;
+    std::wstring absolute(absolute_size, L'\0');
+    const DWORD absolute_length = GetFullPathNameW(
+        root.c_str(), absolute_size, absolute.data(), nullptr);
+    if (!absolute_length || absolute_length >= absolute_size) return nullptr;
+    absolute.resize(absolute_length);
+    root = std::move(absolute);
 
     const int name_length = MultiByteToWideChar(CP_ACP, 0, name, -1,
                                                  nullptr, 0);
@@ -91,33 +102,25 @@ static void *try_open(const char **names, int count) {
         } \
     } while(0)
 
-bool avb_ffmpeg_load(AvbFFmpegFuncs &out_funcs, char *err_buf, int err_buf_size) {
-    // The major version compiled against (from the FFmpeg headers) is tried
-    // first, so the loaded library's struct ABI matches what this translation
-    // unit expects. Older majors follow as a best-effort fallback. Naming is
-    // platform-specific: "libavformat.so.<major>" / "avformat-<major>.dll" /
-    // "libavformat.<major>.dylib". Keep the leading entry in sync with the
-    // FFmpeg headers used at build time (see *_VERSION_MAJOR).
+static bool load_functions(AvbFFmpegFuncs &out_funcs, char *err_buf, int err_buf_size) {
+    // Windows requires DLLs matching the build-time major versions, since
+    // FFmpeg's public struct layouts are not compatible across major releases.
+    // Other platforms retain their existing library search order.
 #if defined(_WIN32)
     const char *avformat_names[] = {
-        "avformat-" AV_STRINGIFY(LIBAVFORMAT_VERSION_MAJOR) ".dll",
-        "avformat-62.dll", "avformat-61.dll", "avformat-60.dll", "avformat-59.dll"
+        "avformat-" AV_STRINGIFY(LIBAVFORMAT_VERSION_MAJOR) ".dll"
     };
     const char *avcodec_names[] = {
-        "avcodec-" AV_STRINGIFY(LIBAVCODEC_VERSION_MAJOR) ".dll",
-        "avcodec-62.dll", "avcodec-61.dll", "avcodec-60.dll", "avcodec-59.dll"
+        "avcodec-" AV_STRINGIFY(LIBAVCODEC_VERSION_MAJOR) ".dll"
     };
     const char *avutil_names[] = {
-        "avutil-" AV_STRINGIFY(LIBAVUTIL_VERSION_MAJOR) ".dll",
-        "avutil-60.dll", "avutil-59.dll", "avutil-58.dll", "avutil-57.dll"
+        "avutil-" AV_STRINGIFY(LIBAVUTIL_VERSION_MAJOR) ".dll"
     };
     const char *swresample_names[] = {
-        "swresample-" AV_STRINGIFY(LIBSWRESAMPLE_VERSION_MAJOR) ".dll",
-        "swresample-6.dll", "swresample-5.dll", "swresample-4.dll", "swresample-3.dll"
+        "swresample-" AV_STRINGIFY(LIBSWRESAMPLE_VERSION_MAJOR) ".dll"
     };
     const char *swscale_names[] = {
-        "swscale-" AV_STRINGIFY(LIBSWSCALE_VERSION_MAJOR) ".dll",
-        "swscale-9.dll", "swscale-8.dll", "swscale-7.dll", "swscale-6.dll"
+        "swscale-" AV_STRINGIFY(LIBSWSCALE_VERSION_MAJOR) ".dll"
     };
 #elif defined(__APPLE__)
     // Homebrew installs to /opt/homebrew/lib on Apple Silicon and /usr/local/lib
@@ -203,9 +206,30 @@ bool avb_ffmpeg_load(AvbFFmpegFuncs &out_funcs, char *err_buf, int err_buf_size)
         snprintf(err_buf, err_buf_size,
             "FFmpeg backend unavailable: libavformat/libavcodec/libavutil/libswresample/libswscale "
             "could not be loaded. Install FFmpeg runtime libraries and try again.");
-        avb_ffmpeg_unload();
         return false;
     }
+
+#if defined(_WIN32)
+    // AVFrame and AVCodecContext layouts must match the build-time headers,
+    // even if a DLL was renamed to the expected filename.
+    const struct { void *handle; const char *symbol; unsigned major; } versions[] = {
+        {g_handle_avformat, "avformat_version", LIBAVFORMAT_VERSION_MAJOR},
+        {g_handle_avcodec, "avcodec_version", LIBAVCODEC_VERSION_MAJOR},
+        {g_handle_avutil, "avutil_version", LIBAVUTIL_VERSION_MAJOR},
+        {g_handle_swresample, "swresample_version", LIBSWRESAMPLE_VERSION_MAJOR},
+        {g_handle_swscale, "swscale_version", LIBSWSCALE_VERSION_MAJOR}
+    };
+    for (const auto &library : versions) {
+        const auto version = reinterpret_cast<unsigned (*)()>(
+            lib_sym(library.handle, library.symbol));
+        if (!version || (version() >> 16) != library.major) {
+            snprintf(err_buf, err_buf_size,
+                     "FFmpeg ABI mismatch: %s requires major %u.",
+                     library.symbol, library.major);
+            return false;
+        }
+    }
+#endif
 
     LOAD_SYM(g_handle_avformat, out_funcs, avformat_open_input);
     LOAD_SYM(g_handle_avformat, out_funcs, avformat_alloc_context);
@@ -296,10 +320,40 @@ bool avb_ffmpeg_load(AvbFFmpegFuncs &out_funcs, char *err_buf, int err_buf_size)
     return true;
 }
 
-void avb_ffmpeg_unload() {
+static void close_libraries() {
     if (g_handle_swscale)    { lib_close(g_handle_swscale);    g_handle_swscale    = nullptr; }
     if (g_handle_swresample) { lib_close(g_handle_swresample); g_handle_swresample = nullptr; }
     if (g_handle_avcodec)    { lib_close(g_handle_avcodec);    g_handle_avcodec    = nullptr; }
     if (g_handle_avformat)   { lib_close(g_handle_avformat);   g_handle_avformat   = nullptr; }
     if (g_handle_avutil)     { lib_close(g_handle_avutil);     g_handle_avutil     = nullptr; }
+}
+
+static std::mutex g_load_mutex;
+static AvbFFmpegFuncs g_functions{};
+static bool g_loaded = false;
+
+bool avb_ffmpeg_load(AvbFFmpegFuncs &out_funcs, char *err_buf, int err_buf_size) {
+    std::lock_guard<std::mutex> lock(g_load_mutex);
+    out_funcs = {};
+    if (err_buf && err_buf_size > 0) err_buf[0] = '\0';
+    if (!g_loaded) {
+        AvbFFmpegFuncs functions{};
+        if (!load_functions(functions, err_buf, err_buf_size)) {
+            close_libraries();
+            return false;
+        }
+        g_functions = functions;
+        g_loaded = true;
+    }
+    // Encoder/decoder instances share one process-lifetime set of libraries.
+    out_funcs = g_functions;
+    return true;
+}
+
+// Only call when no encoder, decoder, or copied function table is in use.
+void avb_ffmpeg_unload() {
+    std::lock_guard<std::mutex> lock(g_load_mutex);
+    close_libraries();
+    g_functions = {};
+    g_loaded = false;
 }

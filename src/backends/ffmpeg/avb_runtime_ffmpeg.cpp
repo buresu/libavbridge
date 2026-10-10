@@ -75,6 +75,25 @@ const char *const *hardware_encoder_names(
     static const char *av1_vaapi[] = {"av1_vaapi", nullptr};
     static const char *none[] = {nullptr};
 
+#if defined(_WIN32)
+    static const char *h264_nvenc[] = {"h264_nvenc", nullptr};
+    static const char *hevc_nvenc[] = {"hevc_nvenc", nullptr};
+    static const char *av1_nvenc[] = {"av1_nvenc", nullptr};
+    static const char *h264_amf[] = {"h264_amf", nullptr};
+    static const char *hevc_amf[] = {"hevc_amf", nullptr};
+    static const char *av1_amf[] = {"av1_amf", nullptr};
+    if (device == AVB_HW_DEVICE_CUDA) {
+        return codec == AVB_VIDEO_CODEC_H264 ? h264_nvenc :
+               codec == AVB_VIDEO_CODEC_HEVC ? hevc_nvenc :
+               codec == AVB_VIDEO_CODEC_AV1 ? av1_nvenc : none;
+    }
+    if (device == AVB_HW_DEVICE_AMF || device == AVB_HW_DEVICE_D3D11VA) {
+        return codec == AVB_VIDEO_CODEC_H264 ? h264_amf :
+               codec == AVB_VIDEO_CODEC_HEVC ? hevc_amf :
+               codec == AVB_VIDEO_CODEC_AV1 ? av1_amf : none;
+    }
+#endif
+
     if (device != AVB_HW_DEVICE_VAAPI) return none;
     switch (codec) {
         case AVB_VIDEO_CODEC_H264: return h264_vaapi;
@@ -90,12 +109,29 @@ bool has_hardware_encoder(
     const AvbFFmpegFuncs &ff,
     avb_video_codec codec,
     avb_hardware_device device) {
-    if (!device_available(ff, device)) return false;
-
     const char *const *names = hardware_encoder_names(codec, device);
+#if defined(_WIN32)
+    // Codec registration alone does not prove a compatible GPU/driver exists.
+    for (int i = 0; names[i]; ++i) {
+        const AVCodec *encoder = ff.avcodec_find_encoder_by_name(names[i]);
+        if (!encoder) continue;
+        AVCodecContext *context = ff.avcodec_alloc_context3(encoder);
+        if (!context) continue;
+        context->width = 320;
+        context->height = 240;
+        context->pix_fmt = AV_PIX_FMT_YUV420P;
+        context->time_base = AVRational{1, 30};
+        context->framerate = AVRational{30, 1};
+        const bool available = ff.avcodec_open2(context, encoder, nullptr) >= 0;
+        ff.avcodec_free_context(&context);
+        if (available) return true;
+    }
+#else
+    if (!device_available(ff, device)) return false;
     for (int i = 0; names[i]; ++i) {
         if (ff.avcodec_find_encoder_by_name(names[i])) return true;
     }
+#endif
     return false;
 }
 
@@ -168,6 +204,20 @@ void fill_decoder(
     add_device(out, AVB_HW_DEVICE_AUTO);
 
     bool has_hardware = false;
+#if defined(_WIN32)
+    const avb_hardware_device devices[] = {
+        AVB_HW_DEVICE_D3D11VA, AVB_HW_DEVICE_CUDA, AVB_HW_DEVICE_QSV
+    };
+    for (avb_hardware_device device : devices) {
+        for (int i = 0; i < out.video_codec_count; ++i) {
+            if (has_hardware_decoder(ff, out.video_codecs[i], device)) {
+                add_device(out, device);
+                has_hardware = true;
+                break;
+            }
+        }
+    }
+#else
     if (device_available(ff, AVB_HW_DEVICE_VAAPI)) {
         add_device(out, AVB_HW_DEVICE_VAAPI);
         has_hardware = true;
@@ -178,6 +228,7 @@ void fill_decoder(
             has_hardware = true;
         }
     }
+#endif
     if (has_hardware) {
         add_memory(out, AVB_VIDEO_MEMORY_BACKEND_NATIVE);
 #if defined(__linux__)
@@ -213,6 +264,19 @@ void fill_encoder(
 
     add_memory(out, AVB_VIDEO_MEMORY_CPU);
     add_device(out, AVB_HW_DEVICE_AUTO);
+#if defined(_WIN32)
+    const avb_hardware_device devices[] = {AVB_HW_DEVICE_AMF, AVB_HW_DEVICE_CUDA};
+    for (avb_hardware_device device : devices) {
+        for (int i = 0; i < out.video_codec_count; ++i) {
+            if (has_hardware_encoder(ff, out.video_codecs[i], device)) {
+                add_device(out, device);
+                if (device == AVB_HW_DEVICE_AMF)
+                    add_device(out, AVB_HW_DEVICE_D3D11VA);
+                break;
+            }
+        }
+    }
+#else
     if (device_available(ff, AVB_HW_DEVICE_VAAPI)) {
         add_device(out, AVB_HW_DEVICE_VAAPI);
         add_memory(out, AVB_VIDEO_MEMORY_BACKEND_NATIVE);
@@ -220,6 +284,7 @@ void fill_encoder(
         add_external(out, AVB_VIDEO_EXTERNAL_DMABUF);
 #endif
     }
+#endif
 }
 
 }  // namespace

@@ -32,6 +32,24 @@ avb_add_test_binary(avb_encoder_input conformance/encoder_input.cpp)
 avb_add_test_binary(avb_odd_dimensions conformance/odd_dimensions.cpp)
 target_include_directories(avb_odd_dimensions PRIVATE ${PROJECT_SOURCE_DIR}/src)
 avb_add_test_binary(avb_io conformance/io.cpp)
+if(WIN32 AND AVB_ENABLE_FFMPEG)
+    avb_add_test_binary(avb_ffmpeg_windows platform/ffmpeg_windows.cpp)
+    # Keep loader tests independent of avbridge's process-lifetime DLL cache.
+    add_executable(avb_ffmpeg_loader_windows platform/ffmpeg_loader_windows.cpp
+        ${PROJECT_SOURCE_DIR}/src/backends/ffmpeg/avb_ffmpeg_loader.cpp)
+    target_include_directories(avb_ffmpeg_loader_windows PRIVATE
+        ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/support ${FFMPEG_INCLUDE_DIR})
+    add_library(avb_ffmpeg_loader_stub SHARED platform/ffmpeg_loader_stub.cpp)
+    target_include_directories(avb_ffmpeg_loader_stub PRIVATE ${FFMPEG_INCLUDE_DIR})
+    add_dependencies(avb_ffmpeg_loader_windows avb_ffmpeg_loader_stub)
+    avb_add_ctest(loader_ffmpeg_windows avb_ffmpeg_loader_windows
+        "platform;backend-ffmpeg" "$<TARGET_FILE:avb_ffmpeg_loader_stub>")
+    if(MSVC)
+        target_compile_options(avb_ffmpeg_windows PRIVATE /utf-8)
+        target_compile_options(avb_ffmpeg_loader_windows PRIVATE /utf-8)
+    endif()
+endif()
 if(AVB_ENABLE_FFMPEG AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
     avb_add_test_binary(avb_ffmpeg_read_errors platform/ffmpeg_read_errors.cpp)
 endif()
@@ -120,6 +138,11 @@ if(FFMPEG_EXECUTABLE)
         VERBATIM
     )
     add_custom_target(avb_conformance_fixture DEPENDS "${AVB_FIXTURE}")
+    if(TARGET avb_ffmpeg_windows)
+        add_dependencies(avb_ffmpeg_windows avb_conformance_fixture)
+        avb_add_ctest(platform_ffmpeg_windows avb_ffmpeg_windows
+            "platform;hardware;backend-ffmpeg" "${AVB_FIXTURE}" "${AVB_OUT}")
+    endif()
     set(AVB_ODD_FIXTURE "${AVB_OUT}/odd_dimensions.mp4")
     add_custom_command(
         OUTPUT "${AVB_ODD_FIXTURE}"

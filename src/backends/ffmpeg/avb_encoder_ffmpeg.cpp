@@ -269,7 +269,7 @@ avb_result AvbEncoderFFmpeg::setup_hardware_video_encoder(
 
     // DMABUF / backend-native external input can only be imported on the VAAPI
     // upload path; other HW encoders take system-memory frames only.
-    if (options.video.input_memory == AVB_VIDEO_MEMORY_EXTERNAL &&
+    if (options.video.input_memory != AVB_VIDEO_MEMORY_CPU &&
         device != AVB_HW_DEVICE_VAAPI)
         return AVB_ERROR_STREAM_NOT_FOUND;
 
@@ -302,6 +302,7 @@ avb_result AvbEncoderFFmpeg::setup_hardware_video_encoder(
         m_hw_upload = true;
     } else if (device == AVB_HW_DEVICE_CUDA ||
                device == AVB_HW_DEVICE_AMF ||
+               device == AVB_HW_DEVICE_D3D11VA ||
                device == AVB_HW_DEVICE_VIDEOTOOLBOX) {
         // "Software-input" encoder: NVENC/AMF/VideoToolbox accept regular
         // system-memory YUV420P frames and upload internally, so there is no
@@ -468,52 +469,89 @@ avb_result AvbEncoderFFmpeg::open(const char *path, const avb_encode_options &op
                 set_error("Invalid video codec (use AUTO/H264/HEVC/VP8/VP9/AV1).");
                 return AVB_ERROR_INVALID_ARGUMENT;
         }
-        const AVCodec *vcodec = nullptr;
-        avb_result hw_res = setup_hardware_video_encoder(options, &vcodec);
-        if (hw_res != AVB_OK &&
-            (options.video.hardware_policy == AVB_HARDWARE_REQUIRE ||
-             options.video.input_memory == AVB_VIDEO_MEMORY_EXTERNAL)) {
-            set_error("Required FFmpeg hardware %s encoder is not available.", vname);
-            return hw_res == AVB_ERROR_OPEN_FAILED ? hw_res : AVB_ERROR_OPEN_FAILED;
-        }
-        if (!vcodec) {
-            vcodec = m_ff.avcodec_find_encoder(vid);
-            if (!vcodec) { set_error("No %s encoder available in this FFmpeg build.", vname); return AVB_ERROR_OPEN_FAILED; }
-        }
+        // A registered HW codec can still fail to open (missing driver,
+        // unsupported GPU/codec, or dimensions). Try complete initialization
+        // before selecting it, and discard all state before the next candidate.
+        const auto reset_video_encoder = [&]() {
+            if (m_venc) m_ff.avcodec_free_context(&m_venc);
+            if (m_hw_frames_ctx) m_ff.av_buffer_unref(&m_hw_frames_ctx);
+            if (m_hw_device_ctx) m_ff.av_buffer_unref(&m_hw_device_ctx);
+            m_hw_video = false;
+            m_hw_upload = false;
+            m_hw_device = AVB_HW_DEVICE_AUTO;
+            m_hw_pix_fmt = AV_PIX_FMT_NONE;
+        };
+        const auto open_codec = [&](const AVCodec *vcodec) -> avb_result {
+            m_venc = m_ff.avcodec_alloc_context3(vcodec);
+            if (!m_venc) { set_error("avcodec_alloc_context3 (video) failed."); return AVB_ERROR_OPEN_FAILED; }
+            m_venc->width     = m_width;
+            m_venc->height    = m_height;
+            m_venc->pix_fmt   = m_hw_upload ? m_hw_pix_fmt : AV_PIX_FMT_YUV420P;
+            m_venc->time_base = AVRational{m_fps.den, m_fps.num};
+            m_venc->framerate = m_fps;
+            if (options.video.bitrate > 0) m_venc->bit_rate = options.video.bitrate;
+            if (global_header) m_venc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+            if (m_hw_upload) {
+                m_venc->hw_device_ctx = m_ff.av_buffer_ref(m_hw_device_ctx);
+                if (m_hw_frames_ctx) m_venc->hw_frames_ctx = m_ff.av_buffer_ref(m_hw_frames_ctx);
+            }
 
+            AVDictionary *vopts = nullptr;
+            const char *encoder_name = vcodec->name ? vcodec->name : "";
+            if (strcmp(encoder_name, "libx264") == 0 ||
+                strcmp(encoder_name, "libx265") == 0) {
+                m_ff.av_dict_set(&vopts, "preset", "veryfast", 0);
+            } else if (strcmp(encoder_name, "libvpx") == 0 ||
+                       strcmp(encoder_name, "libvpx-vp9") == 0) {
+                m_ff.av_dict_set(&vopts, "deadline", "realtime", 0);
+                m_ff.av_dict_set(&vopts, "cpu-used", "8", 0);
+            } else if (strcmp(encoder_name, "libsvtav1") == 0) {
+                // SVT-AV1 presets are integer levels, not x264-style names.
+                m_ff.av_dict_set(&vopts, "preset", "8", 0);
+            }
+            int ret = m_ff.avcodec_open2(m_venc, vcodec, &vopts);
+            m_ff.av_dict_free(&vopts);
+            if (ret < 0) {
+                set_ff_error("avcodec_open2 (video)", ret);
+                return AVB_ERROR_OPEN_FAILED;
+            }
+            return AVB_OK;
+        };
+
+        std::vector<avb_hardware_device> devices{options.video.hardware_device};
+#if defined(_WIN32)
+        if (options.video.hardware_device == AVB_HW_DEVICE_AUTO)
+            devices = {AVB_HW_DEVICE_AMF, AVB_HW_DEVICE_CUDA};
+#endif
+        bool opened = false;
+        for (avb_hardware_device device : devices) {
+            avb_encode_options candidate = options;
+            candidate.video.hardware_device = device;
+            const AVCodec *vcodec = nullptr;
+            if (setup_hardware_video_encoder(candidate, &vcodec) == AVB_OK &&
+                open_codec(vcodec) == AVB_OK) {
+                opened = true;
+                break;
+            }
+            reset_video_encoder();
+        }
+        if (!opened) {
+            if (options.video.hardware_policy == AVB_HARDWARE_REQUIRE ||
+                options.video.input_memory != AVB_VIDEO_MEMORY_CPU) {
+                if (m_last_error.empty())
+                    set_error("Required FFmpeg hardware %s encoder is not available.", vname);
+                return AVB_ERROR_OPEN_FAILED;
+            }
+            const AVCodec *vcodec = m_ff.avcodec_find_encoder(vid);
+            if (!vcodec) {
+                set_error("No %s encoder available in this FFmpeg build.", vname);
+                return AVB_ERROR_OPEN_FAILED;
+            }
+            if (open_codec(vcodec) != AVB_OK) return AVB_ERROR_OPEN_FAILED;
+        }
+        m_last_error.clear();
         m_vstream = m_ff.avformat_new_stream(m_fmt_ctx, nullptr);
         if (!m_vstream) { set_error("avformat_new_stream (video) failed."); return AVB_ERROR_OPEN_FAILED; }
-
-        m_venc = m_ff.avcodec_alloc_context3(vcodec);
-        if (!m_venc) { set_error("avcodec_alloc_context3 (video) failed."); return AVB_ERROR_OPEN_FAILED; }
-        m_venc->width     = m_width;
-        m_venc->height    = m_height;
-        m_venc->pix_fmt   = m_hw_upload ? m_hw_pix_fmt : AV_PIX_FMT_YUV420P;
-        m_venc->time_base = AVRational{m_fps.den, m_fps.num};
-        m_venc->framerate = m_fps;
-        if (options.video.bitrate > 0) m_venc->bit_rate = options.video.bitrate;
-        if (global_header) m_venc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-        if (m_hw_upload) {
-            m_venc->hw_device_ctx = m_ff.av_buffer_ref(m_hw_device_ctx);
-            if (m_hw_frames_ctx) m_venc->hw_frames_ctx = m_ff.av_buffer_ref(m_hw_frames_ctx);
-        }
-
-        AVDictionary *vopts = nullptr;
-        const char *encoder_name = vcodec->name ? vcodec->name : "";
-        if (strcmp(encoder_name, "libx264") == 0 ||
-            strcmp(encoder_name, "libx265") == 0) {
-            m_ff.av_dict_set(&vopts, "preset", "veryfast", 0);
-        } else if (strcmp(encoder_name, "libvpx") == 0 ||
-                   strcmp(encoder_name, "libvpx-vp9") == 0) {
-            m_ff.av_dict_set(&vopts, "deadline", "realtime", 0);
-            m_ff.av_dict_set(&vopts, "cpu-used", "8", 0);
-        } else if (strcmp(encoder_name, "libsvtav1") == 0) {
-            // SVT-AV1 presets are integer levels, not x264-style names.
-            m_ff.av_dict_set(&vopts, "preset", "8", 0);
-        }
-        ret = m_ff.avcodec_open2(m_venc, vcodec, &vopts);
-        m_ff.av_dict_free(&vopts);
-        if (ret < 0) { set_ff_error("avcodec_open2 (video)", ret); return AVB_ERROR_OPEN_FAILED; }
 
         ret = m_ff.avcodec_parameters_from_context(m_vstream->codecpar, m_venc);
         if (ret < 0) { set_ff_error("avcodec_parameters_from_context (video)", ret); return AVB_ERROR_OPEN_FAILED; }

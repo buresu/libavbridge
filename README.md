@@ -147,6 +147,18 @@ working VA driver.
 On Windows, the runtime loader first uses the normal DLL search path and then
 checks `FFMPEG_DIR\\bin` (or `FFMPEG_DIR` itself). Scoop's `ffmpeg-shared`
 package sets `FFMPEG_DIR` to its package root.
+Relative paths and Unicode directory names are supported. Each DLL's major
+version must match the FFmpeg headers used to build avbridge; incompatible
+majors are rejected. Successful loads are shared across decoder/encoder
+instances and runtime capability probes.
+
+Windows runtime capability probes include D3D11VA, CUDA, and QSV decoding.
+CPU-frame hardware encoding supports AMF (`AMF` or `D3D11VA`) and NVENC (`CUDA`).
+`AUTO` tries AMF and then NVENC. `PREFER` falls back to software if hardware
+initialization fails, while `REQUIRE` reports an error. Driver availability is
+checked when probing encoder capabilities, not just FFmpeg codec registration.
+QSV encoding and external D3D11 texture import/export remain unsupported by the
+FFmpeg backend; hardware decoding can return CPU or opaque backend-native frames.
 
 ## Examples
 
