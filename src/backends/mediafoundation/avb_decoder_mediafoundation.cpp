@@ -301,6 +301,15 @@ avb_result AvbDecoderMediaFoundation::open_ivf(
         return AVB_ERROR_STREAM_NOT_FOUND;
     }
 
+    if (options.video_format != AVB_PIXEL_FORMAT_UNKNOWN &&
+        options.video_format != AVB_PIXEL_FORMAT_BGRA8 &&
+        options.video_format != AVB_PIXEL_FORMAT_RGBA8 &&
+        options.video_format != AVB_PIXEL_FORMAT_NV12 &&
+        options.video_format != AVB_PIXEL_FORMAT_I420) {
+        m_last_error = "Media Foundation IVF decode does not support the requested pixel format.";
+        return AVB_ERROR_INVALID_ARGUMENT;
+    }
+
     FILE *file = mf_fopen_utf8(path, L"rb");
     if (!file) {
         m_last_error = "Opening IVF input failed.";
@@ -1153,6 +1162,7 @@ avb_result AvbDecoderMediaFoundation::read_video_frame(avb_video_frame &out_fram
             m_impl->video_buffer_height = video_format.buffer_height;
             m_impl->video_color_matrix = video_format.color_matrix;
             m_impl->video_color_range = video_format.color_range;
+            m_impl->frame_rate = video_format.frame_rate;
         }
         if (!sample) {
             if (m_impl->video_seek_pending ||
@@ -1164,8 +1174,9 @@ avb_result AvbDecoderMediaFoundation::read_video_frame(avb_video_frame &out_fram
             return AVB_ERROR_DECODE_FAILED;
         }
 
-        // Drop pre-roll frames that precede a pending seek target.
-        if (m_impl->video_seek_pending) {
+        // Compressed packets must reach custom decoders, including the seek
+        // keyframe and dependencies before the target. Drop their output below.
+        if (m_impl->video_seek_pending && !m_impl->custom_video) {
             if ((double)ts / 1e7 + 1e-6 < m_impl->seek_target_sec) continue;
             m_impl->video_seek_pending = false;
         }
@@ -1185,6 +1196,8 @@ avb_result AvbDecoderMediaFoundation::read_video_frame(avb_video_frame &out_fram
             sample->GetSampleDuration(&dur);
             UINT32 clean_point = 0;
             sample->GetUINT32(MFSampleExtension_CleanPoint, &clean_point);
+            UINT64 decode_time = static_cast<UINT64>(ts);
+            sample->GetUINT64(MFSampleExtension_DecodeTimestamp, &decode_time);
 
             avb_encoded_packet packet{};
             packet.data = m_impl->custom_packet_buf.data();
@@ -1194,7 +1207,7 @@ avb_result AvbDecoderMediaFoundation::read_video_frame(avb_video_frame &out_fram
             packet.keyframe = clean_point ? 1 : 0;
             packet.stream_index = m_impl->video_stream_idx;
             packet.pts = ts;
-            packet.dts = ts;
+            packet.dts = static_cast<int64_t>(decode_time);
             packet.duration = dur;
             packet.time_base_num = 1;
             packet.time_base_den = 10000000;
@@ -1204,6 +1217,14 @@ avb_result AvbDecoderMediaFoundation::read_video_frame(avb_video_frame &out_fram
             if (res == AVB_ERROR_AGAIN) continue;
             if (res == AVB_OK && out_frame.pts_sec < 0.0)
                 out_frame.pts_sec = packet.pts_sec;
+            if (res == AVB_OK && m_impl->video_seek_pending) {
+                if (out_frame.pts_sec + 1e-6 < m_impl->seek_target_sec) {
+                    release_video_frame(out_frame);
+                    out_frame = {};
+                    continue;
+                }
+                m_impl->video_seek_pending = false;
+            }
             return res;
         }
         break;

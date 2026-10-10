@@ -6,6 +6,73 @@
 #include <vector>
 
 namespace {
+struct PrerollDecoder {
+    bool has_keyframe = false;
+    int decoded = 0;
+    int released = 0;
+    unsigned char block[8]{};
+} preroll;
+
+int can_decode_preroll(const avb_video_stream_info *, const avb_decode_options *options) {
+    return options->video_format == AVB_PIXEL_FORMAT_BC1_RGBA;
+}
+avb_result open_preroll(void **context, const avb_video_stream_info *, const avb_decode_options *) {
+    preroll = {};
+    *context = &preroll;
+    return AVB_OK;
+}
+avb_result decode_preroll(void *, const avb_encoded_packet *packet, avb_video_frame *frame) {
+    if (packet->keyframe) preroll.has_keyframe = true;
+    if (!preroll.has_keyframe) return AVB_ERROR_DECODE_FAILED;
+    ++preroll.decoded;
+    *frame = {};
+    frame->width = 4;
+    frame->height = 4;
+    frame->format = AVB_PIXEL_FORMAT_BC1_RGBA;
+    frame->data = preroll.block;
+    frame->data_size = sizeof(preroll.block);
+    frame->pts_sec = packet->pts_sec;
+    return AVB_OK;
+}
+void release_preroll(void *, avb_video_frame *) { ++preroll.released; }
+void flush_preroll(void *) { preroll.has_keyframe = false; }
+void close_preroll(void *) {}
+
+void check_custom_seek(avb::test::Context &test, const char *path) {
+    avb_video_decoder_plugin plugin{};
+    plugin.struct_size = sizeof(plugin);
+    plugin.name = "stateful-preroll";
+    plugin.can_decode = can_decode_preroll;
+    plugin.open = open_preroll;
+    plugin.decode_packet = decode_preroll;
+    plugin.release_frame = release_preroll;
+    plugin.flush = flush_preroll;
+    plugin.close = close_preroll;
+    test.equal(avb_register_video_decoder(&plugin), AVB_OK, "register stateful decoder");
+    auto options = avb_decode_options_default();
+    options.backend = AVB_BACKEND_MEDIAFOUNDATION;
+    options.enable_audio = 0;
+    options.video_format = AVB_PIXEL_FORMAT_BC1_RGBA;
+    avb_decoder *decoder = nullptr;
+    const auto opened = avb_decoder_open(&decoder, path, &options);
+    test.equal(opened, AVB_OK, "stateful custom decoder opens");
+    if (opened == AVB_OK) {
+        for (double target : {0.501, 1.501}) {
+            test.equal(avb_decoder_seek(decoder, target, nullptr), AVB_OK, "custom decoder seeks");
+            avb_video_frame frame{};
+            const auto read = avb_decoder_read_video_frame(decoder, &frame);
+            test.equal(read, AVB_OK, "custom decoder receives the keyframe and preroll after seek");
+            if (read == AVB_OK) {
+                test.check(frame.pts_sec >= target - 1e-6, "custom seek only returns frames at the target");
+                avb_decoder_release_video_frame(decoder, &frame);
+            }
+            test.equal(preroll.decoded, preroll.released, "discarded custom frames are released");
+        }
+    }
+    avb_decoder_close(decoder);
+    avb_unregister_video_decoder(&plugin);
+}
+
 void check_selection(avb::test::Context &test, const char *path) {
     auto options = avb_decode_options_default();
     options.backend = AVB_BACKEND_MEDIAFOUNDATION;
@@ -41,6 +108,18 @@ void check_selection(avb::test::Context &test, const char *path) {
         test.equal(selected_info.video.available, int(!audio), "video enable is respected");
         avb_decoder_close(decoder);
     }
+}
+
+void check_unsupported_format(avb::test::Context &test, const char *path) {
+    auto options = avb_decode_options_default();
+    options.backend = AVB_BACKEND_MEDIAFOUNDATION;
+    options.enable_audio = 0;
+    options.video_format = AVB_PIXEL_FORMAT_BC1_RGBA;
+    options.enable_custom_video_decoders = 0;
+    avb_decoder *decoder = nullptr;
+    test.check(avb_decoder_open(&decoder, path, &options) != AVB_OK,
+               "unsupported compressed output does not silently become BGRA");
+    avb_decoder_close(decoder);
 }
 
 void check_audio_seek(avb::test::Context &test, const char *path) {
@@ -132,7 +211,12 @@ int main(int argc, char **argv) {
     if (argc < 3) return 2;
     avb::test::Context test;
     check_selection(test, argv[1]);
+    check_custom_seek(test, argv[1]);
     check_audio_seek(test, argv[2]);
-    if (argc > 3) check_ivf(test, argv[3]);
+    check_unsupported_format(test, argv[1]);
+    if (argc > 3) {
+        check_ivf(test, argv[3]);
+        check_unsupported_format(test, argv[3]);
+    }
     return test.finish("Media Foundation decode contracts");
 }

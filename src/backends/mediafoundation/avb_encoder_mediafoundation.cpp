@@ -824,6 +824,8 @@ avb_result AvbEncoderMediaFoundation::process_video_mft_output() {
     }
 
     IMFSample *sample = output.pSample ? output.pSample : out_sample.Get();
+    LONGLONG sample_time = 0;
+    const HRESULT time_result = sample ? sample->GetSampleTime(&sample_time) : E_FAIL;
     ComPtr<IMFMediaBuffer> encoded;
     if (sample) sample->ConvertToContiguousBuffer(&encoded);
     if (output.pSample && output.pSample != out_sample.Get())
@@ -832,6 +834,19 @@ avb_result AvbEncoderMediaFoundation::process_video_mft_output() {
     DWORD length = 0;
     if (encoded) encoded->GetCurrentLength(&length);
     if (encoded && length > 0) {
+        // IVF stores presentation time in the header's scale/rate units.
+        // A frame count loses a non-zero start and variable frame spacing.
+        if (FAILED(time_result) || sample_time < 0) {
+            m_last_error = "IVF encoder returned a packet without a valid timestamp.";
+            return AVB_ERROR_ENCODE_FAILED;
+        }
+        const long double ticks = std::round(
+            static_cast<long double>(sample_time) * m_impl->fps_num /
+            (10000000.0L * m_impl->fps_den));
+        if (ticks >= static_cast<long double>(std::numeric_limits<uint64_t>::max())) {
+            m_last_error = "IVF packet timestamp is out of range.";
+            return AVB_ERROR_ENCODE_FAILED;
+        }
         BYTE *data = nullptr;
         DWORD max_len = 0, cur_len = 0;
         hr = encoded->Lock(&data, &max_len, &cur_len);
@@ -840,7 +855,7 @@ avb_result AvbEncoderMediaFoundation::process_video_mft_output() {
             return AVB_ERROR_ENCODE_FAILED;
         }
         bool ok = mf_ivf_write_frame(
-            m_impl->ivf_file, data, cur_len, m_impl->ivf_frame_count);
+            m_impl->ivf_file, data, cur_len, static_cast<uint64_t>(ticks));
         encoded->Unlock();
         if (!ok) {
             m_last_error = "Writing IVF frame failed.";

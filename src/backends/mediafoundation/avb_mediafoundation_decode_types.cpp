@@ -300,11 +300,15 @@ HRESULT mf_decode_configure_video(
     } else if (requested_format == AVB_PIXEL_FORMAT_I420) {
         format->pixel_format = AVB_PIXEL_FORMAT_I420;
         subtype = MFVideoFormat_I420;
-    } else {
+    } else if (requested_format == AVB_PIXEL_FORMAT_UNKNOWN ||
+               requested_format == AVB_PIXEL_FORMAT_BGRA8 ||
+               requested_format == AVB_PIXEL_FORMAT_RGBA8) {
         format->pixel_format =
             requested_format == AVB_PIXEL_FORMAT_RGBA8
             ? AVB_PIXEL_FORMAT_RGBA8
             : AVB_PIXEL_FORMAT_BGRA8;
+    } else {
+        return MF_E_INVALIDMEDIATYPE;
     }
 
     ComPtr<IMFMediaType> requested;

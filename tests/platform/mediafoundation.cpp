@@ -7,6 +7,7 @@
 #include <avbridge.h>
 
 #include <cstdint>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -406,7 +407,10 @@ static int smoke_ivf_video_encoder(const char *input_path,
   int frames = 0;
   avb_video_frame frame{};
   while (frames < 30 && avb_decoder_read_video_frame(dec, &frame) == AVB_OK) {
-    avb_result wr = avb_encoder_write_video(enc, &frame, frame.pts_sec);
+    // Non-zero start and irregular spacing expose muxers that replace PTS
+    // with a sequential frame counter.
+    const double pts = 3.0 + frames * frames / eopts.video.frame_rate;
+    avb_result wr = avb_encoder_write_video(enc, &frame, pts);
     avb_decoder_release_video_frame(dec, &frame);
     if (wr != AVB_OK) {
       std::fprintf(stderr, "write %s IVF frame failed: %s\n", label,
@@ -439,7 +443,28 @@ static int smoke_ivf_video_encoder(const char *input_path,
     std::fprintf(stderr, "read %s IVF header failed\n", label);
     return 1;
   }
+  bool valid_timestamps = true;
+  for (uint32_t i = 0; i < read_le32(header + 24); ++i) {
+    unsigned char packet_header[12]{};
+    if (std::fread(packet_header, 1, sizeof(packet_header), f) != sizeof(packet_header)) {
+      valid_timestamps = false;
+      break;
+    }
+    const uint64_t ticks = read_le32(packet_header + 4) |
+        (static_cast<uint64_t>(read_le32(packet_header + 8)) << 32);
+    const double pts = static_cast<double>(ticks) * read_le32(header + 20) / read_le32(header + 16);
+    const double expected = 3.0 + i * i / eopts.video.frame_rate;
+    if (std::fabs(pts - expected) > 0.5 / eopts.video.frame_rate) valid_timestamps = false;
+    if (std::fseek(f, read_le32(packet_header), SEEK_CUR) != 0) {
+      valid_timestamps = false;
+      break;
+    }
+  }
   std::fclose(f);
+  if (!valid_timestamps) {
+    std::fprintf(stderr, "%s IVF did not preserve encoder input timestamps\n", label);
+    return 1;
+  }
   if (std::memcmp(header, "DKIF", 4) != 0 ||
       std::memcmp(header + 8, fourcc, 4) != 0 || read_le32(header + 24) == 0) {
     std::fprintf(stderr, "%s IVF header is invalid\n", label);
@@ -703,9 +728,10 @@ smoke_native_source_decoder(const char *input_path, const char *label,
     texture->GetDevice(&texture_device);
     D3D11_TEXTURE2D_DESC desc{};
     texture->GetDesc(&desc);
-    if (desc.Format != DXGI_FORMAT_NV12 || (int)desc.Width != frame.width ||
-        (int)desc.Height != frame.height ||
-        frame.native_handle_id >= desc.ArraySize ||
+    // Decoder surfaces may include alignment padding beyond the visible frame.
+    if (desc.Format != DXGI_FORMAT_NV12 || (int)desc.Width < frame.width ||
+        (int)desc.Height < frame.height ||
+        frame.native_handle_id >= desc.ArraySize * desc.MipLevels ||
         (expected_device && texture_device.Get() != expected_device)) {
       std::fprintf(stderr,
                    "native %s decoder returned mismatched texture metadata\n",
