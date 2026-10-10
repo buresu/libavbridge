@@ -21,6 +21,7 @@ AvbDecoderImpl::~AvbDecoderImpl() {
 namespace {
 
 const char *avb_extension_for_magic(const std::vector<unsigned char> &head) {
+    if (head.size() >= 4 && std::memcmp(head.data(), "DKIF", 4) == 0) return ".ivf";
     if (head.size() >= 12 && std::memcmp(head.data() + 4, "ftyp", 4) == 0) {
         if (std::memcmp(head.data() + 8, "qt  ", 4) == 0) return ".mov";
         return ".mp4";

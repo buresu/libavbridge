@@ -7,9 +7,12 @@
 #endif
 
 #include <cstdint>
+#include <cstdio>
 #include <d3d11.h>
 #include <mfapi.h>
 #include <mfidl.h>
+
+FILE *mf_fopen_utf8(const char *path, const wchar_t *mode);
 
 inline uint32_t mf_fourcc(const char (&s)[5]) {
     return static_cast<uint32_t>(static_cast<unsigned char>(s[0])) |

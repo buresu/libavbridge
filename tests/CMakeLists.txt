@@ -51,6 +51,14 @@ avb_add_test_binary(
     integration/video_memory_roundtrip.cpp)
 
 if(AVB_ENABLE_MEDIAFOUNDATION)
+    avb_add_test_binary(avb_mediafoundation_decode platform/mediafoundation_decode.cpp)
+    avb_add_test_binary(avb_mediafoundation_frames platform/mediafoundation_frames.cpp)
+    target_sources(avb_mediafoundation_frames PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/backends/mediafoundation/avb_mediafoundation_decode_frames.cpp)
+    target_include_directories(avb_mediafoundation_frames PRIVATE ${PROJECT_SOURCE_DIR}/src)
+    target_link_libraries(avb_mediafoundation_frames PRIVATE mfplat mfuuid)
+    avb_add_ctest(frame_layout_mediafoundation avb_mediafoundation_frames
+        "platform;decode;backend-mediafoundation")
     avb_add_test_binary(
         avb_mediafoundation_runtime_codecs
         platform/mediafoundation.cpp)
@@ -228,7 +236,7 @@ if(FFMPEG_EXECUTABLE)
     list(APPEND _avb_backends ${_avb_explicit_backends})
 
     foreach(be ${_avb_backends})
-        if(be STREQUAL "ffmpeg")
+        if(be STREQUAL "ffmpeg" OR be STREQUAL "mediafoundation")
             avb_add_ctest(
                 audio_resample_${be} avb_audio_resample
                 "conformance;decode;audio;backend-${be}"
@@ -278,7 +286,7 @@ if(FFMPEG_EXECUTABLE)
             "integration;plugin;encode;backend-${be}"
             "${AVB_OUT}/custom_encoder_${be}.${_custom_extension}"
             ${be})
-        if(FFPROBE_EXECUTABLE AND (be STREQUAL "ffmpeg" OR be STREQUAL "gstreamer"))
+        if(FFPROBE_EXECUTABLE AND (be STREQUAL "ffmpeg" OR be STREQUAL "gstreamer" OR be STREQUAL "mediafoundation"))
             avb_add_ctest(
                 custom_encoder_timestamps_${be} ${CMAKE_COMMAND}
                 "integration;plugin;encode;backend-${be}"
@@ -350,6 +358,24 @@ if(FFMPEG_EXECUTABLE)
     endif()
 
     if(AVB_ENABLE_MEDIAFOUNDATION)
+        add_dependencies(avb_mediafoundation_decode avb_conformance_fixture avb_audio_fixture)
+        set(AVB_MF_IVF_FIXTURE)
+        execute_process(COMMAND ${FFMPEG_EXECUTABLE} -hide_banner -encoders
+            OUTPUT_VARIABLE _mf_encoders ERROR_QUIET)
+        if(_mf_encoders MATCHES "libvpx")
+            set(AVB_MF_IVF_FIXTURE "${AVB_OUT}/mediafoundation_seek.ivf")
+            add_custom_command(OUTPUT "${AVB_MF_IVF_FIXTURE}"
+                COMMAND ${CMAKE_COMMAND} -E make_directory "${AVB_OUT}"
+                COMMAND ${FFMPEG_EXECUTABLE} -y -loglevel error
+                    -f lavfi -i "color=red:size=64x64:rate=30:duration=40"
+                    -c:v libvpx -pix_fmt yuv420p -deadline realtime "${AVB_MF_IVF_FIXTURE}"
+                VERBATIM)
+            add_custom_target(avb_mf_ivf_fixture DEPENDS "${AVB_MF_IVF_FIXTURE}")
+            add_dependencies(avb_mediafoundation_decode avb_mf_ivf_fixture)
+        endif()
+        avb_add_ctest(decode_contracts_mediafoundation avb_mediafoundation_decode
+            "platform;decode;backend-mediafoundation"
+            "${AVB_FIXTURE}" "${AVB_AUDIO_FIXTURE}" ${AVB_MF_IVF_FIXTURE})
         avb_add_ctest(
             runtime_codecs_mediafoundation
             avb_mediafoundation_runtime_codecs

@@ -13,6 +13,7 @@ public:
     avb_result seek(double seconds) override;
     int read_audio_f32(float *dst_interleaved, int frames) override;
     double audio_next_pts() override;
+    bool audio_read_failed() const override;
     avb_result read_video_frame(avb_video_frame &out_frame) override;
     void release_video_frame(avb_video_frame &frame) override;
     const char *get_last_error() const override;

@@ -327,7 +327,9 @@ MfIvfReadResult mf_ivf_read_frame(
 
     unsigned char header[12] = {};
     size_t read = std::fread(header, 1, sizeof(header), file);
-    if (read != sizeof(header)) return MfIvfReadResult::eof;
+    if (read != sizeof(header))
+        return read == 0 && std::feof(file) && !std::ferror(file)
+            ? MfIvfReadResult::eof : MfIvfReadResult::invalid;
 
     uint32_t packet_size = mf_read_le32(header);
     timestamp = mf_read_le64(header + 4);

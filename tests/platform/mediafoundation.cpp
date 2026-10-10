@@ -609,7 +609,8 @@ static int smoke_native_ivf_decoder(const char *input_path, const char *label) {
   }
   int frames = 0;
   avb_video_frame frame{};
-  while (frames < 7 && avb_decoder_read_video_frame(dec, &frame) == AVB_OK) {
+  avb_result read = AVB_OK;
+  while (frames < 100 && (read = avb_decoder_read_video_frame(dec, &frame)) == AVB_OK) {
     if (frame.memory_type != AVB_VIDEO_MEMORY_EXTERNAL ||
         frame.external_type != AVB_VIDEO_EXTERNAL_D3D11_TEXTURE ||
         frame.hardware_device != AVB_HW_DEVICE_D3D11VA ||
@@ -633,11 +634,19 @@ static int smoke_native_ivf_decoder(const char *input_path, const char *label) {
     avb_decoder_release_video_frame(dec, &frame);
     ++frames;
   }
-  if (frames == 0) {
-    std::fprintf(stderr, "native %s IVF decoder produced no frames\n", label);
+  if (frames == 0 || read != AVB_ERROR_EOF ||
+      avb_decoder_read_video_frame(dec, &frame) != AVB_ERROR_EOF) {
+    std::fprintf(stderr, "native %s IVF decoder did not reach stable EOF\n", label);
     avb_decoder_close(dec);
     return 1;
   }
+  if (avb_decoder_seek(dec, 0.0, nullptr) != AVB_OK ||
+      avb_decoder_read_video_frame(dec, &frame) != AVB_OK) {
+    std::fprintf(stderr, "native %s IVF decoder did not restart after EOF\n", label);
+    avb_decoder_close(dec);
+    return 1;
+  }
+  avb_decoder_release_video_frame(dec, &frame);
   avb_decoder_close(dec);
 
   std::printf(
@@ -1123,7 +1132,7 @@ int main(int argc, char **argv) {
       return 1;
     ran_smoke = true;
 
-    std::string native_out = std::string(argv[2]) + ".native.av1.ivf";
+    std::string native_out = std::string(argv[2]) + u8".\u52d5\u753b-\u03b1.av1.ivf";
     native_res = smoke_native_video_encoder(native_out.c_str(),
                                             AVB_VIDEO_CODEC_AV1, "AV1");
     if (native_res == 1)

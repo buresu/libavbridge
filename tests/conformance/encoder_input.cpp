@@ -13,16 +13,18 @@ int main(int argc, char **argv) {
     avb_encode_options options = avb_encode_options_default();
     options.backend = backend;
     options.video.enable = 1;
-    options.video.width = options.video.height = 32;
+    // Use a size accepted by platform H.264 encoders as well as software codecs.
+    constexpr int side = 64;
+    options.video.width = options.video.height = side;
     options.video.frame_rate = 30.0;
     options.video.input_format = AVB_PIXEL_FORMAT_BGRA8;
-    std::vector<unsigned char> pixels(32 * 32 * 4, 127);
+    std::vector<unsigned char> pixels(side * side * 4, 127);
     avb_video_frame frame{};
-    frame.width = frame.height = 32;
+    frame.width = frame.height = side;
     frame.format = AVB_PIXEL_FORMAT_BGRA8;
     frame.plane_count = 1;
     frame.plane_data[0] = frame.data = pixels.data();
-    frame.plane_stride[0] = frame.stride = 32 * 4;
+    frame.plane_stride[0] = frame.stride = side * 4;
     frame.data_size = (int)pixels.size();
     float sample = 0.0f;
 
@@ -60,9 +62,9 @@ int main(int argc, char **argv) {
     bad.plane_data[0] = nullptr;
     reject(bad, "null plane rejected");
     bad = frame;
-    bad.plane_stride[0] = -128;
+    bad.plane_stride[0] = -side * 4;
     reject(bad, "negative stride rejected");
-    bad.plane_stride[0] = 127;
+    bad.plane_stride[0] = side * 4 - 1;
     reject(bad, "short stride rejected");
     bad = frame;
     bad.plane_count = AVB_MAX_PLANES + 1;

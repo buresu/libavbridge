@@ -50,6 +50,7 @@ struct AvbDecoderMediaFoundation::Impl {
     bool ivf_async = false;
     bool ivf_eof = false;
     bool ivf_draining = false;
+    bool ivf_drained = false;
     bool ivf_native_output = false;
     bool source_native_output = false;
     // CPU frames from a hardware decoder: the Source Reader decodes on the GPU
@@ -97,6 +98,7 @@ struct AvbDecoderMediaFoundation::Impl {
     // Decoded interleaved-float audio waiting to be consumed (drain loop and
     // head-PTS bookkeeping live in AvbAudioBuffer).
     AvbAudioBuffer             audio;
+    bool audio_failed = false;
     std::vector<unsigned char> video_frame_buf;
     std::vector<unsigned char> custom_packet_buf;
 
@@ -222,6 +224,7 @@ struct AvbDecoderMediaFoundation::Impl {
         ivf_async = false;
         ivf_eof = false;
         ivf_draining = false;
+        ivf_drained = false;
         ivf_native_output = false;
         source_native_output = false;
         source_cpu_readback = false;
@@ -251,6 +254,7 @@ struct AvbDecoderMediaFoundation::Impl {
         audio_codec_name.clear();
         video_codec_name.clear();
         audio.clear();
+        audio_failed = false;
         video_frame_buf.clear();
         custom_packet_buf.clear();
         seek_target_sec    = 0.0;
@@ -291,7 +295,13 @@ avb_result AvbDecoderMediaFoundation::open_ivf(
         return AVB_ERROR_STREAM_NOT_FOUND;
     }
 
-    FILE *file = fopen(path, "rb");
+    if (options.video_stream_index > 0 ||
+        (options.enable_audio && options.audio_stream_index >= 0)) {
+        m_last_error = "Requested stream does not exist in IVF input.";
+        return AVB_ERROR_STREAM_NOT_FOUND;
+    }
+
+    FILE *file = mf_fopen_utf8(path, L"rb");
     if (!file) {
         m_last_error = "Opening IVF input failed.";
         return AVB_ERROR_OPEN_FAILED;
@@ -512,10 +522,29 @@ avb_result AvbDecoderMediaFoundation::open_file(const char *path, const avb_deco
         m_impl->reader.Get(), &found_audio, &found_video, &audio_count);
     m_impl->audio_track_count = audio_count;
 
-    if (!options.enable_audio) found_audio = -1;
-    if (!options.enable_video) found_video = -1;
-    if (options.audio_stream_index >= 0) found_audio = options.audio_stream_index;
-    if (options.video_stream_index >= 0) found_video = options.video_stream_index;
+    auto select_stream = [&](bool enabled, int requested, REFGUID major, int &selected) {
+        if (!enabled) {
+            selected = -1;
+            return true;
+        }
+        if (requested < 0) return true;
+        ComPtr<IMFMediaType> type;
+        GUID actual = GUID_NULL;
+        if (FAILED(m_impl->reader->GetNativeMediaType(requested, 0, &type)) ||
+            !type || FAILED(type->GetGUID(MF_MT_MAJOR_TYPE, &actual)) ||
+            !IsEqualGUID(actual, major))
+            return false;
+        selected = requested;
+        return true;
+    };
+    if (!select_stream(options.enable_audio != 0, options.audio_stream_index,
+                       MFMediaType_Audio, found_audio) ||
+        !select_stream(options.enable_video != 0, options.video_stream_index,
+                       MFMediaType_Video, found_video)) {
+        m_last_error = "Requested stream does not exist or has the wrong media type.";
+        m_impl->close_streams();
+        return AVB_ERROR_STREAM_NOT_FOUND;
+    }
 
     m_impl->reader->SetStreamSelection((DWORD)MF_SOURCE_READER_ALL_STREAMS, FALSE);
 
@@ -582,7 +611,9 @@ avb_result AvbDecoderMediaFoundation::open_file(const char *path, const avb_deco
         }
     }
 
-    if (m_impl->audio_stream_idx < 0 && m_impl->video_stream_idx < 0) {
+    if ((options.enable_audio && options.audio_stream_index >= 0 && m_impl->audio_stream_idx < 0) ||
+        (options.enable_video && options.video_stream_index >= 0 && m_impl->video_stream_idx < 0) ||
+        (m_impl->audio_stream_idx < 0 && m_impl->video_stream_idx < 0)) {
         m_last_error = "No supported audio or video stream found.";
         m_impl->close_streams();
         return AVB_ERROR_STREAM_NOT_FOUND;
@@ -646,6 +677,7 @@ avb_result AvbDecoderMediaFoundation::seek(double seconds) {
         m_impl->ivf_frame_index = 0;
         m_impl->ivf_eof = false;
         m_impl->ivf_draining = false;
+        m_impl->ivf_drained = false;
         m_impl->seek_target_sec = std::max(0.0, seconds);
         m_impl->video_seek_pending = seconds > 0.0;
         return AVB_OK;
@@ -668,6 +700,8 @@ avb_result AvbDecoderMediaFoundation::seek(double seconds) {
     }
 
     m_impl->audio.clear();
+    m_impl->audio_failed = false;
+    m_last_error.clear();
     if (m_impl->custom_video_decoder && m_impl->custom_video_decoder->flush)
         m_impl->custom_video_decoder->flush(m_impl->custom_video_ctx);
 
@@ -679,8 +713,17 @@ avb_result AvbDecoderMediaFoundation::seek(double seconds) {
 }
 
 bool AvbDecoderMediaFoundation::fill_audio_buffer() {
-    if (!m_impl || !m_impl->reader || m_impl->audio_stream_idx < 0 || m_impl->channels <= 0)
+    if (!m_impl || !m_impl->reader || m_impl->audio_stream_idx < 0 ||
+        m_impl->channels <= 0 || m_impl->audio_failed)
         return false;
+
+    auto fail = [&](const char *operation, HRESULT hr) {
+        char message[160];
+        snprintf(message, sizeof(message), "%s (audio) failed: 0x%08lx", operation, hr);
+        m_last_error = message;
+        m_impl->audio_failed = true;
+        return false;
+    };
 
     for (;;) {
         DWORD flags = 0;
@@ -689,31 +732,48 @@ bool AvbDecoderMediaFoundation::fill_audio_buffer() {
         HRESULT hr = m_impl->reader->ReadSample(
             (DWORD)m_impl->audio_stream_idx, 0, nullptr, &flags, &ts, &sample);
 
-        if (FAILED(hr) || (flags & MF_SOURCE_READERF_ENDOFSTREAM)) return false;
+        if (FAILED(hr) || (flags & MF_SOURCE_READERF_ERROR))
+            return fail("ReadSample", FAILED(hr) ? hr : E_FAIL);
+        if (flags & MF_SOURCE_READERF_ENDOFSTREAM) return false;
         if (!sample) continue;
 
-        // Drop pre-roll samples that precede a pending seek target.
-        if (m_impl->audio_seek_pending) {
-            if ((double)ts / 1e7 + 1e-6 < m_impl->seek_target_sec) continue;
-            m_impl->audio_seek_pending = false;
-        }
-
         ComPtr<IMFMediaBuffer> buf;
-        sample->ConvertToContiguousBuffer(&buf);
-        if (!buf) continue;
+        hr = sample->ConvertToContiguousBuffer(&buf);
+        if (FAILED(hr) || !buf) return fail("ConvertToContiguousBuffer", FAILED(hr) ? hr : E_FAIL);
 
         BYTE *data = nullptr;
         DWORD len = 0;
-        buf->Lock(&data, nullptr, &len);
+        hr = buf->Lock(&data, nullptr, &len);
+        if (FAILED(hr)) return fail("Lock", hr);
+        if (len % (sizeof(float) * m_impl->channels) != 0 || (len && !data)) {
+            buf->Unlock();
+            return fail("Invalid PCM buffer", E_FAIL);
+        }
         int n = (int)(len / sizeof(float));
+        int skip_frames = 0;
+        const double sample_pts = static_cast<double>(ts) / 1e7;
+        if (m_impl->audio_seek_pending && sample_pts < m_impl->seek_target_sec) {
+            const double skip = std::ceil(
+                (m_impl->seek_target_sec - sample_pts) * m_impl->sample_rate - 1e-7);
+            if (skip >= n / m_impl->channels) {
+                buf->Unlock();
+                continue;
+            }
+            skip_frames = static_cast<int>(skip);
+        }
+        const int skip_samples = skip_frames * m_impl->channels;
+        n -= skip_samples;
         // Each MF sample replaces the staging buffer wholesale (pos rewinds to
         // the start), stamped with the sample's presentation time.
         m_impl->audio.data.resize(n);
-        memcpy(m_impl->audio.data.data(), data, n * sizeof(float));
+        if (n > 0)
+            memcpy(m_impl->audio.data.data(), data + skip_samples * sizeof(float), n * sizeof(float));
         buf->Unlock();
         m_impl->audio.pos = 0;
-        m_impl->audio.pts = (double)ts / 1e7;
-        return n > 0;
+        m_impl->audio.pts = sample_pts + static_cast<double>(skip_frames) / m_impl->sample_rate;
+        if (n == 0) continue;
+        m_impl->audio_seek_pending = false;
+        return true;
     }
 }
 
@@ -730,9 +790,14 @@ double AvbDecoderMediaFoundation::audio_next_pts() {
     return m_impl->audio.next_pts([this] { return fill_audio_buffer(); });
 }
 
+bool AvbDecoderMediaFoundation::audio_read_failed() const {
+    return m_impl && m_impl->audio_failed;
+}
+
 avb_result AvbDecoderMediaFoundation::read_ivf_frame(avb_video_frame &out_frame) {
     if (!m_impl->ivf_file || !m_impl->ivf_decoder)
         return AVB_ERROR_STREAM_NOT_FOUND;
+    if (m_impl->ivf_drained) return AVB_ERROR_EOF;
 
     auto process_output = [&](ComPtr<IMFSample> &decoded) -> avb_result {
 retry_output:
@@ -782,7 +847,11 @@ retry_output:
         return decoded ? AVB_OK : AVB_ERROR_AGAIN;
     };
 
+    // Release each pre-roll sample before requesting another. Recursion here
+    // exhausts the stack (and the decoder surface pool) on long seeks.
     ComPtr<IMFSample> decoded;
+next_frame:
+    decoded.Reset();
     for (;;) {
         if (m_impl->ivf_async) {
             ComPtr<IMFMediaEvent> event;
@@ -808,12 +877,18 @@ retry_output:
                 if (result != AVB_ERROR_AGAIN) return result;
                 continue;
             }
-            if (type == METransformDrainComplete) return AVB_ERROR_EOF;
+            if (type == METransformDrainComplete) {
+                m_impl->ivf_drained = true;
+                return AVB_ERROR_EOF;
+            }
             if (type != METransformNeedInput) continue;
         } else if (m_impl->ivf_draining) {
             avb_result result = process_output(decoded);
             if (result == AVB_OK) break;
-            if (result == AVB_ERROR_AGAIN) return AVB_ERROR_EOF;
+            if (result == AVB_ERROR_AGAIN) {
+                m_impl->ivf_drained = true;
+                return AVB_ERROR_EOF;
+            }
             return result;
         }
 
@@ -833,6 +908,11 @@ retry_output:
             m_impl->ivf_file, m_impl->ivf_packet, timestamp);
         if (read_result == MfIvfReadResult::eof) {
             m_impl->ivf_eof = true;
+            // In async mode this NeedInput event must initiate draining now;
+            // there need not be another event until COMMAND_DRAIN is sent.
+            m_impl->ivf_decoder->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
+            m_impl->ivf_decoder->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
+            m_impl->ivf_draining = true;
             continue;
         }
         if (read_result != MfIvfReadResult::ok) {
@@ -882,7 +962,7 @@ retry_output:
     double pts_sec = (double)sample_time / 1e7;
     if (m_impl->video_seek_pending) {
         if (pts_sec + 1e-6 < m_impl->seek_target_sec)
-            return read_ivf_frame(out_frame);
+            goto next_frame;
         m_impl->video_seek_pending = false;
     }
 
@@ -929,45 +1009,15 @@ retry_output:
     }
 
     const size_t y_size = (size_t)w * h;
-    const size_t uv_size = y_size / 2;
-    std::vector<unsigned char> nv12(y_size + uv_size);
-    bool copied = false;
-    DWORD buffer_count = 0;
-    decoded->GetBufferCount(&buffer_count);
-    if (buffer_count == 1) {
-        ComPtr<IMFMediaBuffer> raw;
-        decoded->GetBufferByIndex(0, &raw);
-        ComPtr<IMF2DBuffer> buffer2d;
-        if (raw && SUCCEEDED(raw.As(&buffer2d))) {
-            BYTE *scan0 = nullptr;
-            LONG pitch = 0;
-            if (SUCCEEDED(buffer2d->Lock2D(&scan0, &pitch))) {
-                const BYTE *uv = scan0 + (ptrdiff_t)pitch * h;
-                for (int y = 0; y < h; ++y)
-                    memcpy(nv12.data() + (size_t)y * w,
-                           scan0 + (ptrdiff_t)y * pitch, w);
-                for (int y = 0; y < h / 2; ++y)
-                    memcpy(nv12.data() + y_size + (size_t)y * w,
-                           uv + (ptrdiff_t)y * pitch, w);
-                buffer2d->Unlock2D();
-                copied = true;
-            }
-        }
-    }
-    if (!copied) {
-        ComPtr<IMFMediaBuffer> contiguous;
-        decoded->ConvertToContiguousBuffer(&contiguous);
-        BYTE *data = nullptr;
-        DWORD length = 0;
-        if (!contiguous ||
-            FAILED(contiguous->Lock(&data, nullptr, &length)) ||
-            length < nv12.size()) {
-            if (contiguous && data) contiguous->Unlock();
-            m_last_error = "IVF decoder returned an invalid NV12 frame.";
-            return AVB_ERROR_DECODE_FAILED;
-        }
-        memcpy(nv12.data(), data, nv12.size());
-        contiguous->Unlock();
+    const int chroma_width = (w + 1) / 2;
+    const int chroma_height = (h + 1) / 2;
+    const int chroma_stride = chroma_width * 2;
+    std::vector<unsigned char> nv12;
+    avb_video_frame copied_frame{};
+    if (mf_decode_copy_cpu_frame(decoded.Get(), w, h, h, chroma_stride,
+            false, AVB_PIXEL_FORMAT_NV12, pts_sec, nv12, copied_frame) != AVB_OK) {
+        m_last_error = "IVF decoder returned an invalid NV12 frame.";
+        return AVB_ERROR_DECODE_FAILED;
     }
 
     out_frame = {};
@@ -986,10 +1036,10 @@ retry_output:
         out_frame.plane_stride[0] = w;
         out_frame.plane_offset[0] = 0;
         out_frame.plane_data[1] = m_impl->video_frame_buf.data() + y_size;
-        out_frame.plane_stride[1] = w;
+        out_frame.plane_stride[1] = chroma_stride;
         out_frame.plane_offset[1] = (int)y_size;
     } else if (m_impl->video_is_i420) {
-        const size_t c_size = y_size / 4;
+        const size_t c_size = static_cast<size_t>(chroma_width) * chroma_height;
         m_impl->video_frame_buf.resize(y_size + c_size * 2);
         memcpy(m_impl->video_frame_buf.data(), nv12.data(), y_size);
         unsigned char *u = m_impl->video_frame_buf.data() + y_size;
@@ -1005,10 +1055,10 @@ retry_output:
         out_frame.plane_stride[0] = w;
         out_frame.plane_offset[0] = 0;
         out_frame.plane_data[1] = u;
-        out_frame.plane_stride[1] = w / 2;
+        out_frame.plane_stride[1] = chroma_width;
         out_frame.plane_offset[1] = (int)y_size;
         out_frame.plane_data[2] = v;
-        out_frame.plane_stride[2] = w / 2;
+        out_frame.plane_stride[2] = chroma_width;
         out_frame.plane_offset[2] = (int)(y_size + c_size);
     } else {
         const int row_bytes = w * 4;
@@ -1020,8 +1070,8 @@ retry_output:
                 m_impl->video_frame_buf.data() + (size_t)y * row_bytes;
             for (int x = 0; x < w; ++x) {
                 int yy = std::max(0, (int)y_plane[(size_t)y * w + x] - 16);
-                int uu = (int)uv_plane[(size_t)(y / 2) * w + (x & ~1)] - 128;
-                int vv = (int)uv_plane[(size_t)(y / 2) * w + (x & ~1) + 1] - 128;
+                int uu = (int)uv_plane[(size_t)(y / 2) * chroma_stride + (x & ~1)] - 128;
+                int vv = (int)uv_plane[(size_t)(y / 2) * chroma_stride + (x & ~1) + 1] - 128;
                 int r = (298 * yy + 409 * vv + 128) >> 8;
                 int g = (298 * yy - 100 * uu - 208 * vv + 128) >> 8;
                 int b = (298 * yy + 516 * uu + 128) >> 8;
@@ -1067,7 +1117,7 @@ avb_result AvbDecoderMediaFoundation::read_video_frame(avb_video_frame &out_fram
         HRESULT hr = m_impl->reader->ReadSample(
             (DWORD)m_impl->video_stream_idx, 0, nullptr, &flags, &ts, &sample);
 
-        if (FAILED(hr)) {
+        if (FAILED(hr) || (flags & MF_SOURCE_READERF_ERROR)) {
             char buf[128];
             snprintf(buf, sizeof(buf), "ReadSample (video) failed: 0x%08lx", hr);
             m_last_error = buf;
@@ -1293,6 +1343,8 @@ avb_result AvbDecoderMediaFoundation::get_media_info(avb_media_info &) {
 }
 avb_result AvbDecoderMediaFoundation::seek(double) { return AVB_ERROR_BACKEND_NOT_AVAILABLE; }
 int AvbDecoderMediaFoundation::read_audio_f32(float *, int) { return 0; }
+double AvbDecoderMediaFoundation::audio_next_pts() { return -1.0; }
+bool AvbDecoderMediaFoundation::audio_read_failed() const { return false; }
 avb_result AvbDecoderMediaFoundation::read_video_frame(avb_video_frame &) {
     return AVB_ERROR_BACKEND_NOT_AVAILABLE;
 }

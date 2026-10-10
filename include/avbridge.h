@@ -761,8 +761,9 @@ AVB_API avb_result avb_decoder_seek(
  * written, or 0 at end of stream / when no audio track is present (use
  * avb_decoder_audio_at_eof / avb_media_info.audio.available to distinguish).
  * A read failure also returns 0 (or a partial block already decoded); inspect
- * avb_decoder_get_last_error for details. FFmpeg and GStreamer do not set
- * audio_at_eof for a read failure. A successful seek clears their read error.
+ * avb_decoder_get_last_error for details. FFmpeg, GStreamer, and Media Foundation
+ * do not set audio_at_eof for a read failure. A successful seek clears their read
+ * error.
  *
  * If `out_first_pts` is non-NULL it receives the presentation time (seconds) of
  * the first sample in this block, or a negative value if unknown (some backends

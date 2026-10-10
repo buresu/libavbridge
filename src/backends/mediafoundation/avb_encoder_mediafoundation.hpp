@@ -27,6 +27,7 @@ private:
     avb_result wait_async_video_input();
     avb_result drain_async_video_mft();
     avb_result drain_audio_mft(long long time_hns, long long dur_hns);
+    avb_result write_custom_packet(const avb_encoded_packet &packet, double fallback_pts);
     Impl *m_impl = nullptr;
     std::string m_last_error;
 };

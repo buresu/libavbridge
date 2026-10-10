@@ -11,8 +11,18 @@
 #include <mferror.h>
 #include <windows.h>
 #include <wrl/client.h>
+#include <string>
 
 using Microsoft::WRL::ComPtr;
+
+FILE *mf_fopen_utf8(const char *path, const wchar_t *mode) {
+    const int length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, nullptr, 0);
+    if (length <= 0) return nullptr;
+    std::wstring wide_path(length, L'\0');
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide_path.data(), length))
+        return nullptr;
+    return _wfopen(wide_path.c_str(), mode);
+}
 
 MfStartupScope::MfStartupScope(ULONG flags) {
     m_started = SUCCEEDED(MFStartup(MF_VERSION, flags));

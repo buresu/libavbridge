@@ -24,9 +24,11 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 using Microsoft::WRL::ComPtr;
@@ -222,7 +224,7 @@ avb_result AvbEncoderMediaFoundation::open_ivf_video(
         return AVB_ERROR_OPEN_FAILED;
     }
 
-    m_impl->ivf_file = fopen(path, "wb");
+    m_impl->ivf_file = mf_fopen_utf8(path, L"wb");
     if (!m_impl->ivf_file) {
         m_last_error = "Opening IVF output file failed.";
         return AVB_ERROR_OPEN_FAILED;
@@ -560,7 +562,8 @@ avb_result AvbEncoderMediaFoundation::open(const char *path, const avb_encode_op
         in_type->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
         in_type->SetUINT32(
             MF_MT_SAMPLE_SIZE,
-            (UINT32)((size_t)m_impl->width * m_impl->height * 3 / 2));
+            (UINT32)((size_t)m_impl->width * m_impl->height *
+                ((m_impl->video_is_nv12 || m_impl->video_is_i420) ? 3 : 8) / 2));
         MFSetAttributeSize(in_type.Get(), MF_MT_FRAME_SIZE, m_impl->width, m_impl->height);
         MFSetAttributeRatio(in_type.Get(), MF_MT_FRAME_RATE, m_impl->fps_num, m_impl->fps_den);
         MFSetAttributeRatio(in_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
@@ -967,6 +970,70 @@ avb_result AvbEncoderMediaFoundation::drain_audio_mft(long long time_hns,
     }
 }
 
+avb_result AvbEncoderMediaFoundation::write_custom_packet(
+    const avb_encoded_packet &packet, double fallback_pts) {
+    if (!packet.data || packet.size <= 0) {
+        m_last_error = "Custom video encoder returned an empty packet.";
+        return AVB_ERROR_ENCODE_FAILED;
+    }
+    int tb_num = packet.time_base_num, tb_den = packet.time_base_den;
+    if (tb_num <= 0 || tb_den <= 0) {
+        tb_num = m_impl->custom_video_stream.time_base_num;
+        tb_den = m_impl->custom_video_stream.time_base_den;
+    }
+    if (tb_num <= 0 || tb_den <= 0) {
+        tb_num = m_impl->fps_den;
+        tb_den = m_impl->fps_num;
+    }
+    auto timestamp = [&](int64_t ticks, double seconds, LONGLONG &result) {
+        const long double value = std::round(ticks >= 0
+            ? static_cast<long double>(ticks) * tb_num * 10000000.0L / tb_den
+            : static_cast<long double>(seconds) * 10000000.0L);
+        if (!std::isfinite(value) || value < 0 ||
+            value >= static_cast<long double>(std::numeric_limits<LONGLONG>::max()))
+            return false;
+        result = static_cast<LONGLONG>(value);
+        return true;
+    };
+    const double pts_sec = packet.pts_sec >= 0.0 ? packet.pts_sec : fallback_pts;
+    const double duration_sec = packet.duration_sec > 0.0
+        ? packet.duration_sec : 1.0 / m_impl->frame_rate;
+    LONGLONG pts = 0, dts = 0, duration = 0;
+    if (!timestamp(packet.pts, pts_sec, pts) ||
+        !timestamp(packet.duration, duration_sec, duration) ||
+        (packet.dts >= 0 && !timestamp(packet.dts, 0.0, dts))) {
+        m_last_error = "Custom video packet has an invalid timestamp.";
+        return AVB_ERROR_ENCODE_FAILED;
+    }
+    if (packet.dts < 0) dts = pts;
+
+    ComPtr<IMFMediaBuffer> buffer;
+    ComPtr<IMFSample> sample;
+    HRESULT hr = MFCreateMemoryBuffer(static_cast<DWORD>(packet.size), &buffer);
+    BYTE *data = nullptr;
+    if (SUCCEEDED(hr)) hr = buffer->Lock(&data, nullptr, nullptr);
+    if (SUCCEEDED(hr)) {
+        memcpy(data, packet.data, packet.size);
+        buffer->Unlock();
+        hr = buffer->SetCurrentLength(static_cast<DWORD>(packet.size));
+    }
+    if (SUCCEEDED(hr)) hr = MFCreateSample(&sample);
+    if (SUCCEEDED(hr)) hr = sample->AddBuffer(buffer.Get());
+    if (SUCCEEDED(hr)) hr = sample->SetSampleTime(pts);
+    if (SUCCEEDED(hr)) hr = sample->SetSampleDuration(duration);
+    if (SUCCEEDED(hr)) hr = sample->SetUINT64(MFSampleExtension_DecodeTimestamp, dts);
+    if (SUCCEEDED(hr)) hr = sample->SetUINT32(MFSampleExtension_CleanPoint, packet.keyframe ? TRUE : FALSE);
+    if (SUCCEEDED(hr)) hr = m_impl->writer->WriteSample(m_impl->video_stream, sample.Get());
+    if (FAILED(hr)) {
+        char message[160];
+        snprintf(message, sizeof(message), "Writing custom video packet failed: 0x%08lx", hr);
+        m_last_error = message;
+        return AVB_ERROR_ENCODE_FAILED;
+    }
+    ++m_impl->video_index;
+    return AVB_OK;
+}
+
 avb_result AvbEncoderMediaFoundation::write_video(const avb_video_frame &frame, double pts_sec) {
     if (!m_impl->has_video) return AVB_ERROR_INVALID_ARGUMENT;
     if (m_impl->custom_video) {
@@ -978,45 +1045,10 @@ avb_result AvbEncoderMediaFoundation::write_video(const avb_video_frame &frame, 
             m_impl->custom_video_encoder,
             m_impl->custom_video_ctx,
             packet);
-        if (!packet.data || packet.size <= 0) {
-            m_last_error = "Custom video encoder returned an empty packet.";
-            return AVB_ERROR_ENCODE_FAILED;
-        }
-
-        double pts = packet.pts_sec >= 0.0 ? packet.pts_sec
-                   : pts_sec >= 0.0 ? pts_sec
+        double pts = pts_sec >= 0.0 ? pts_sec
                    : frame.pts_sec >= 0.0 ? frame.pts_sec
                    : (double)m_impl->video_index / m_impl->frame_rate;
-        double dur = packet.duration_sec > 0.0
-                   ? packet.duration_sec : 1.0 / m_impl->frame_rate;
-
-        ComPtr<IMFMediaBuffer> buf;
-        HRESULT hr = MFCreateMemoryBuffer((DWORD)packet.size, &buf);
-        if (FAILED(hr)) {
-            m_last_error = "MFCreateMemoryBuffer (custom video) failed.";
-            return AVB_ERROR_ENCODE_FAILED;
-        }
-        BYTE *data = nullptr;
-        if (FAILED(buf->Lock(&data, nullptr, nullptr))) {
-            m_last_error = "Lock (custom video buffer) failed.";
-            return AVB_ERROR_ENCODE_FAILED;
-        }
-        memcpy(data, packet.data, packet.size);
-        buf->Unlock();
-
-        hr = mf_encode_write_buffer(
-            m_impl->writer.Get(), m_impl->video_stream, buf.Get(),
-            (DWORD)packet.size,
-            mf_encode_seconds_to_hns(pts),
-            mf_encode_seconds_to_hns(dur));
-        if (FAILED(hr)) {
-            char b[144];
-            snprintf(b, sizeof(b), "WriteSample (custom video) failed: 0x%08lx", hr);
-            m_last_error = b;
-            return AVB_ERROR_ENCODE_FAILED;
-        }
-        m_impl->video_index++;
-        return AVB_OK;
+        return write_custom_packet(packet, pts);
     }
     if (frame.format != m_impl->input_format) {
         m_last_error = "Frame pixel format does not match configured input_format.";
@@ -1304,24 +1336,9 @@ avb_result AvbEncoderMediaFoundation::finish() {
                 m_impl->custom_video_ctx,
                 packet);
             if (packet.data && packet.size > 0) {
-                double pts = packet.pts_sec >= 0.0
-                    ? packet.pts_sec : (double)m_impl->video_index / m_impl->frame_rate;
-                double dur = packet.duration_sec > 0.0
-                    ? packet.duration_sec : 1.0 / m_impl->frame_rate;
-                ComPtr<IMFMediaBuffer> buf;
-                HRESULT bhr = MFCreateMemoryBuffer((DWORD)packet.size, &buf);
-                if (FAILED(bhr)) return AVB_ERROR_ENCODE_FAILED;
-                BYTE *data = nullptr;
-                if (FAILED(buf->Lock(&data, nullptr, nullptr))) return AVB_ERROR_ENCODE_FAILED;
-                memcpy(data, packet.data, packet.size);
-                buf->Unlock();
-                bhr = mf_encode_write_buffer(
-                    m_impl->writer.Get(), m_impl->video_stream, buf.Get(),
-                    (DWORD)packet.size,
-                    mf_encode_seconds_to_hns(pts),
-                    mf_encode_seconds_to_hns(dur));
-                if (FAILED(bhr)) return AVB_ERROR_ENCODE_FAILED;
-                m_impl->video_index++;
+                r = write_custom_packet(packet,
+                    static_cast<double>(m_impl->video_index) / m_impl->frame_rate);
+                if (r != AVB_OK) return r;
             }
         }
     }
