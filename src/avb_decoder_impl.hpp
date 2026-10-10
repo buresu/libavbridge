@@ -27,6 +27,9 @@ public:
     // effect. Default: unknown.
     virtual double audio_next_pts() { return -1.0; }
 
+    // A zero-length audio read caused by failure must not become public EOF.
+    virtual bool audio_read_failed() const { return false; }
+
     virtual avb_result read_video_frame(avb_video_frame &out_frame) = 0;
     virtual void release_video_frame(avb_video_frame &frame) = 0;
     virtual const char *get_last_error() const = 0;

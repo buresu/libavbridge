@@ -30,6 +30,7 @@ public:
     avb_result seek(double seconds) override;
     int read_audio_f32(float *dst_interleaved, int frames) override;
     double audio_next_pts() override;
+    bool audio_read_failed() const override { return m_audio_failed; }
     avb_result read_video_frame(avb_video_frame &out_frame) override;
     void release_video_frame(avb_video_frame &frame) override;
     const char *get_last_error() const override;
@@ -38,7 +39,10 @@ public:
 private:
     void close_internal();
     bool fill_audio_buffer();
+    bool check_bus_error();
+    avb_result pull_sample(GstElement *sink, GstSample *&sample);
     void discover_codec_names(const char *uri);
+    bool validate_track_selection(const avb_decode_options &options);
     avb_result open_custom_file(const char *path, const avb_decode_options &options);
     avb_result open_playbin(const char *path, const avb_decode_options &options,
                             bool software_only);
@@ -57,7 +61,7 @@ private:
     GstElement *m_pipeline   = nullptr; // playbin
     GstElement *m_audio_sink = nullptr; // appsink (owned ref)
     GstElement *m_video_sink = nullptr; // appsink (owned ref)
-    GstSample  *m_video_preroll_sample = nullptr; // custom encoded-video path
+    GstSample  *m_video_preroll_sample = nullptr; // metadata preroll or pending first frame
     GstSample  *m_native_video_sample = nullptr; // held until release_video_frame
     // A CPU frame is the decoder's buffer, mapped: the sample and its mapping
     // are held until release_video_frame (or the next read).
@@ -73,6 +77,8 @@ private:
     // Audio track selection (playbin "current-audio" is a logical 0-based index).
     int m_audio_track       = 0; // selected logical track
     int m_audio_track_count = 0; // playbin "n-audio"
+    int m_video_track       = 0;
+    int m_video_track_count = 0;
 
     int    m_width      = 0;
     int    m_height     = 0;
@@ -99,6 +105,8 @@ private:
     AvbAudioBuffer     m_audio;
 
     bool m_audio_eof = false;
+    bool m_audio_failed = false;
+    bool m_pipeline_failed = false;
 
     // Target time of the last seek (seconds), or < 0 when none is pending.
     double m_seek_target = -1.0;

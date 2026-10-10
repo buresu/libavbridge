@@ -104,6 +104,8 @@ bool avb_gst_load(AvbGstFuncs &out_funcs, char *err_buf, int err_buf_size) {
     LOAD_SYM(g_handle_gst, out_funcs, gst_buffer_get_type);
 
     LOAD_SYM(g_handle_gstapp, out_funcs, gst_app_sink_pull_sample);
+    LOAD_SYM(g_handle_gstapp, out_funcs, gst_app_sink_try_pull_sample);
+    LOAD_SYM(g_handle_gstapp, out_funcs, gst_app_sink_is_eos);
     LOAD_SYM(g_handle_gstapp, out_funcs, gst_app_sink_try_pull_preroll);
     LOAD_SYM(g_handle_gstapp, out_funcs, gst_app_sink_set_max_buffers);
     LOAD_SYM(g_handle_gstapp, out_funcs, gst_app_sink_set_drop);

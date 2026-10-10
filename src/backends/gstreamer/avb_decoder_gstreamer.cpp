@@ -276,6 +276,38 @@ void AvbDecoderGStreamer::release_cpu_video_frame() {
     m_cpu_video_sample = nullptr;
 }
 
+bool AvbDecoderGStreamer::check_bus_error() {
+    if (m_pipeline_failed) return true;
+    GstBus *bus = m_gst.gst_element_get_bus(m_pipeline);
+    if (!bus) return false;
+    GstMessage *message = m_gst.gst_bus_timed_pop_filtered(bus, 0, GST_MESSAGE_ERROR);
+    if (message) {
+        GError *error = nullptr;
+        gchar *debug = nullptr;
+        m_gst.gst_message_parse_error(message, &error, &debug);
+        set_error("GStreamer decode error: %s", error ? error->message : "unknown error");
+        m_gst.g_clear_error(&error);
+        if (debug) m_gst.g_free(debug);
+        m_gst.gst_mini_object_unref((GstMiniObject *)message);
+        m_pipeline_failed = true;
+    }
+    m_gst.gst_object_unref(bus);
+    return m_pipeline_failed;
+}
+
+avb_result AvbDecoderGStreamer::pull_sample(GstElement *sink, GstSample *&sample) {
+    sample = nullptr;
+    for (;;) {
+        if (check_bus_error()) return AVB_ERROR_DECODE_FAILED;
+        // An upstream error need not send EOS to appsink. A blocking pull
+        // would then wait forever, so periodically inspect the pipeline bus.
+        sample = m_gst.gst_app_sink_try_pull_sample((GstAppSink *)sink, 100 * GST_MSECOND);
+        if (sample) return AVB_OK;
+        if (check_bus_error()) return AVB_ERROR_DECODE_FAILED;
+        if (m_gst.gst_app_sink_is_eos((GstAppSink *)sink)) return AVB_ERROR_EOF;
+    }
+}
+
 // The colour range of the stream a decoder element was handed, from the
 // codec_data in its sink caps. A hardware decoder takes its colorimetry from
 // those caps, and h264parse writes the matrix there but not the range: a
@@ -401,10 +433,14 @@ void AvbDecoderGStreamer::close_internal() {
     m_out_channels    = 0;
     m_audio_track       = 0;
     m_audio_track_count = 0;
+    m_video_track = 0;
+    m_video_track_count = 0;
     m_width = m_height = 0;
     m_frame_rate = 0.0;
     m_duration   = 0.0;
     m_audio_eof  = false;
+    m_audio_failed = false;
+    m_pipeline_failed = false;
     m_seek_target = -1.0;
     m_custom_pipeline = false;
     m_audio_codec_name.clear();
@@ -424,6 +460,8 @@ void AvbDecoderGStreamer::discover_codec_names(const char *uri) {
     GstDiscovererInfo *info = m_gst.gst_discoverer_discover_uri(disc, uri, &err);
     if (info) {
         GList *al = m_gst.gst_discoverer_info_get_audio_streams(info);
+        m_audio_track_count = 0;
+        for (GList *node = al; node; node = node->next) ++m_audio_track_count;
         if (al) {
             // Report the *selected* track's codec (m_audio_track), not just the
             // first audio stream.
@@ -436,9 +474,13 @@ void AvbDecoderGStreamer::discover_codec_names(const char *uri) {
             m_gst.gst_discoverer_stream_info_list_free(al);
         }
         GList *vl = m_gst.gst_discoverer_info_get_video_streams(info);
+        m_video_track_count = 0;
+        for (GList *node = vl; node; node = node->next) ++m_video_track_count;
         if (vl) {
+            GList *node = vl;
+            for (int i = 0; i < m_video_track && node->next; ++i) node = node->next;
             GstCaps *caps = m_gst.gst_discoverer_stream_info_get_caps(
-                (GstDiscovererStreamInfo *)vl->data);
+                (GstDiscovererStreamInfo *)node->data);
             m_video_codec_name = caps_to_codec_name(m_gst, caps);
             if (caps) m_gst.gst_mini_object_unref((GstMiniObject *)caps);
             m_gst.gst_discoverer_stream_info_list_free(vl);
@@ -447,6 +489,22 @@ void AvbDecoderGStreamer::discover_codec_names(const char *uri) {
     }
     m_gst.g_clear_error(&err);
     m_gst.g_object_unref(disc);
+}
+
+bool AvbDecoderGStreamer::validate_track_selection(const avb_decode_options &options) {
+    if (options.enable_audio && options.audio_stream_index >= 0 &&
+        options.audio_stream_index >= m_audio_track_count) {
+        set_error("Audio track index %d is out of range (%d tracks).",
+                  options.audio_stream_index, m_audio_track_count);
+        return false;
+    }
+    if (options.enable_video && options.video_stream_index >= 0 &&
+        options.video_stream_index >= m_video_track_count) {
+        set_error("Video track index %d is out of range (%d tracks).",
+                  options.video_stream_index, m_video_track_count);
+        return false;
+    }
+    return true;
 }
 
 avb_result AvbDecoderGStreamer::open_custom_file(
@@ -461,19 +519,23 @@ avb_result AvbDecoderGStreamer::open_custom_file(
     // gst_parse_launch links demux.audio_0 statically, so asking for it on a
     // file with no audio track leaves the pipeline forever pre-rolling and the
     // first pull_sample() never returns.
+    m_audio_track = options.audio_stream_index < 0 ? 0 : options.audio_stream_index;
+    m_video_track = options.video_stream_index < 0 ? 0 : options.video_stream_index;
     gchar *probe_uri = m_gst.gst_filename_to_uri(path, nullptr);
     if (probe_uri) {
         discover_codec_names(probe_uri);
         m_gst.g_free(probe_uri);
     }
-    const bool want_audio = options.enable_audio && !m_audio_codec_name.empty();
+    if (!validate_track_selection(options)) return AVB_ERROR_STREAM_NOT_FOUND;
+    const bool want_audio = options.enable_audio && m_audio_track_count > 0;
 
     std::string desc = "filesrc location=" + gst_launch_quote(path) +
         " ! qtdemux name=demux "
-        "demux.video_0 ! queue ! appsink name=avb_vsink sync=false max-buffers=16";
+        "demux.video_" + std::to_string(m_video_track) +
+        " ! queue ! appsink name=avb_vsink sync=false max-buffers=16";
 
     if (want_audio) {
-        desc += " demux.audio_0 ! queue ! decodebin ! "
+        desc += " demux.audio_" + std::to_string(m_audio_track) + " ! queue ! decodebin ! "
                 AVB_AUDIOCONVERT " ! audioresample ! "
                 "appsink name=avb_asink sync=false max-buffers=0 "
                 "caps=audio/x-raw,format=F32LE,layout=interleaved";
@@ -491,7 +553,7 @@ avb_result AvbDecoderGStreamer::open_custom_file(
 
     GError *err = nullptr;
     m_pipeline = m_gst.gst_parse_launch(desc.c_str(), &err);
-    if (!m_pipeline) {
+    if (!m_pipeline || err) {
         set_error("Failed to build custom GStreamer pipeline: %s",
                   err && err->message ? err->message : "unknown");
         m_gst.g_clear_error(&err);
@@ -514,7 +576,7 @@ avb_result AvbDecoderGStreamer::open_custom_file(
     GstStateChangeReturn sret =
         m_gst.gst_element_get_state(m_pipeline, &st_cur, &st_pend, 10 * GST_SECOND);
     if (sret == GST_STATE_CHANGE_FAILURE) {
-        set_error("Custom GStreamer pipeline failed to reach PAUSED.");
+        if (!check_bus_error()) set_error("Custom GStreamer pipeline failed to reach PAUSED.");
         return AVB_ERROR_STREAM_NOT_FOUND;
     }
 
@@ -531,7 +593,7 @@ avb_result AvbDecoderGStreamer::open_custom_file(
 
     GstCaps *vcaps = m_gst.gst_sample_get_caps(m_video_preroll_sample);
     avb_video_stream_info stream{};
-    stream.stream_index = 0;
+    stream.stream_index = m_video_track;
     stream.duration_sec = m_duration;
     stream.time_base_num = 1;
     stream.time_base_den = (int)GST_SECOND;
@@ -587,8 +649,6 @@ avb_result AvbDecoderGStreamer::open_custom_file(
         }
         m_req_sample_rate = options.audio_sample_rate;
         m_req_channels = options.audio_channels;
-        m_audio_track = 0;
-        m_audio_track_count = m_audio_sink ? 1 : 0;
     }
 
     // Preroll was inspected for metadata only. appsink also returns this
@@ -613,7 +673,8 @@ avb_result AvbDecoderGStreamer::open_file(const char *path, const avb_decode_opt
     if (avb_wants_custom_video(options)) {
         avb_result custom_res = open_custom_file(path, options);
         if (custom_res == AVB_OK) return AVB_OK;
-        if (custom_res != AVB_ERROR_STREAM_NOT_FOUND) return custom_res;
+        if (custom_res != AVB_ERROR_STREAM_NOT_FOUND ||
+            !validate_track_selection(options)) return custom_res;
         close_internal();
     }
 
@@ -791,63 +852,74 @@ avb_result AvbDecoderGStreamer::open_playbin(
     GstStateChangeReturn sret =
         m_gst.gst_element_get_state(m_pipeline, &st_cur, &st_pend, 10 * GST_SECOND);
     if (sret == GST_STATE_CHANGE_FAILURE) {
-        set_error("Pipeline failed to reach PAUSED (unsupported/corrupt file?).");
+        if (!check_bus_error()) set_error("Pipeline failed to reach PAUSED (unsupported/corrupt file?).");
         m_gst.g_free(uri);
         return AVB_ERROR_OPEN_FAILED;
     }
 
-    // Duration (nanoseconds -> seconds).
-    gint64 dur_ns = 0;
-    if (m_gst.gst_element_query_duration(m_pipeline, GST_FORMAT_TIME, &dur_ns) && dur_ns > 0)
-        m_duration = (double)dur_ns / GST_SECOND;
-
-    // Read negotiated caps from each sink's preroll sample. A requested stream
-    // that the file does not actually contain never prerolls; the timed pull
-    // returns null and we drop that sink.
-    if (m_audio_sink) {
-        GstSample *s = m_gst.gst_app_sink_try_pull_preroll(
-            (GstAppSink *)m_audio_sink, 3 * GST_SECOND);
-        if (s) {
-            GstCaps *caps = m_gst.gst_sample_get_caps(s);
-            if (caps) {
-                GstStructure *str = m_gst.gst_caps_get_structure(caps, 0);
-                m_gst.gst_structure_get_int(str, "rate", &m_out_sample_rate);
-                m_gst.gst_structure_get_int(str, "channels", &m_out_channels);
-            }
-            m_gst.gst_mini_object_unref((GstMiniObject *)s);
-        } else {
-            m_gst.gst_object_unref(m_audio_sink);
-            m_audio_sink = nullptr;
-        }
+    m_gst.g_object_get(m_pipeline, "n-audio", &m_audio_track_count,
+                      "n-video", &m_video_track_count, nullptr);
+    if (!validate_track_selection(options)) {
+        m_gst.g_free(uri);
+        return AVB_ERROR_STREAM_NOT_FOUND;
     }
-
-    if (m_video_sink) {
-        GstSample *s = m_gst.gst_app_sink_try_pull_preroll(
-            (GstAppSink *)m_video_sink, 3 * GST_SECOND);
-        if (s) {
-            GstCaps *caps = m_gst.gst_sample_get_caps(s);
-            if (caps) {
-                GstStructure *str = m_gst.gst_caps_get_structure(caps, 0);
-                m_gst.gst_structure_get_int(str, "width", &m_width);
-                m_gst.gst_structure_get_int(str, "height", &m_height);
-                int fn = 0, fd = 0;
-                if (m_gst.gst_structure_get_fraction(str, "framerate", &fn, &fd) && fd != 0)
-                    m_frame_rate = (double)fn / fd;
-            }
-            m_gst.gst_mini_object_unref((GstMiniObject *)s);
-        } else {
-            m_gst.gst_object_unref(m_video_sink);
-            m_video_sink = nullptr;
-        }
+    if (m_audio_sink && m_audio_track_count == 0) {
+        m_gst.gst_object_unref(m_audio_sink);
+        m_audio_sink = nullptr;
     }
-
+    if (m_video_sink && m_video_track_count == 0) {
+        m_gst.gst_object_unref(m_video_sink);
+        m_video_sink = nullptr;
+    }
     if (!m_audio_sink && !m_video_sink) {
         set_error("No supported audio or video stream found.");
         m_gst.g_free(uri);
         return AVB_ERROR_STREAM_NOT_FOUND;
     }
 
+    // playbin ignores current-* before it discovers its streams. Select
+    // after preroll, before a PLAYING video queue can fill and block a switch.
+    bool switched = false;
+    auto select_track = [&](const char *property, int requested, int &selected) {
+        gint current = -1;
+        m_gst.g_object_get(m_pipeline, property, &current, nullptr);
+        selected = requested < 0 ? (current < 0 ? 0 : current) : requested;
+        if (selected != current) {
+            m_gst.g_object_set(m_pipeline, property, selected, nullptr);
+            switched = true;
+        }
+    };
+    if (m_video_sink) select_track("current-video", options.video_stream_index, m_video_track);
+    if (m_audio_sink) select_track("current-audio", options.audio_stream_index, m_audio_track);
+    m_gst.gst_element_set_state(m_pipeline, GST_STATE_PLAYING);
+    if (switched && !m_gst.gst_element_seek_simple(
+            m_pipeline, GST_FORMAT_TIME,
+            (GstSeekFlags)(GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_ACCURATE), 0)) {
+        set_error("Failed to flush the previous stream selection.");
+        m_gst.g_free(uri);
+        return AVB_ERROR_OPEN_FAILED;
+    }
+
+    gint64 dur_ns = 0;
+    if (m_gst.gst_element_query_duration(m_pipeline, GST_FORMAT_TIME, &dur_ns) && dur_ns > 0)
+        m_duration = (double)dur_ns / GST_SECOND;
     if (m_video_sink) {
+        // Keep the first selected sample for read_video_frame(), so priming
+        // metadata does not discard or duplicate a frame.
+        if (pull_sample(m_video_sink, m_video_preroll_sample) != AVB_OK) {
+            if (!m_pipeline_failed) set_error("Selected video stream did not produce a sample.");
+            m_gst.g_free(uri);
+            return AVB_ERROR_OPEN_FAILED;
+        }
+        GstCaps *caps = m_gst.gst_sample_get_caps(m_video_preroll_sample);
+        if (caps) {
+            GstStructure *str = m_gst.gst_caps_get_structure(caps, 0);
+            m_gst.gst_structure_get_int(str, "width", &m_width);
+            m_gst.gst_structure_get_int(str, "height", &m_height);
+            int fn = 0, fd = 0;
+            if (m_gst.gst_structure_get_fraction(str, "framerate", &fn, &fd) && fd != 0)
+                m_frame_rate = (double)fn / fd;
+        }
         const bool hardware = find_hardware_video_decoder(m_cpu_hw_device);
         if (!hardware && m_video_memory == AVB_VIDEO_MEMORY_CPU &&
             options.hardware_policy == AVB_HARDWARE_REQUIRE) {
@@ -856,35 +928,9 @@ avb_result AvbDecoderGStreamer::open_playbin(
             return AVB_ERROR_OPEN_FAILED;
         }
     }
-
-    // Start decoding.
-    m_gst.gst_element_set_state(m_pipeline, GST_STATE_PLAYING);
-
-    // Audio track selection. playbin lists the tracks it found in "n-audio" and
-    // selects one by logical 0-based "current-audio". We switch here (in PLAYING)
-    // and flush via a seek to 0 to drop stale buffers from the previous track —
-    // a flushing seek while PAUSED can wedge the pipeline, but the PLAYING seek
-    // path is the same one used for normal seeking. Priming fill_audio_buffer()
-    // then reads the selected track's real channels/rate from a live sample.
-    if (m_audio_sink) {
-        gint n_audio = 0, current = 0;
-        m_gst.g_object_get(m_pipeline, "n-audio", &n_audio, nullptr);
-        m_audio_track_count = n_audio;
-
-        int want = options.audio_stream_index < 0 ? 0 : options.audio_stream_index;
-        if (n_audio > 0 && want >= n_audio) want = n_audio - 1;
-
-        m_gst.g_object_get(m_pipeline, "current-audio", &current, nullptr);
-        if (n_audio > 0 && want != current) {
-            m_gst.g_object_set(m_pipeline, "current-audio", (gint)want, nullptr);
-            m_gst.gst_element_seek_simple(
-                m_pipeline, GST_FORMAT_TIME,
-                (GstSeekFlags)(GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_ACCURATE), 0);
-        }
-        m_gst.g_object_get(m_pipeline, "current-audio", &current, nullptr);
-        m_audio_track = current < 0 ? 0 : current;
-
-        fill_audio_buffer(); // prime channels/rate from the selected track
+    if (m_audio_sink && !fill_audio_buffer() && m_audio_failed) {
+        m_gst.g_free(uri);
+        return AVB_ERROR_OPEN_FAILED;
     }
 
     // Codec names (uses m_audio_track, set above).
@@ -912,7 +958,7 @@ avb_result AvbDecoderGStreamer::get_media_info(avb_media_info &out_info) {
     }
     if (m_video_sink) {
         out_info.video.available    = 1;
-        out_info.video.stream_index = 0;
+        out_info.video.stream_index = m_video_track;
         out_info.video.width        = m_width;
         out_info.video.height       = m_height;
         out_info.video.frame_rate   = m_frame_rate;
@@ -936,6 +982,9 @@ avb_result AvbDecoderGStreamer::seek(double seconds) {
 
     m_audio.clear();
     m_audio_eof = false;
+    m_audio_failed = false;
+    m_pipeline_failed = false;
+    m_last_error.clear();
     m_seek_target = seconds;
     if (m_custom_video_decoder && m_custom_video_decoder->flush)
         m_custom_video_decoder->flush(m_custom_video_ctx);
@@ -947,12 +996,13 @@ avb_result AvbDecoderGStreamer::seek(double seconds) {
 }
 
 bool AvbDecoderGStreamer::fill_audio_buffer() {
-    if (!m_audio_sink || m_audio_eof) return false;
+    if (!m_audio_sink || m_audio_eof || m_audio_failed) return false;
 
-    // pull_sample returns NULL at EOF (or if the sink is shut down).
-    GstSample *sample = m_gst.gst_app_sink_pull_sample((GstAppSink *)m_audio_sink);
-    if (!sample) {
-        m_audio_eof = true;
+    GstSample *sample = nullptr;
+    avb_result result = pull_sample(m_audio_sink, sample);
+    if (result != AVB_OK) {
+        m_audio_eof = result == AVB_ERROR_EOF;
+        m_audio_failed = result != AVB_ERROR_EOF;
         return false;
     }
 
@@ -983,9 +1033,12 @@ bool AvbDecoderGStreamer::fill_audio_buffer() {
         }
         m_audio.data.insert(m_audio.data.end(), src, src + n_floats);
         m_gst.gst_buffer_unmap(buf, &map);
+    } else {
+        set_error("Failed to map decoded audio buffer.");
+        m_audio_failed = true;
     }
     m_gst.gst_mini_object_unref((GstMiniObject *)sample);
-    return true;
+    return !m_audio_failed;
 }
 
 int AvbDecoderGStreamer::read_audio_f32(float *dst_interleaved, int frames) {
@@ -1004,8 +1057,9 @@ avb_result AvbDecoderGStreamer::read_custom_video_frame(avb_video_frame &out_fra
         return AVB_ERROR_STREAM_NOT_FOUND;
 
     while (true) {
-        GstSample *sample = m_gst.gst_app_sink_pull_sample((GstAppSink *)m_video_sink);
-        if (!sample) return AVB_ERROR_EOF;
+        GstSample *sample = nullptr;
+        avb_result result = pull_sample(m_video_sink, sample);
+        if (result != AVB_OK) return result;
 
         GstBuffer *buf = m_gst.gst_sample_get_buffer(sample);
         if (!buf) {
@@ -1036,7 +1090,7 @@ avb_result AvbDecoderGStreamer::read_custom_video_frame(avb_video_frame &out_fra
         packet.duration_sec = GST_BUFFER_DURATION_IS_VALID(buf)
             ? (double)GST_BUFFER_DURATION(buf) / GST_SECOND : -1.0;
         packet.keyframe = !GST_BUFFER_FLAG_IS_SET(buf, GST_BUFFER_FLAG_DELTA_UNIT);
-        packet.stream_index = 0;
+        packet.stream_index = m_video_track;
         packet.pts = GST_BUFFER_PTS_IS_VALID(buf) ? (int64_t)GST_BUFFER_PTS(buf) : -1;
         packet.dts = GST_BUFFER_DTS_IS_VALID(buf) ? (int64_t)GST_BUFFER_DTS(buf) : -1;
         packet.duration = GST_BUFFER_DURATION_IS_VALID(buf) ? (int64_t)GST_BUFFER_DURATION(buf) : -1;
@@ -1133,9 +1187,12 @@ avb_result AvbDecoderGStreamer::read_video_frame(avb_video_frame &out_frame) {
     if (!m_video_sink) return AVB_ERROR_STREAM_NOT_FOUND;
 
     while (true) {
-        // pull_sample returns NULL at EOF (or if the sink is shut down).
-        GstSample *sample = m_gst.gst_app_sink_pull_sample((GstAppSink *)m_video_sink);
-        if (!sample) return AVB_ERROR_EOF;
+        GstSample *sample = m_video_preroll_sample;
+        m_video_preroll_sample = nullptr;
+        if (!sample) {
+            avb_result result = pull_sample(m_video_sink, sample);
+            if (result != AVB_OK) return result;
+        }
 
         GstBuffer *buf  = m_gst.gst_sample_get_buffer(sample);
         GstCaps   *caps = m_gst.gst_sample_get_caps(sample);

@@ -215,6 +215,7 @@ avb_result avb_decoder_seek(avb_decoder *dec, double seconds, double *out_landed
         return res;
     }
     dec->audio_eof = false;
+    dec->last_error.clear();
     if (out_landed_sec) *out_landed_sec = target;
     return AVB_OK;
 }
@@ -227,7 +228,12 @@ int avb_decoder_read_audio_f32(avb_decoder *dec, float *dst_interleaved, int fra
     }
     if (out_first_pts) *out_first_pts = dec->impl->audio_next_pts();
     int got = dec->impl->read_audio_f32(dst_interleaved, frames);
-    if (got == 0 && dec->audio_available) dec->audio_eof = true;
+    if (dec->impl->audio_read_failed()) {
+        dec->audio_eof = false;
+        capture_error(dec);
+    } else if (got == 0 && dec->audio_available) {
+        dec->audio_eof = true;
+    }
     return got;
 }
 

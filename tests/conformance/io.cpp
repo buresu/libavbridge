@@ -6,6 +6,7 @@
 
 #include <avbridge.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -36,6 +37,93 @@ static std::vector<unsigned char> read_file(const char *path) {
     if (n > 0) { v.resize((size_t)n); if (std::fread(v.data(), 1, (size_t)n, f) != (size_t)n) v.clear(); }
     std::fclose(f);
     return v;
+}
+
+struct FailingIo {
+    const std::vector<unsigned char> &bytes;
+    long long pos = 0;
+    bool fail = false;
+    int failures = 0;
+};
+static int failing_read(void *user, unsigned char *dst, int size) {
+    auto &io = *static_cast<FailingIo *>(user);
+    if (io.fail) { ++io.failures; return -1; }
+    // Short reads keep avformat's AVIO cache from swallowing this whole small
+    // fixture during probing, so reads after open reach the callback too.
+    size_t count = std::min((size_t)std::min(size, 1024), io.bytes.size() - (size_t)io.pos);
+    std::memcpy(dst, io.bytes.data() + io.pos, count);
+    io.pos += (long long)count;
+    return (int)count;
+}
+static long long failing_seek(void *user, long long offset, int whence) {
+    auto &io = *static_cast<FailingIo *>(user);
+    long long pos = offset + (whence == SEEK_CUR ? io.pos :
+                              whence == SEEK_END ? (long long)io.bytes.size() : 0);
+    if (pos < 0 || pos > (long long)io.bytes.size()) return -1;
+    return io.pos = pos;
+}
+static long long failing_size(void *user) {
+    return (long long)static_cast<FailingIo *>(user)->bytes.size();
+}
+
+static void check_read_errors(const std::vector<unsigned char> &bytes, bool audio) {
+    FailingIo io{bytes};
+    avb_io_callbacks callbacks{};
+    callbacks.read = failing_read;
+    callbacks.seek = failing_seek;
+    callbacks.size = failing_size;
+    avb_decode_options options = avb_decode_options_default();
+    options.backend = AVB_BACKEND_FFMPEG;
+    options.enable_audio = audio;
+    options.enable_video = !audio;
+    options.hardware_policy = AVB_HARDWARE_DISABLED;
+    avb_decoder *decoder = nullptr;
+    avb_result opened = avb_decoder_open_io(&decoder, &callbacks, &io, &options);
+    check(opened == AVB_OK, "failure-injection input opens");
+    if (opened != AVB_OK) { avb_decoder_close(decoder); return; }
+    io.fail = true; // Opening/probing succeeded; the subsequent I/O fails.
+    avb_result result = AVB_OK;
+    std::vector<float> samples(4096 * 2);
+    for (int i = 0; i < 1000; ++i) {
+        if (audio) {
+            if (avb_decoder_read_audio_f32(decoder, samples.data(), 4096, nullptr) == 0) break;
+        } else {
+            avb_video_frame frame{};
+            result = avb_decoder_read_video_frame(decoder, &frame);
+            if (result != AVB_OK) break;
+            avb_decoder_release_video_frame(decoder, &frame);
+        }
+    }
+    check(io.failures > 0, "a read callback actually fails after open");
+    if (audio) {
+        check(avb_decoder_audio_at_eof(decoder) == 0, "audio I/O failure is not EOF");
+        check(avb_decoder_read_audio_f32(decoder, samples.data(), 4096, nullptr) == 0,
+              "audio failure remains terminal until seek");
+        check(avb_decoder_audio_at_eof(decoder) == 0, "repeated failed audio read is not EOF");
+    } else {
+        check(result == AVB_ERROR_DECODE_FAILED, "video I/O failure returns DECODE_FAILED");
+        avb_video_frame frame{};
+        check(avb_decoder_read_video_frame(decoder, &frame) == AVB_ERROR_DECODE_FAILED,
+              "repeated failed video read remains an error");
+    }
+    const char *error = avb_decoder_get_last_error(decoder);
+    check(error && *error, "I/O failure has a diagnostic");
+    io.fail = false;
+    check(avb_decoder_seek(decoder, 0.0, nullptr) == AVB_OK, "seek recovers after I/O resumes");
+    check(avb_decoder_get_last_error(decoder) == nullptr, "successful seek clears the read error");
+    for (int i = 0; i < 1000; ++i) {
+        if (audio) {
+            if (avb_decoder_read_audio_f32(decoder, samples.data(), 4096, nullptr) == 0) break;
+        } else {
+            avb_video_frame frame{};
+            result = avb_decoder_read_video_frame(decoder, &frame);
+            if (result != AVB_OK) break;
+            avb_decoder_release_video_frame(decoder, &frame);
+        }
+    }
+    check(audio ? avb_decoder_audio_at_eof(decoder) == 1 : result == AVB_ERROR_EOF,
+          "recovered input ends with clean EOF");
+    avb_decoder_close(decoder);
 }
 
 int main(int argc, char *argv[]) {
@@ -129,6 +217,11 @@ int main(int argc, char *argv[]) {
         avb_decoder_seek(adec, 0.0, nullptr);
         check(avb_decoder_audio_at_eof(adec) == 0, "EOF flag reset by seek");
         avb_decoder_close(adec);
+    }
+
+    if (backend == AVB_BACKEND_FFMPEG) {
+        check_read_errors(bytes, false);
+        check_read_errors(bytes, true);
     }
 
     printf("\n%s (%d failure%s)\n",

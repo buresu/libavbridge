@@ -29,6 +29,16 @@ set_target_properties(avb_c_api_contract PROPERTIES LINKER_LANGUAGE CXX)
 avb_add_test_binary(avb_conformance conformance/decode.cpp)
 avb_add_test_binary(avb_audio_resample conformance/audio_resample.cpp)
 avb_add_test_binary(avb_io conformance/io.cpp)
+if(AVB_ENABLE_FFMPEG AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    avb_add_test_binary(avb_ffmpeg_read_errors platform/ffmpeg_read_errors.cpp)
+endif()
+if(AVB_ENABLE_GSTREAMER)
+    avb_add_test_binary(avb_stream_selection conformance/stream_selection.cpp)
+    avb_add_test_binary(avb_gstreamer_errors platform/gstreamer_errors.cpp)
+    target_include_directories(avb_gstreamer_errors PRIVATE ${GST_INCLUDE_DIRS})
+    target_link_directories(avb_gstreamer_errors PRIVATE ${GST_LIBRARY_DIRS})
+    target_link_libraries(avb_gstreamer_errors PRIVATE ${GST_LIBRARIES})
+endif()
 avb_add_test_binary(avb_roundtrip integration/roundtrip.cpp)
 avb_add_test_binary(avb_codecs integration/codecs.cpp)
 avb_add_test_binary(avb_custom_decoder integration/custom_decoder.cpp)
@@ -98,6 +108,22 @@ if(FFMPEG_EXECUTABLE)
         VERBATIM
     )
     add_custom_target(avb_conformance_fixture DEPENDS "${AVB_FIXTURE}")
+    if(TARGET avb_ffmpeg_read_errors)
+        set(AVB_READ_ERROR_FIXTURE "${AVB_OUT}/read_errors.mp4")
+        add_custom_command(
+            OUTPUT "${AVB_READ_ERROR_FIXTURE}"
+            DEPENDS "${AVB_FIXTURE}"
+            COMMAND ${FFMPEG_EXECUTABLE} -y -loglevel error
+                    -stream_loop 7 -i "${AVB_FIXTURE}" -c copy -movflags +faststart
+                    "${AVB_READ_ERROR_FIXTURE}"
+            VERBATIM)
+        add_custom_target(avb_read_error_fixture DEPENDS "${AVB_READ_ERROR_FIXTURE}")
+        add_dependencies(avb_read_error_fixture avb_conformance_fixture)
+        add_dependencies(avb_ffmpeg_read_errors avb_read_error_fixture)
+        avb_add_ctest(read_errors_ffmpeg avb_ffmpeg_read_errors
+            "platform;decode;backend-ffmpeg" "${AVB_READ_ERROR_FIXTURE}"
+            "${AVB_OUT}/read_errors_scratch.mp4")
+    endif()
     set(AVB_AUDIO_FIXTURE "${AVB_OUT}/resample.wav")
     add_custom_command(
         OUTPUT "${AVB_AUDIO_FIXTURE}"
@@ -108,6 +134,25 @@ if(FFMPEG_EXECUTABLE)
         VERBATIM)
     add_custom_target(avb_audio_fixture DEPENDS "${AVB_AUDIO_FIXTURE}")
     add_dependencies(avb_audio_resample avb_audio_fixture)
+    if(AVB_ENABLE_GSTREAMER)
+        set(AVB_TRACK_FIXTURE "${AVB_OUT}/multitrack.mp4")
+        add_custom_command(
+            OUTPUT "${AVB_TRACK_FIXTURE}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${AVB_OUT}"
+            COMMAND ${FFMPEG_EXECUTABLE} -y -loglevel error
+                    -f lavfi -i "color=red:size=64x48:rate=10:duration=2"
+                    -f lavfi -i "color=blue:size=96x64:rate=15:duration=2"
+                    -f lavfi -i "sine=frequency=440:sample_rate=32000:duration=2"
+                    -f lavfi -i "sine=frequency=880:sample_rate=48000:duration=2"
+                    -map 0:v -map 1:v -map 2:a -map 3:a
+                    -c:v:0 libx264 -c:v:1 mpeg4 -c:a aac -ac:a:1 2
+                    -movflags +faststart "${AVB_TRACK_FIXTURE}"
+            VERBATIM)
+        add_custom_target(avb_track_fixture DEPENDS "${AVB_TRACK_FIXTURE}")
+        add_dependencies(avb_stream_selection avb_track_fixture)
+        avb_add_ctest(stream_selection_gstreamer avb_stream_selection
+            "conformance;decode;backend-gstreamer" "${AVB_TRACK_FIXTURE}")
+    endif()
     set(AVB_MF_RUNTIME_CODEC_ARGS)
     if(WIN32 AND AVB_ENABLE_MEDIAFOUNDATION)
         include(platform/mediafoundation_fixtures.cmake)
@@ -123,6 +168,12 @@ if(FFMPEG_EXECUTABLE)
     add_dependencies(avb_io avb_conformance_fixture)
     add_dependencies(avb_custom_decoder avb_conformance_fixture)
     add_dependencies(avb_custom_encoder avb_conformance_fixture)
+    if(TARGET avb_gstreamer_errors)
+        add_dependencies(avb_gstreamer_errors avb_conformance_fixture)
+        avb_add_ctest(read_errors_gstreamer avb_gstreamer_errors
+            "platform;decode;backend-gstreamer" "${AVB_FIXTURE}")
+        set_tests_properties(read_errors_gstreamer PROPERTIES TIMEOUT 20)
+    endif()
     if(TARGET avb_platform_avfoundation)
         add_dependencies(
             avb_platform_avfoundation avb_conformance_fixture)

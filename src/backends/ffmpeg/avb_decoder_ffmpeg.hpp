@@ -23,6 +23,7 @@ public:
     avb_result seek(double seconds) override;
     int read_audio_f32(float *dst_interleaved, int frames) override;
     double audio_next_pts() override;
+    bool audio_read_failed() const override { return m_audio_failed; }
     avb_result read_video_frame(avb_video_frame &out_frame) override;
     void release_video_frame(avb_video_frame &frame) override;
     const char *get_last_error() const override;
@@ -43,8 +44,9 @@ private:
     // the *other* enabled stream are queued (not discarded) so that reading one
     // stream to EOF does not consume the other stream's packets — both share a
     // single AVFormatContext. Returns an owned packet (free with av_packet_free)
-    // or nullptr at end of file.
-    AVPacket *demux_next(int stream_idx);
+    // or nullptr with result distinguishing end of file from a read failure.
+    AVPacket *demux_next(int stream_idx, avb_result &result);
+    int read_packet();
     void clear_packet_queues();
     // Queue a packet just read for whichever enabled stream it belongs to, or
     // drop it. Returns the packet when it is for `want_idx` instead of queueing
@@ -128,6 +130,7 @@ private:
     std::condition_variable    m_room_cv;   // room freed, a caller waits, or stop
     bool                       m_reader_stop = false;
     bool                       m_reader_eof  = false;
+    int                        m_demux_result = 0; // terminal libavformat result
     // A caller is blocked on an empty queue: read on past the limits until its
     // packet turns up, exactly as the synchronous path would.
     int                        m_reader_waiters = 0;
@@ -148,6 +151,7 @@ private:
     std::vector<unsigned char> m_video_out_buf;
 
     bool m_eof = false;
+    bool m_audio_failed = false;
 
     // Target time of the last seek (seconds), or < 0 when no seek is pending.
     // av_seek_frame lands on the keyframe at or before the request; decoded

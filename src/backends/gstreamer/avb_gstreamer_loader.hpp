@@ -75,6 +75,8 @@ struct AvbGstFuncs {
 
     // libgstapp-1.0
     GstSample *(*gst_app_sink_pull_sample)(GstAppSink *);
+    GstSample *(*gst_app_sink_try_pull_sample)(GstAppSink *, GstClockTime);
+    gboolean (*gst_app_sink_is_eos)(GstAppSink *);
     GstSample *(*gst_app_sink_try_pull_preroll)(GstAppSink *, GstClockTime);
     void (*gst_app_sink_set_max_buffers)(GstAppSink *, guint);
     void (*gst_app_sink_set_drop)(GstAppSink *, gboolean);

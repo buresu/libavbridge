@@ -318,6 +318,8 @@ typedef struct avb_media_probe {
 
 typedef struct avb_decode_options {
     avb_backend backend;
+    /* Indices follow the backend's numbering: FFmpeg uses container stream
+     * indices; GStreamer uses separate zero-based audio and video track lists. */
     int audio_stream_index; /* -1 = auto/default */
     int video_stream_index; /* -1 = auto/default */
     int enable_audio;
@@ -748,6 +750,9 @@ AVB_API avb_result avb_decoder_seek(
 /* Read up to `frames` interleaved float frames. Returns the number of frames
  * written, or 0 at end of stream / when no audio track is present (use
  * avb_decoder_audio_at_eof / avb_media_info.audio.available to distinguish).
+ * A read failure also returns 0 (or a partial block already decoded); inspect
+ * avb_decoder_get_last_error for details. FFmpeg and GStreamer do not set
+ * audio_at_eof for a read failure. A successful seek clears their read error.
  *
  * If `out_first_pts` is non-NULL it receives the presentation time (seconds) of
  * the first sample in this block, or a negative value if unknown (some backends

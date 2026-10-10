@@ -119,7 +119,23 @@ AVPacket *AvbDecoderFFmpeg::route_packet(int want_idx) {
     return nullptr;
 }
 
-AVPacket *AvbDecoderFFmpeg::demux_next(int stream_idx) {
+int AvbDecoderFFmpeg::read_packet() {
+    int result = m_ff.av_read_frame(m_fmt_ctx, m_packet);
+    // Some demuxers return EOF after an AVIO failure. Preserve the underlying
+    // I/O error rather than turning a failed callback into a clean stream end.
+    if (result == AVERROR_EOF && m_fmt_ctx->pb &&
+        m_fmt_ctx->pb->error < 0 && m_fmt_ctx->pb->error != AVERROR_EOF)
+        result = m_fmt_ctx->pb->error;
+    return result;
+}
+
+AVPacket *AvbDecoderFFmpeg::demux_next(int stream_idx, avb_result &result) {
+    result = AVB_OK;
+    auto terminal = [&]() -> AVPacket * {
+        result = m_demux_result == AVERROR_EOF ? AVB_ERROR_EOF : AVB_ERROR_DECODE_FAILED;
+        if (result != AVB_ERROR_EOF) set_ff_error("av_read_frame", m_demux_result);
+        return nullptr;
+    };
     std::deque<AVPacket *> &want_q =
         (stream_idx == m_audio_stream_idx) ? m_audio_pkts : m_video_pkts;
 
@@ -139,17 +155,21 @@ AVPacket *AvbDecoderFFmpeg::demux_next(int stream_idx) {
             m_pkt_cv.wait(lock, [&] { return !want_q.empty() || m_reader_eof; });
             --m_reader_waiters;
         }
-        if (want_q.empty()) return nullptr; // EOF or read error
+        if (want_q.empty()) return terminal();
         AVPacket *p = pop();
         m_room_cv.notify_one();
         return p;
     }
 
     if (!want_q.empty()) return pop();
+    if (m_demux_result < 0) return terminal();
 
     while (true) {
-        int ret = m_ff.av_read_frame(m_fmt_ctx, m_packet);
-        if (ret < 0) return nullptr; // EOF or read error
+        int ret = read_packet();
+        if (ret < 0) {
+            m_demux_result = ret;
+            return terminal();
+        }
         // Packets for the other enabled stream are queued, not discarded.
         if (AVPacket *p = route_packet(stream_idx)) return p;
     }
@@ -159,6 +179,7 @@ void AvbDecoderFFmpeg::start_reader() {
     if (!m_read_ahead || m_reader.joinable()) return;
     m_reader_stop = false;
     m_reader_eof = false;
+    m_demux_result = 0;
     m_reader = std::thread([this] { reader_loop(); });
 }
 
@@ -186,11 +207,13 @@ void AvbDecoderFFmpeg::reader_loop() {
 
         // The read itself runs unlocked: it is the slow part, and the decoder
         // keeps taking queued packets meanwhile.
-        const int ret = m_ff.av_read_frame(m_fmt_ctx, m_packet);
+        const int ret = read_packet();
 
         std::lock_guard<std::mutex> lock(m_pkt_mutex);
         if (ret < 0) {
-            // EOF or read error; the synchronous path treats both as the end.
+            // Publish only the code here; the caller formats the diagnostic
+            // after consuming its queued packets, avoiding a string data race.
+            m_demux_result = ret;
             m_reader_eof = true;
             m_pkt_cv.notify_all();
             return;
@@ -279,6 +302,8 @@ void AvbDecoderFFmpeg::close_internal() {
     m_video_external_type = AVB_VIDEO_EXTERNAL_NONE;
     m_hw_device = AVB_HW_DEVICE_AUTO;
     m_eof = false;
+    m_audio_failed = false;
+    m_demux_result = 0;
     m_seek_target = -1.0;
     m_audio_seek_target = -1.0;
     m_audio_stream_idx = -1;
@@ -756,8 +781,11 @@ avb_result AvbDecoderFFmpeg::seek(double seconds) {
     clear_packet_queues();
     m_audio.clear();
     m_eof = false;
+    m_audio_failed = false;
+    m_demux_result = 0;
     m_seek_target = seconds;
     m_audio_seek_target = seconds;
+    if (m_fmt_ctx->pb) m_fmt_ctx->pb->error = 0;
     // Codec flushing does not discard the resampler's filter history or its
     // delayed samples, which belong to the old playback position.
     if (m_swr) ret = m_ff.swr_init(m_swr);
@@ -766,11 +794,12 @@ avb_result AvbDecoderFFmpeg::seek(double seconds) {
         set_ff_error("swr_init after seek", ret);
         return AVB_ERROR_SEEK_FAILED;
     }
+    m_last_error.clear();
     return AVB_OK;
 }
 
 bool AvbDecoderFFmpeg::fill_audio_buffer() {
-    if (!m_audio_codec_ctx || m_eof) return false;
+    if (!m_audio_codec_ctx || m_eof || m_audio_failed) return false;
 
     while (true) {
         int ret = m_ff.avcodec_receive_frame(m_audio_codec_ctx, m_audio_frame);
@@ -820,6 +849,7 @@ bool AvbDecoderFFmpeg::fill_audio_buffer() {
                 m_audio.data.resize(buf_start);
                 m_ff.av_frame_unref(m_audio_frame);
                 set_error("swr_convert failed.");
+                m_audio_failed = true;
                 return false;
             }
             // Shrink to the actual number of converted samples.
@@ -841,6 +871,7 @@ bool AvbDecoderFFmpeg::fill_audio_buffer() {
                 if (converted < 0) {
                     m_audio.data.clear();
                     set_ff_error("swr_convert (drain)", converted);
+                    m_audio_failed = true;
                     return false;
                 }
                 m_audio.data.resize((size_t)converted * m_out_channels);
@@ -848,21 +879,33 @@ bool AvbDecoderFFmpeg::fill_audio_buffer() {
                 m_eof = true;
             } else {
                 set_ff_error("avcodec_receive_frame (audio)", ret);
+                m_audio_failed = true;
             }
             return false;
         }
 
-        AVPacket *pkt = demux_next(m_audio_stream_idx);
+        avb_result demux_result;
+        AVPacket *pkt = demux_next(m_audio_stream_idx, demux_result);
         if (!pkt) {
+            if (demux_result != AVB_ERROR_EOF) {
+                m_audio_failed = true;
+                return false;
+            }
             // End of demuxed input: flush the decoder so the loop can drain any
             // remaining buffered frames (then receive_frame returns EOF above).
-            m_ff.avcodec_send_packet(m_audio_codec_ctx, nullptr);
+            int flush = m_ff.avcodec_send_packet(m_audio_codec_ctx, nullptr);
+            if (flush < 0 && flush != AVERROR_EOF) {
+                set_ff_error("avcodec_send_packet (audio drain)", flush);
+                m_audio_failed = true;
+                return false;
+            }
             continue;
         }
         int send_ret = m_ff.avcodec_send_packet(m_audio_codec_ctx, pkt);
         m_ff.av_packet_free(&pkt);
         if (send_ret < 0 && send_ret != AVERROR(EAGAIN)) {
             set_ff_error("avcodec_send_packet (audio)", send_ret);
+            m_audio_failed = true;
             return false;
         }
     }
@@ -884,8 +927,9 @@ avb_result AvbDecoderFFmpeg::read_custom_video_frame(avb_video_frame &out_frame)
         return AVB_ERROR_STREAM_NOT_FOUND;
 
     while (true) {
-        AVPacket *pkt = demux_next(m_video_stream_idx);
-        if (!pkt) return AVB_ERROR_EOF;
+        avb_result demux_result;
+        AVPacket *pkt = demux_next(m_video_stream_idx, demux_result);
+        if (!pkt) return demux_result;
 
         AVStream *vst = m_fmt_ctx->streams[m_video_stream_idx];
         double packet_pts = avb_ff_seconds(pkt->pts, vst->time_base);
@@ -1173,11 +1217,17 @@ avb_result AvbDecoderFFmpeg::read_video_frame(avb_video_frame &out_frame) {
 
         // Feed more packets. demux_next() preserves audio packets seen along the
         // way so a later read_audio_f32() can still consume them.
-        AVPacket *pkt = demux_next(m_video_stream_idx);
+        avb_result demux_result;
+        AVPacket *pkt = demux_next(m_video_stream_idx, demux_result);
         if (!pkt) {
+            if (demux_result != AVB_ERROR_EOF) return demux_result;
             // End of demuxed input: flush, then loop to drain buffered frames
             // (receive_frame above eventually returns AVERROR_EOF).
-            m_ff.avcodec_send_packet(m_video_codec_ctx, nullptr);
+            int flush = m_ff.avcodec_send_packet(m_video_codec_ctx, nullptr);
+            if (flush < 0 && flush != AVERROR_EOF) {
+                set_ff_error("avcodec_send_packet (video drain)", flush);
+                return AVB_ERROR_DECODE_FAILED;
+            }
             continue;
         }
         int send_ret = m_ff.avcodec_send_packet(m_video_codec_ctx, pkt);
