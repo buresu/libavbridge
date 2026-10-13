@@ -74,6 +74,8 @@ bool avb_gst_load(AvbGstFuncs &out_funcs, char *err_buf, int err_buf_size) {
     LOAD_SYM(g_handle_gst, out_funcs, gst_structure_get_fraction);
     LOAD_SYM(g_handle_gst, out_funcs, gst_sample_get_buffer);
     LOAD_SYM(g_handle_gst, out_funcs, gst_sample_get_caps);
+    LOAD_SYM(g_handle_gst, out_funcs, gst_sample_get_segment);
+    LOAD_SYM(g_handle_gst, out_funcs, gst_segment_to_stream_time);
     LOAD_SYM(g_handle_gst, out_funcs, gst_buffer_map);
     LOAD_SYM(g_handle_gst, out_funcs, gst_buffer_unmap);
     LOAD_SYM(g_handle_gst, out_funcs, gst_buffer_get_size);

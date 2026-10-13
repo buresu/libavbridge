@@ -295,6 +295,13 @@ bool AvbDecoderGStreamer::check_bus_error() {
     return m_pipeline_failed;
 }
 
+GstClockTime AvbDecoderGStreamer::sample_stream_time(GstSample *sample, GstBuffer *buf) const {
+    if (!buf || !GST_BUFFER_PTS_IS_VALID(buf)) return GST_CLOCK_TIME_NONE;
+    const GstSegment *segment = sample ? m_gst.gst_sample_get_segment(sample) : nullptr;
+    if (!segment || segment->format != GST_FORMAT_TIME) return GST_BUFFER_PTS(buf);
+    return m_gst.gst_segment_to_stream_time(segment, GST_FORMAT_TIME, GST_BUFFER_PTS(buf));
+}
+
 avb_result AvbDecoderGStreamer::pull_sample(GstElement *sink, GstSample *&sample) {
     sample = nullptr;
     for (;;) {
@@ -1028,8 +1035,8 @@ bool AvbDecoderGStreamer::fill_audio_buffer() {
         if (m_audio.empty()) {
             m_audio.data.clear();
             m_audio.pos = 0;
-            m_audio.pts = GST_BUFFER_PTS_IS_VALID(buf)
-                ? (double)GST_BUFFER_PTS(buf) / GST_SECOND : -1.0;
+            const GstClockTime t = sample_stream_time(sample, buf);
+            m_audio.pts = GST_CLOCK_TIME_IS_VALID(t) ? (double)t / GST_SECOND : -1.0;
         }
         m_audio.data.insert(m_audio.data.end(), src, src + n_floats);
         m_gst.gst_buffer_unmap(buf, &map);
@@ -1067,8 +1074,9 @@ avb_result AvbDecoderGStreamer::read_custom_video_frame(avb_video_frame &out_fra
             return AVB_ERROR_DECODE_FAILED;
         }
 
-        double pts_sec = GST_BUFFER_PTS_IS_VALID(buf)
-            ? (double)GST_BUFFER_PTS(buf) / GST_SECOND : -1.0;
+        const GstClockTime stream_time = sample_stream_time(sample, buf);
+        double pts_sec = GST_CLOCK_TIME_IS_VALID(stream_time)
+            ? (double)stream_time / GST_SECOND : -1.0;
         if (m_seek_target >= 0.0 && pts_sec >= 0.0 &&
             pts_sec < m_seek_target - 1e-3) {
             m_gst.gst_mini_object_unref((GstMiniObject *)sample);
@@ -1091,8 +1099,11 @@ avb_result AvbDecoderGStreamer::read_custom_video_frame(avb_video_frame &out_fra
             ? (double)GST_BUFFER_DURATION(buf) / GST_SECOND : -1.0;
         packet.keyframe = !GST_BUFFER_FLAG_IS_SET(buf, GST_BUFFER_FLAG_DELTA_UNIT);
         packet.stream_index = m_video_track;
-        packet.pts = GST_BUFFER_PTS_IS_VALID(buf) ? (int64_t)GST_BUFFER_PTS(buf) : -1;
-        packet.dts = GST_BUFFER_DTS_IS_VALID(buf) ? (int64_t)GST_BUFFER_DTS(buf) : -1;
+        packet.pts = GST_CLOCK_TIME_IS_VALID(stream_time) ? (int64_t)stream_time : -1;
+        // The same shift as the PTS, so the two stay in one time.
+        packet.dts = GST_BUFFER_DTS_IS_VALID(buf) && packet.pts >= 0
+            ? (int64_t)GST_BUFFER_DTS(buf) - ((int64_t)GST_BUFFER_PTS(buf) - packet.pts)
+            : -1;
         packet.duration = GST_BUFFER_DURATION_IS_VALID(buf) ? (int64_t)GST_BUFFER_DURATION(buf) : -1;
         packet.time_base_num = 1;
         packet.time_base_den = (int)GST_SECOND;
@@ -1210,8 +1221,8 @@ avb_result AvbDecoderGStreamer::read_video_frame(avb_video_frame &out_frame) {
         // the first returned frame starts at ~seek target, matching the other
         // backends.
         double pts_sec = 0.0;
-        if (GST_BUFFER_PTS_IS_VALID(buf))
-            pts_sec = (double)GST_BUFFER_PTS(buf) / GST_SECOND;
+        if (const GstClockTime t = sample_stream_time(sample, buf); GST_CLOCK_TIME_IS_VALID(t))
+            pts_sec = (double)t / GST_SECOND;
         if (m_seek_target >= 0.0 && pts_sec < m_seek_target - 1e-3) {
             m_gst.gst_mini_object_unref((GstMiniObject *)sample);
             continue;

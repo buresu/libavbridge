@@ -41,6 +41,13 @@ private:
     bool fill_audio_buffer();
     bool check_bus_error();
     avb_result pull_sample(GstElement *sink, GstSample *&sample);
+    // When a sample is presented, in the stream's own time (seconds, -1 when
+    // unknown). A buffer's PTS is in the media's time: a container's edit list
+    // reaches us as the segment, and MP4 uses one to start an H.264 stream with
+    // B-frames (and an AAC stream past its priming) at 0. Read raw, every
+    // stream is late by its own offset -- the picture of a libx264 + AAC MP4
+    // behind its sound by 45ms.
+    GstClockTime sample_stream_time(GstSample *sample, GstBuffer *buf) const;
     void discover_codec_names(const char *uri);
     bool validate_track_selection(const avb_decode_options &options);
     avb_result open_custom_file(const char *path, const avb_decode_options &options);

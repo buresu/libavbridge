@@ -40,6 +40,8 @@ struct AvbGstFuncs {
     gboolean (*gst_structure_get_fraction)(const GstStructure *, const gchar *, gint *, gint *);
     GstBuffer *(*gst_sample_get_buffer)(GstSample *);
     GstCaps *(*gst_sample_get_caps)(GstSample *);
+    GstSegment *(*gst_sample_get_segment)(GstSample *);
+    guint64 (*gst_segment_to_stream_time)(const GstSegment *, GstFormat, guint64);
     gboolean (*gst_buffer_map)(GstBuffer *, GstMapInfo *, GstMapFlags);
     void (*gst_buffer_unmap)(GstBuffer *, GstMapInfo *);
     gsize (*gst_buffer_get_size)(GstBuffer *);
