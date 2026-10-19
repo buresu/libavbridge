@@ -3,6 +3,7 @@
 #include "avb_mediafoundation_common.hpp"
 #include "avb_mediafoundation_decode_frames.hpp"
 #include "avb_mediafoundation_decode_types.hpp"
+#include "avb_mediafoundation_edits.hpp"
 #include "avb_mediafoundation_ivf.hpp"
 
 #ifdef _WIN32
@@ -31,6 +32,57 @@
 #include <vector>
 
 using Microsoft::WRL::ComPtr;
+
+namespace {
+
+// Which of the reader's streams of `major` this one is, counting from 0 in
+// stream order -- the order the MPEG-4 source lists a file's tracks in.
+int mf_stream_ordinal(IMFSourceReader *reader, DWORD stream, REFGUID major) {
+    int ordinal = 0;
+    for (DWORD index = 0; index < stream; ++index) {
+        ComPtr<IMFMediaType> type;
+        if (FAILED(reader->GetNativeMediaType(index, 0, &type)) || !type)
+            return -1;
+        GUID kind = GUID_NULL;
+        type->GetGUID(MF_MT_MAJOR_TYPE, &kind);
+        if (IsEqualGUID(kind, major)) ++ordinal;
+    }
+    return ordinal;
+}
+
+const MfTrackEdit *mf_track_edit(const std::vector<MfTrackEdit> &edits,
+                                 bool video, int ordinal) {
+    if (ordinal < 0) return nullptr;
+    for (const auto &edit : edits)
+        if (edit.video == video && ordinal-- == 0) return &edit;
+    return nullptr;
+}
+
+// What Media Foundation's own source stamps the first packet of `stream`
+// with. Read compressed, by a reader of its own, so the one decoding stays
+// where it is and nothing is decoded for it. False when there is none.
+bool mf_first_packet_time(const wchar_t *path, DWORD stream, double &out_sec) {
+    ComPtr<IMFSourceReader> reader;
+    if (FAILED(MFCreateSourceReaderFromURL(path, nullptr, &reader)) || !reader)
+        return false;
+    reader->SetStreamSelection((DWORD)MF_SOURCE_READER_ALL_STREAMS, FALSE);
+    if (FAILED(reader->SetStreamSelection(stream, TRUE))) return false;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        DWORD flags = 0;
+        LONGLONG ts = 0;
+        ComPtr<IMFSample> sample;
+        if (FAILED(reader->ReadSample(stream, 0, nullptr, &flags, &ts, &sample)) ||
+            (flags & (MF_SOURCE_READERF_ERROR | MF_SOURCE_READERF_ENDOFSTREAM)))
+            return false;
+        if (sample) {
+            out_sec = static_cast<double>(ts) / 1e7;
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
 
 struct AvbDecoderMediaFoundation::Impl {
     struct NativeFrameLease {
@@ -114,6 +166,14 @@ struct AvbDecoderMediaFoundation::Impl {
     double seek_target_sec    = 0.0;
     bool   video_seek_pending = false;
     bool   audio_seek_pending = false;
+
+    // An MP4/MOV edit list the source did not apply (avb_mediafoundation_
+    // edits.hpp), in 100-ns units: taken off each stream's sample times, and
+    // added to a seek position -- the smaller of the two, so that neither
+    // stream lands after the target and the pre-roll drop trims the other.
+    LONGLONG video_shift = 0;
+    LONGLONG audio_shift = 0;
+    LONGLONG seek_shift  = 0;
 
     bool mf_initialized = false;
 
@@ -260,6 +320,7 @@ struct AvbDecoderMediaFoundation::Impl {
         seek_target_sec    = 0.0;
         video_seek_pending = false;
         audio_seek_pending = false;
+        video_shift = audio_shift = seek_shift = 0;
     }
 };
 
@@ -628,6 +689,62 @@ avb_result AvbDecoderMediaFoundation::open_file(const char *path, const avb_deco
         return AVB_ERROR_STREAM_NOT_FOUND;
     }
 
+    // An edit list the source leaves unapplied is applied here, so that each
+    // stream starts where the file says it does -- as FFmpeg and AVFoundation
+    // have it. Whether the source applied it is asked of the source: a first
+    // packet stamped with its media time is one that applied nothing.
+    {
+        const int video_idx = m_impl->video_stream_idx;
+        const int audio_idx = m_impl->audio_stream_idx;
+        const std::vector<MfTrackEdit> edits = mf_read_track_edits(path);
+        const MfTrackEdit *video_edit = video_idx < 0 ? nullptr
+            : mf_track_edit(edits, true, mf_stream_ordinal(
+                  m_impl->reader.Get(), (DWORD)video_idx, MFMediaType_Video));
+        const MfTrackEdit *audio_edit = audio_idx < 0 ? nullptr
+            : mf_track_edit(edits, false, mf_stream_ordinal(
+                  m_impl->reader.Get(), (DWORD)audio_idx, MFMediaType_Audio));
+        const auto shifted = [](const MfTrackEdit *edit) {
+            return edit && std::abs(edit->shift_sec) > 1e-4;
+        };
+        if (shifted(video_edit) || shifted(audio_edit)) {
+            // The picture is asked when it is shifted: its first packet (a
+            // keyframe, presented after the frames reordered behind it) is
+            // stamped later than an edited timeline would have it. Sound
+            // starts at 0 untouched and before 0 edited.
+            const bool ask_video = shifted(video_edit);
+            const MfTrackEdit &asked = ask_video ? *video_edit : *audio_edit;
+            double first_sec = 0.0;
+            bool applied = false;
+            if (mf_first_packet_time(wpath.c_str(),
+                                     (DWORD)(ask_video ? video_idx : audio_idx),
+                                     first_sec)) {
+                const double untouched = asked.first_cts_sec;
+                const double edited = asked.first_cts_sec - asked.shift_sec;
+                applied = std::abs(first_sec - edited) <
+                          std::abs(first_sec - untouched);
+            }
+            if (!applied) {
+                const auto ticks = [](const MfTrackEdit *edit) {
+                    return edit ? (LONGLONG)std::llround(edit->shift_sec * 1e7)
+                                : (LONGLONG)0;
+                };
+                m_impl->video_shift = ticks(video_edit);
+                m_impl->audio_shift = ticks(audio_edit);
+                if (video_idx >= 0 && audio_idx >= 0)
+                    m_impl->seek_shift =
+                        std::min(m_impl->video_shift, m_impl->audio_shift);
+                else
+                    m_impl->seek_shift = video_idx >= 0 ? m_impl->video_shift
+                                                        : m_impl->audio_shift;
+                // What lies before 0 once shifted -- AAC's encoder delay -- is
+                // not part of the presentation; drop it as a seek's pre-roll.
+                m_impl->seek_target_sec = 0.0;
+                m_impl->video_seek_pending = video_idx >= 0 && m_impl->video_shift > 0;
+                m_impl->audio_seek_pending = audio_idx >= 0 && m_impl->audio_shift > 0;
+            }
+        }
+    }
+
     // MF duration is in 100-ns units.
     {
         PROPVARIANT var;
@@ -696,7 +813,15 @@ avb_result AvbDecoderMediaFoundation::seek(double seconds) {
     PROPVARIANT var;
     PropVariantInit(&var);
     var.vt            = VT_I8;
-    var.hVal.QuadPart = (LONGLONG)(seconds * 1e7);
+    // On the source's timeline, which an unapplied edit list leaves shifted --
+    // but never past its end: a seek to the end (where a past-end request is
+    // clamped to) shifted on would be refused.
+    LONGLONG position =
+        std::max<LONGLONG>(0, (LONGLONG)(seconds * 1e7) + m_impl->seek_shift);
+    if (m_impl->seek_shift > 0 && m_impl->duration_sec > 0.0)
+        position = std::min(position,
+                            (LONGLONG)std::llround(m_impl->duration_sec * 1e7));
+    var.hVal.QuadPart = position;
 
     HRESULT hr = m_impl->reader->SetCurrentPosition(GUID_NULL, var);
     PropVariantClear(&var);
@@ -745,6 +870,7 @@ bool AvbDecoderMediaFoundation::fill_audio_buffer() {
             return fail("ReadSample", FAILED(hr) ? hr : E_FAIL);
         if (flags & MF_SOURCE_READERF_ENDOFSTREAM) return false;
         if (!sample) continue;
+        ts -= m_impl->audio_shift;
 
         ComPtr<IMFMediaBuffer> buf;
         hr = sample->ConvertToContiguousBuffer(&buf);
@@ -1173,6 +1299,7 @@ avb_result AvbDecoderMediaFoundation::read_video_frame(avb_video_frame &out_fram
             }
             return AVB_ERROR_DECODE_FAILED;
         }
+        ts -= m_impl->video_shift;
 
         // Compressed packets must reach custom decoders, including the seek
         // keyframe and dependencies before the target. Drop their output below.
@@ -1196,8 +1323,12 @@ avb_result AvbDecoderMediaFoundation::read_video_frame(avb_video_frame &out_fram
             sample->GetSampleDuration(&dur);
             UINT32 clean_point = 0;
             sample->GetUINT32(MFSampleExtension_CleanPoint, &clean_point);
-            UINT64 decode_time = static_cast<UINT64>(ts);
-            sample->GetUINT64(MFSampleExtension_DecodeTimestamp, &decode_time);
+            UINT64 source_decode_time = 0;
+            const LONGLONG decode_time =
+                SUCCEEDED(sample->GetUINT64(MFSampleExtension_DecodeTimestamp,
+                                            &source_decode_time))
+                    ? static_cast<LONGLONG>(source_decode_time) - m_impl->video_shift
+                    : ts;
 
             avb_encoded_packet packet{};
             packet.data = m_impl->custom_packet_buf.data();

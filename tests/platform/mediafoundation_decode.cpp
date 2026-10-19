@@ -1,5 +1,6 @@
 #include "test.hpp"
 
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -143,6 +144,89 @@ void check_audio_seek(avb::test::Context &test, const char *path) {
     avb_decoder_close(decoder);
 }
 
+// An MP4 made the ordinary way (libx264 with B-frames, AAC) starts its picture
+// two frames into the track's media time and its sound past the encoder's
+// delay, and says so in edit lists. Both come out on the clock the file means:
+// every picture stamped with its own time -- its brightness says which it is,
+// 16 + 2 per frame at 30 fps -- and the tone that starts at 1s heard at 1s,
+// from the start and after a seek alike.
+void check_edit_lists(avb::test::Context &test, const char *path) {
+    test.section("edit lists");
+    auto options = avb_decode_options_default();
+    options.backend = AVB_BACKEND_MEDIAFOUNDATION;
+    options.enable_audio = 0;
+    options.video_format = AVB_PIXEL_FORMAT_NV12;
+    avb_decoder *decoder = nullptr;
+    if (avb_decoder_open(&decoder, path, &options) != AVB_OK) {
+        std::fprintf(stderr, "%s\n", avb::test::decoder_error(decoder));
+        test.check(false, "edit-list video opens");
+        avb_decoder_close(decoder);
+        return;
+    }
+    const auto picture_time = [](const avb_video_frame &frame) {
+        return (frame.plane_data[0][0] - 16) / 2.0 / 30.0;
+    };
+    avb_video_frame frame{};
+    if (avb_decoder_read_video_frame(decoder, &frame) == AVB_OK) {
+        test.near(frame.pts_sec, 0.0, 0.5 / 30.0, "first picture is stamped 0");
+        test.near(picture_time(frame), 0.0, 0.5 / 30.0,
+                  "first picture is the file's first");
+        avb_decoder_release_video_frame(decoder, &frame);
+    } else {
+        test.check(false, "edit-list video reads");
+    }
+    for (double target : {1.0, 2.0}) {
+        test.equal(avb_decoder_seek(decoder, target, nullptr), AVB_OK,
+                   "edit-list video seeks");
+        if (avb_decoder_read_video_frame(decoder, &frame) != AVB_OK) {
+            test.check(false, "edit-list video reads after seek");
+            continue;
+        }
+        test.near(frame.pts_sec, target, 0.5 / 30.0,
+                  "picture after seek is at the target");
+        test.near(picture_time(frame), frame.pts_sec, 0.5 / 30.0,
+                  "picture after seek is the one of its stamp");
+        avb_decoder_release_video_frame(decoder, &frame);
+    }
+    avb_decoder_close(decoder);
+
+    options.enable_audio = 1;
+    options.enable_video = 0;
+    if (avb_decoder_open(&decoder, path, &options) != AVB_OK) {
+        std::fprintf(stderr, "%s\n", avb::test::decoder_error(decoder));
+        test.check(false, "edit-list audio opens");
+        avb_decoder_close(decoder);
+        return;
+    }
+    avb_media_info info{};
+    avb_decoder_get_media_info(decoder, &info);
+    const int rate = info.audio.sample_rate;
+    const int channels = info.audio.channels > 0 ? info.audio.channels : 1;
+    // Where the tone is first heard, from wherever the decoder is.
+    const auto onset = [&](double *first_pts) {
+        std::vector<float> block(256 * channels);
+        for (int blocks = 0; blocks < 1000; ++blocks) {
+            double pts = -1.0;
+            const int frames =
+                avb_decoder_read_audio_f32(decoder, block.data(), 256, &pts);
+            if (frames <= 0) break;
+            if (blocks == 0 && first_pts) *first_pts = pts;
+            for (int i = 0; i < frames; ++i)
+                if (std::fabs(block[static_cast<size_t>(i) * channels]) > 0.05f)
+                    return pts + static_cast<double>(i) / rate;
+        }
+        return -1.0;
+    };
+    double first = -1.0;
+    test.near(onset(&first), 1.0, 0.002, "the tone is heard at 1s");
+    test.near(first, 0.0, 1.0 / rate, "sound starts at 0");
+    test.equal(avb_decoder_seek(decoder, 0.5, nullptr), AVB_OK,
+               "edit-list audio seeks");
+    test.near(onset(&first), 1.0, 0.002, "the tone is heard at 1s after a seek");
+    test.near(first, 0.5, 1.0 / rate, "sound after a seek starts at the target");
+    avb_decoder_close(decoder);
+}
+
 void check_ivf(avb::test::Context &test, const char *path) {
     avb_decoder_capabilities caps{};
     avb_decoder_probe_runtime_capabilities(AVB_BACKEND_MEDIAFOUNDATION, path, &caps);
@@ -207,16 +291,18 @@ void check_ivf(avb::test::Context &test, const char *path) {
 }
 } // namespace
 
+// Usage: avb_mediafoundation_decode <fixture.mp4> <audio.wav> <edits.mp4> [vp8.ivf]
 int main(int argc, char **argv) {
-    if (argc < 3) return 2;
+    if (argc < 4) return 2;
     avb::test::Context test;
     check_selection(test, argv[1]);
     check_custom_seek(test, argv[1]);
     check_audio_seek(test, argv[2]);
     check_unsupported_format(test, argv[1]);
-    if (argc > 3) {
-        check_ivf(test, argv[3]);
-        check_unsupported_format(test, argv[3]);
+    check_edit_lists(test, argv[3]);
+    if (argc > 4) {
+        check_ivf(test, argv[4]);
+        check_unsupported_format(test, argv[4]);
     }
     return test.finish("Media Foundation decode contracts");
 }

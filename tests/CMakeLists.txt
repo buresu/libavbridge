@@ -382,6 +382,20 @@ if(FFMPEG_EXECUTABLE)
 
     if(AVB_ENABLE_MEDIAFOUNDATION)
         add_dependencies(avb_mediafoundation_decode avb_conformance_fixture avb_audio_fixture)
+        # Every picture's brightness says which it is; the sound is silent
+        # until exactly 1s. libx264's B-frames and AAC's encoder delay give
+        # both tracks an edit list.
+        set(AVB_MF_EDITS_FIXTURE "${AVB_OUT}/mediafoundation_edits.mp4")
+        add_custom_command(OUTPUT "${AVB_MF_EDITS_FIXTURE}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${AVB_OUT}"
+            COMMAND ${FFMPEG_EXECUTABLE} -y -loglevel error
+                -f lavfi -i "nullsrc=s=64x64:r=30:d=3,geq=lum=16+N*2:cb=128:cr=128"
+                -f lavfi -i "aevalsrc=gte(t\\,1)*0.5*sin(2*PI*1000*t):s=48000:d=3"
+                -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest
+                "${AVB_MF_EDITS_FIXTURE}"
+            VERBATIM)
+        add_custom_target(avb_mf_edits_fixture DEPENDS "${AVB_MF_EDITS_FIXTURE}")
+        add_dependencies(avb_mediafoundation_decode avb_mf_edits_fixture)
         set(AVB_MF_IVF_FIXTURE)
         execute_process(COMMAND ${FFMPEG_EXECUTABLE} -hide_banner -encoders
             OUTPUT_VARIABLE _mf_encoders ERROR_QUIET)
@@ -398,7 +412,8 @@ if(FFMPEG_EXECUTABLE)
         endif()
         avb_add_ctest(decode_contracts_mediafoundation avb_mediafoundation_decode
             "platform;decode;backend-mediafoundation"
-            "${AVB_FIXTURE}" "${AVB_AUDIO_FIXTURE}" ${AVB_MF_IVF_FIXTURE})
+            "${AVB_FIXTURE}" "${AVB_AUDIO_FIXTURE}" "${AVB_MF_EDITS_FIXTURE}"
+            ${AVB_MF_IVF_FIXTURE})
         avb_add_ctest(
             runtime_codecs_mediafoundation
             avb_mediafoundation_runtime_codecs
