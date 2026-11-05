@@ -10,9 +10,88 @@
 
 #include <unistd.h>
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <deque>
 #include <utility>
+
+// Run an AVFoundation call sequence, turning an Objective-C exception into an
+// error result. AVAssetWriter(Input) raises NSInvalidArgumentException for
+// output settings it rejects instead of returning an error.
+template <class Fn>
+static avb_result avb_objc_guard(std::string &error, avb_result failure, Fn &&fn) {
+    @try {
+        return fn();
+    } @catch (NSException *e) {
+        const char *reason = e.reason.UTF8String;
+        error = std::string("AVFoundation raised an exception: ") +
+                (reason ? reason : e.name.UTF8String);
+        return failure;
+    }
+}
+
+// Channel layouts for interleaved input of 1-8 channels. Input follows the
+// WAVE/SMPTE order the other backends use (L R C LFE Ls Rs ...), and the AAC
+// layout is what the encoder writes; AVAssetWriter remaps one to the other.
+// AAC above two channels refuses to encode without a layout.
+struct AvbChannelLayouts {
+    AudioChannelLayoutTag input;
+    AudioChannelLayoutTag aac;
+};
+
+static bool avb_channel_layouts(int channels, AvbChannelLayouts &out) {
+    switch (channels) {
+        case 1: out = {kAudioChannelLayoutTag_Mono, kAudioChannelLayoutTag_Mono}; return true;
+        case 2: out = {kAudioChannelLayoutTag_Stereo, kAudioChannelLayoutTag_Stereo}; return true;
+        case 3: out = {kAudioChannelLayoutTag_MPEG_3_0_A, kAudioChannelLayoutTag_AAC_3_0}; return true;
+        case 4: out = {kAudioChannelLayoutTag_Quadraphonic, kAudioChannelLayoutTag_AAC_Quadraphonic}; return true;
+        case 5: out = {kAudioChannelLayoutTag_MPEG_5_0_A, kAudioChannelLayoutTag_AAC_5_0}; return true;
+        case 6: out = {kAudioChannelLayoutTag_MPEG_5_1_A, kAudioChannelLayoutTag_AAC_5_1}; return true;
+        case 7: out = {kAudioChannelLayoutTag_MPEG_6_1_A, kAudioChannelLayoutTag_AAC_6_1}; return true;
+        case 8: out = {kAudioChannelLayoutTag_MPEG_7_1_C, kAudioChannelLayoutTag_AAC_7_1}; return true;
+        default: return false;
+    }
+}
+
+static NSData *avb_layout_data(AudioChannelLayoutTag tag) {
+    AudioChannelLayout layout{};
+    layout.mChannelLayoutTag = tag;
+    return [NSData dataWithBytes:&layout length:sizeof(layout)];
+}
+
+// The time base a custom encoder's packet ticks count in when the packet names
+// none: an exact inverse frame rate for integer and NTSC (x/1.001) rates.
+// Returns false when the rate has no such form; ticks then convert through
+// seconds.
+static bool avb_frame_rate_time_base(double fps, int32_t &num, int32_t &den) {
+    if (!(fps > 0.0)) return false;
+    const double whole = std::round(fps);
+    if (std::fabs(fps - whole) < 1e-6 && whole <= INT32_MAX) {
+        num = 1;
+        den = (int32_t)whole;
+        return true;
+    }
+    const double ntsc = std::round(fps * 1001.0);
+    if (std::fabs(fps * 1001.0 - ntsc) < 1e-3 && ntsc <= INT32_MAX) {
+        num = 1001;
+        den = (int32_t)ntsc;
+        return true;
+    }
+    return false;
+}
+
+// The sample description atom that carries a codec's configuration record --
+// what a custom encoder hands over as extradata.
+static CFStringRef avb_extradata_atom(FourCharCode codec) {
+    switch (codec) {
+        case kCMVideoCodecType_H264: return CFSTR("avcC");
+        case kCMVideoCodecType_HEVC:
+        case 'hev1':                 return CFSTR("hvcC");
+        case 'av01':                 return CFSTR("av1C");
+        case 'vp09':                 return CFSTR("vpcC");
+        default:                     return nullptr;
+    }
+}
 
 struct AvbEncoderAVFoundation::Impl {
     AVAssetWriter *writer = nil;
@@ -34,6 +113,11 @@ struct AvbEncoderAVFoundation::Impl {
     OSType cv_pixel_format = kCVPixelFormatType_32BGRA;
     avb_pixel_format input_format = AVB_PIXEL_FORMAT_BGRA8;
     avb_video_memory_type input_memory = AVB_VIDEO_MEMORY_CPU;
+
+    // Time base for custom packet ticks that name none of their own: the
+    // encoded stream's, else the inverse frame rate (num 0: none exact).
+    int32_t custom_tb_num = 0;
+    int32_t custom_tb_den = 0;
 
     int    sample_rate = 0;
     int    channels = 0;
@@ -149,6 +233,26 @@ static FourCharCode avb_normalize_fourcc(uint32_t tag) {
 }
 
 avb_result AvbEncoderAVFoundation::open(const char *path, const avb_encode_options &options) {
+    return avb_objc_guard(m_last_error, AVB_ERROR_OPEN_FAILED,
+                          [&] { return open_impl(path, options); });
+}
+
+avb_result AvbEncoderAVFoundation::write_video(const avb_video_frame &frame, double pts_sec) {
+    return avb_objc_guard(m_last_error, AVB_ERROR_ENCODE_FAILED,
+                          [&] { return write_video_impl(frame, pts_sec); });
+}
+
+avb_result AvbEncoderAVFoundation::write_audio_f32(const float *src_interleaved, int frames) {
+    return avb_objc_guard(m_last_error, AVB_ERROR_ENCODE_FAILED,
+                          [&] { return write_audio_impl(src_interleaved, frames); });
+}
+
+avb_result AvbEncoderAVFoundation::finish() {
+    return avb_objc_guard(m_last_error, AVB_ERROR_ENCODE_FAILED,
+                          [&] { return finish_impl(); });
+}
+
+avb_result AvbEncoderAVFoundation::open_impl(const char *path, const avb_encode_options &options) {
     @autoreleasepool {
         // CPU input is copied into a fresh CVPixelBuffer; EXTERNAL input appends
         // the caller's IOSurface-backed CVPixelBuffer directly (zero-copy).
@@ -221,12 +325,24 @@ avb_result AvbEncoderAVFoundation::open(const char *path, const avb_encode_optio
                     return AVB_ERROR_INVALID_ARGUMENT;
                 }
 
+                // The codec's configuration record goes into the sample
+                // description, where a reader looks for it (avcC, hvcC, ...).
+                NSDictionary *extensions = nil;
+                CFStringRef atom = avb_extradata_atom(codec_type);
+                if (atom && stream.extradata && stream.extradata_size > 0) {
+                    NSData *record = [NSData dataWithBytes:stream.extradata
+                                                    length:(NSUInteger)stream.extradata_size];
+                    extensions = @{
+                        (NSString *)kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms:
+                            @{ (__bridge NSString *)atom: record },
+                    };
+                }
                 OSStatus st = CMVideoFormatDescriptionCreate(
                     kCFAllocatorDefault,
                     codec_type,
                     m_impl->width,
                     m_impl->height,
-                    nullptr,
+                    (__bridge CFDictionaryRef)extensions,
                     &m_impl->custom_video_fmt);
                 if (st != noErr || !m_impl->custom_video_fmt) {
                     m_last_error = "CMVideoFormatDescriptionCreate failed.";
@@ -243,6 +359,14 @@ avb_result AvbEncoderAVFoundation::open(const char *path, const avb_encode_optio
                 m_impl->custom_video_ctx = ctx;
                 m_impl->custom_video_stream = stream;
                 m_impl->custom_video = true;
+                if (stream.time_base_num > 0 && stream.time_base_den > 0) {
+                    m_impl->custom_tb_num = stream.time_base_num;
+                    m_impl->custom_tb_den = stream.time_base_den;
+                } else if (!avb_frame_rate_time_base(m_impl->frame_rate,
+                                                     m_impl->custom_tb_num,
+                                                     m_impl->custom_tb_den)) {
+                    m_impl->custom_tb_num = m_impl->custom_tb_den = 0;
+                }
             } else {
                 bool fmt_ok = true;
                 m_impl->cv_pixel_format = avb_enc_cvpixfmt(m_impl->input_format, &fmt_ok);
@@ -340,12 +464,23 @@ avb_result AvbEncoderAVFoundation::open(const char *path, const avb_encode_optio
                     return AVB_ERROR_INVALID_ARGUMENT;
             }
 
-            NSDictionary *asettings = @{
+            AvbChannelLayouts layouts{};
+            if (!avb_channel_layouts(m_impl->channels, layouts)) {
+                m_last_error = "AVFoundation AAC encoding supports 1 to 8 channels.";
+                return AVB_ERROR_INVALID_ARGUMENT;
+            }
+
+            // Without a bitrate the encoder picks one that suits the rate and
+            // channel count; a fixed default is out of range for some (8 kHz
+            // mono rejects 128 kb/s).
+            NSMutableDictionary *asettings = [@{
                 AVFormatIDKey:         @(kAudioFormatMPEG4AAC),
                 AVSampleRateKey:       @(m_impl->sample_rate),
                 AVNumberOfChannelsKey: @(m_impl->channels),
-                AVEncoderBitRateKey:   @(options.audio.bitrate > 0 ? options.audio.bitrate : 128000),
-            };
+                AVChannelLayoutKey:    avb_layout_data(layouts.aac),
+            } mutableCopy];
+            if (options.audio.bitrate > 0)
+                asettings[AVEncoderBitRateKey] = @(options.audio.bitrate);
             m_impl->audio_input = [AVAssetWriterInput
                 assetWriterInputWithMediaType:AVMediaTypeAudio
                                outputSettings:asettings];
@@ -361,8 +496,11 @@ avb_result AvbEncoderAVFoundation::open(const char *path, const avb_encode_optio
             asbd.mBytesPerFrame    = m_impl->channels * sizeof(float);
             asbd.mFramesPerPacket  = 1;
             asbd.mBytesPerPacket   = asbd.mBytesPerFrame;
+            AudioChannelLayout input_layout{};
+            input_layout.mChannelLayoutTag = layouts.input;
             OSStatus st = CMAudioFormatDescriptionCreate(kCFAllocatorDefault, &asbd,
-                                                         0, NULL, 0, NULL, NULL,
+                                                         sizeof(input_layout), &input_layout,
+                                                         0, NULL, NULL,
                                                          &m_impl->audio_fmt);
             if (st != noErr) {
                 m_last_error = "CMAudioFormatDescriptionCreate failed.";
@@ -478,14 +616,19 @@ bool AvbEncoderAVFoundation::drain() {
     return true;
 }
 
-static CMTime avb_packet_time(int64_t value, double seconds,
-                              int tb_num, int tb_den,
-                              double fallback_seconds) {
-    if (value >= 0 && tb_num > 0 && tb_den > 0) {
-        return CMTimeMake(value * (int64_t)tb_num, tb_den);
-    }
-    double s = seconds >= 0.0 ? seconds : fallback_seconds;
-    return CMTimeMakeWithSeconds(s, 90000);
+// Ticks of a custom packet as a CMTime. The packet's own time base comes
+// first, then the encoded stream's (or the inverse frame rate); a rate with no
+// exact time base converts through seconds. Invalid for a negative tick.
+static CMTime avb_packet_ticks(int64_t value,
+                               const avb_encoded_packet &packet,
+                               int32_t stream_tb_num, int32_t stream_tb_den,
+                               double frame_rate) {
+    if (value < 0) return kCMTimeInvalid;
+    if (packet.time_base_num > 0 && packet.time_base_den > 0)
+        return CMTimeMake(value * (int64_t)packet.time_base_num, packet.time_base_den);
+    if (stream_tb_num > 0 && stream_tb_den > 0)
+        return CMTimeMake(value * (int64_t)stream_tb_num, stream_tb_den);
+    return CMTimeMakeWithSeconds((double)value / frame_rate, 90000);
 }
 
 avb_result AvbEncoderAVFoundation::write_custom_video_packet(
@@ -507,21 +650,24 @@ avb_result AvbEncoderAVFoundation::write_custom_video_packet(
         }
         CMBlockBufferReplaceDataBytes(packet.data, block, 0, (size_t)packet.size);
 
-        double fallback_dur = 1.0 / m_impl->frame_rate;
-        CMTime pts = avb_packet_time(packet.pts, packet.pts_sec,
-                                     packet.time_base_num, packet.time_base_den,
-                                     fallback_pts);
-        CMTime dts = avb_packet_time(packet.dts, -1.0,
-                                     packet.time_base_num, packet.time_base_den,
-                                     CMTimeGetSeconds(pts));
-        CMTime dur = packet.duration >= 0 &&
-                     packet.time_base_num > 0 &&
-                     packet.time_base_den > 0
-            ? CMTimeMake(packet.duration * (int64_t)packet.time_base_num,
-                         packet.time_base_den)
-            : CMTimeMakeWithSeconds(packet.duration_sec > 0.0
-                                    ? packet.duration_sec : fallback_dur,
-                                    90000);
+        // Ticks, then seconds, then the caller's fallback; DTS falls back to
+        // PTS and the duration to one frame interval.
+        auto ticks = [&](int64_t value) {
+            return avb_packet_ticks(value, packet, m_impl->custom_tb_num,
+                                    m_impl->custom_tb_den, m_impl->frame_rate);
+        };
+        CMTime pts = ticks(packet.pts);
+        if (!CMTIME_IS_VALID(pts))
+            pts = CMTimeMakeWithSeconds(
+                packet.pts_sec >= 0.0 ? packet.pts_sec : fallback_pts, 90000);
+        CMTime dts = ticks(packet.dts);
+        if (!CMTIME_IS_VALID(dts)) dts = pts;
+        CMTime dur = ticks(packet.duration);
+        if (!CMTIME_IS_VALID(dur))
+            dur = CMTimeMakeWithSeconds(packet.duration_sec > 0.0
+                                        ? packet.duration_sec
+                                        : 1.0 / m_impl->frame_rate,
+                                        90000);
         CMSampleTimingInfo timing = { dur, pts, dts };
         size_t sample_size = (size_t)packet.size;
         CMSampleBufferRef sb = NULL;
@@ -551,7 +697,7 @@ avb_result AvbEncoderAVFoundation::write_custom_video_packet(
     }
 }
 
-avb_result AvbEncoderAVFoundation::write_video(const avb_video_frame &frame, double pts_sec) {
+avb_result AvbEncoderAVFoundation::write_video_impl(const avb_video_frame &frame, double pts_sec) {
     if (!m_impl->has_video) return AVB_ERROR_INVALID_ARGUMENT;
     if (m_impl->custom_video) {
         avb_encoded_packet packet{};
@@ -618,7 +764,7 @@ avb_result AvbEncoderAVFoundation::write_video(const avb_video_frame &frame, dou
     }
 }
 
-avb_result AvbEncoderAVFoundation::write_audio_f32(const float *src_interleaved, int frames) {
+avb_result AvbEncoderAVFoundation::write_audio_impl(const float *src_interleaved, int frames) {
     if (!m_impl->has_audio) return AVB_ERROR_INVALID_ARGUMENT;
 
     @autoreleasepool {
@@ -655,7 +801,7 @@ avb_result AvbEncoderAVFoundation::write_audio_f32(const float *src_interleaved,
     }
 }
 
-avb_result AvbEncoderAVFoundation::finish() {
+avb_result AvbEncoderAVFoundation::finish_impl() {
     if (!m_impl->writer) return AVB_ERROR_INVALID_ARGUMENT;
     if (m_impl->finished) return AVB_OK;
 

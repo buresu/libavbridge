@@ -1,7 +1,9 @@
-// AVFoundation-specific CVPixelBuffer and frame-lease contract, and the
-// hardware policy contract for frames copied out to CPU memory.
+// AVFoundation-specific CVPixelBuffer and frame-lease contract, the hardware
+// policy contract for frames copied out to CPU memory, read failures, and AAC
+// settings AVAssetWriter is particular about.
 //
 // Usage: avb_platform_avfoundation <fixture.mp4>
+//            [<faststart fixture.mp4> <scratch dir>]
 
 #include "cpu_decode.hpp"
 #include "test.hpp"
@@ -15,6 +17,10 @@
 #include <array>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <iterator>
+#include <string>
+#include <sys/stat.h>
 #include <vector>
 
 namespace {
@@ -192,6 +198,99 @@ void check_cpu_frames(Context &test, const char *path) {
   std::printf("AVFoundation CPU frame contract passed (VideoToolbox)\n");
 }
 
+// A file cut short after its index: the reader fails partway through, and that
+// must reach the caller as a failure rather than an early end of stream.
+void check_read_failure(Context &test, const char *faststart,
+                        const std::string &scratch) {
+  std::ifstream in(faststart, std::ios::binary);
+  std::vector<char> bytes((std::istreambuf_iterator<char>(in)),
+                          std::istreambuf_iterator<char>());
+  test.check(bytes.size() > 1024, "faststart fixture is readable");
+  if (bytes.size() <= 1024)
+    return;
+  const std::string truncated = scratch + "/truncated.mp4";
+  std::ofstream(truncated, std::ios::binary)
+      .write(bytes.data(), static_cast<std::streamsize>(bytes.size() * 6 / 10));
+
+  avb_decode_options options = avb_decode_options_default();
+  options.backend = AVB_BACKEND_AVFOUNDATION;
+  avb_decoder *decoder = nullptr;
+  test.equal(avb_decoder_open(&decoder, truncated.c_str(), &options), AVB_OK,
+             "a file cut short after its index opens");
+  avb_result result = AVB_OK;
+  int frames = 0;
+  std::vector<float> samples(1024 * 2);
+  avb_video_frame frame{};
+  while ((result = avb_decoder_read_video_frame(decoder, &frame)) == AVB_OK) {
+    ++frames;
+    avb_decoder_release_video_frame(decoder, &frame);
+    avb_decoder_read_audio_f32(decoder, samples.data(), 1024, nullptr);
+  }
+  test.check(frames > 0, "frames before the cut decode");
+  test.equal(result, AVB_ERROR_DECODE_FAILED,
+             "a video read past the cut fails instead of reaching EOF");
+  test.check(avb_decoder_get_last_error(decoder) != nullptr,
+             "the failed read has a diagnostic");
+  while (avb_decoder_read_audio_f32(decoder, samples.data(), 1024, nullptr) > 0) {
+  }
+  test.equal(avb_decoder_audio_at_eof(decoder), 0,
+             "an audio read past the cut is not end of stream");
+
+  test.equal(avb_decoder_seek(decoder, 0.0, nullptr), AVB_OK,
+             "the decoder seeks after a failed read");
+  test.check(avb_decoder_get_last_error(decoder) == nullptr,
+             "a successful seek clears the read failure");
+  test.equal(avb_decoder_read_video_frame(decoder, &frame), AVB_OK,
+             "video decodes again after the seek");
+  avb_decoder_release_video_frame(decoder, &frame);
+  avb_decoder_close(decoder);
+}
+
+// AAC settings AVAssetWriter rejects unless given just so: more than two
+// channels need a layout (it raises without one), and a low rate needs the
+// encoder to pick the bitrate.
+void check_aac(Context &test, const std::string &scratch) {
+  for (const auto &shape : {std::array<int, 2>{48000, 6},
+                            std::array<int, 2>{8000, 1}}) {
+    const int rate = shape[0], channels = shape[1];
+    const std::string path = scratch + "/aac_" + std::to_string(rate) + "_" +
+                             std::to_string(channels) + ".m4a";
+    avb_encode_options options = avb_encode_options_default();
+    options.backend = AVB_BACKEND_AVFOUNDATION;
+    options.audio.enable = 1;
+    options.audio.sample_rate = rate;
+    options.audio.channels = channels;
+    avb_encoder *encoder = nullptr;
+    avb_result result = avb_encoder_open(&encoder, path.c_str(), &options);
+    std::vector<float> samples(static_cast<size_t>(rate) * channels, 0.25f);
+    if (result == AVB_OK)
+      result = avb_encoder_write_audio_f32(encoder, samples.data(), rate);
+    if (result == AVB_OK)
+      result = avb_encoder_finish(encoder);
+    if (result != AVB_OK)
+      std::fprintf(stderr, "%d Hz x%d: %s\n", rate, channels,
+                   avb_encoder_get_last_error(encoder)
+                       ? avb_encoder_get_last_error(encoder) : "(none)");
+    test.equal(result, AVB_OK,
+               channels > 2 ? "multichannel AAC encodes"
+                            : "low-rate AAC encodes at the default bitrate");
+    avb_encoder_close(encoder);
+  }
+
+  avb_encode_options options = avb_encode_options_default();
+  options.backend = AVB_BACKEND_AVFOUNDATION;
+  options.audio.enable = 1;
+  options.audio.sample_rate = 48000;
+  options.audio.channels = 9;
+  avb_encoder *encoder = nullptr;
+  const std::string path = scratch + "/aac_9.m4a";
+  test.check(avb_encoder_open(&encoder, path.c_str(), &options) != AVB_OK,
+             "AAC beyond eight channels is refused, not raised");
+  test.check(avb_encoder_get_last_error(encoder) != nullptr,
+             "the refused channel count has a diagnostic");
+  avb_encoder_close(encoder);
+}
+
 } // namespace
 
 int main(int argc, char *argv[]) {
@@ -223,6 +322,19 @@ int main(int argc, char *argv[]) {
   test.section("AVFoundation hardware policy for CPU frames");
   check_cpu_frames(test, argv[1]);
 
+  if (argc >= 4) {
+    const std::string scratch = argv[3];
+    mkdir(scratch.c_str(), 0755);
+    test.section("AVFoundation read failures");
+    check_read_failure(test, argv[2], scratch);
+    test.section("AVFoundation AAC settings");
+    check_aac(test, scratch);
+  }
+
+  // External frames name their decoder the way CPU frames do.
+  const avb_hardware_device decoded_by =
+      decode_cpu(argv[1], AVB_BACKEND_AVFOUNDATION, AVB_HARDWARE_PREFER).device;
+
   test.section("AVFoundation CVPixelBuffer frames");
   avb_decode_options options = avb_decode_options_default();
   options.backend = AVB_BACKEND_AVFOUNDATION;
@@ -252,8 +364,8 @@ int main(int argc, char *argv[]) {
                "AVFoundation frame uses external memory");
     test.equal(frame.external_type, AVB_VIDEO_EXTERNAL_CVPIXEL_BUFFER,
                "AVFoundation frame is a CVPixelBuffer");
-    test.equal(frame.hardware_device, AVB_HW_DEVICE_VIDEOTOOLBOX,
-               "CVPixelBuffer frame reports VideoToolbox");
+    test.equal(frame.hardware_device, decoded_by,
+               "CVPixelBuffer frame names the decoder a CPU frame does");
     test.check(frame.native_handle != nullptr,
                "CVPixelBuffer frame has a native handle");
     test.check(frame.native_owner != nullptr,

@@ -3,6 +3,7 @@
 #include <vector>
 
 namespace {
+avb_backend g_backend = AVB_BACKEND_GSTREAMER;
 int plugin_stream = -1;
 int plugin_width = 0;
 int packet_stream = -1;
@@ -37,7 +38,7 @@ void check_selection(avb::test::Context &test, const char *path, bool custom,
     std::printf("selection: custom=%d audio=%d track=%d\n", custom, audio, track);
     std::fflush(stdout);
     avb_decode_options options = avb_decode_options_default();
-    options.backend = AVB_BACKEND_GSTREAMER;
+    options.backend = g_backend;
     options.hardware_policy = AVB_HARDWARE_DISABLED;
     options.enable_audio = audio;
     options.video_stream_index = track;
@@ -91,7 +92,8 @@ void check_selection(avb::test::Context &test, const char *path, bool custom,
 } // namespace
 
 int main(int argc, char **argv) {
-    if (argc != 2) return 2;
+    // Backends whose stream indices are per-media-type track numbers.
+    if (argc != 3 || !avb::test::parse_backend(argv[2], g_backend)) return 2;
     avb::test::Context test;
     avb_video_decoder_plugin plugin{};
     plugin.struct_size = sizeof(plugin);
@@ -107,7 +109,7 @@ int main(int argc, char **argv) {
             for (int track : {0, 1}) check_selection(test, argv[1], custom, audio, track);
         for (bool audio : {false, true}) {
             avb_decode_options options = avb_decode_options_default();
-            options.backend = AVB_BACKEND_GSTREAMER;
+            options.backend = g_backend;
             options.hardware_policy = AVB_HARDWARE_DISABLED;
             options.video_format = custom ? AVB_PIXEL_FORMAT_BC1_RGBA : AVB_PIXEL_FORMAT_BGRA8;
             if (audio) options.audio_stream_index = 999;

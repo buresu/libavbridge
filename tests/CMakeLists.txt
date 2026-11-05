@@ -53,8 +53,10 @@ endif()
 if(AVB_ENABLE_FFMPEG AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
     avb_add_test_binary(avb_ffmpeg_read_errors platform/ffmpeg_read_errors.cpp)
 endif()
-if(AVB_ENABLE_GSTREAMER)
+if(AVB_ENABLE_GSTREAMER OR AVB_ENABLE_AVFOUNDATION)
     avb_add_test_binary(avb_stream_selection conformance/stream_selection.cpp)
+endif()
+if(AVB_ENABLE_GSTREAMER)
     avb_add_test_binary(avb_gstreamer_errors platform/gstreamer_errors.cpp)
     target_include_directories(avb_gstreamer_errors PRIVATE ${GST_INCLUDE_DIRS})
     target_link_directories(avb_gstreamer_errors PRIVATE ${GST_LIBRARY_DIRS})
@@ -180,7 +182,7 @@ if(FFMPEG_EXECUTABLE)
         VERBATIM)
     add_custom_target(avb_audio_fixture DEPENDS "${AVB_AUDIO_FIXTURE}")
     add_dependencies(avb_audio_resample avb_audio_fixture)
-    if(AVB_ENABLE_GSTREAMER)
+    if(TARGET avb_stream_selection)
         set(AVB_TRACK_FIXTURE "${AVB_OUT}/multitrack.mp4")
         add_custom_command(
             OUTPUT "${AVB_TRACK_FIXTURE}"
@@ -196,8 +198,14 @@ if(FFMPEG_EXECUTABLE)
             VERBATIM)
         add_custom_target(avb_track_fixture DEPENDS "${AVB_TRACK_FIXTURE}")
         add_dependencies(avb_stream_selection avb_track_fixture)
-        avb_add_ctest(stream_selection_gstreamer avb_stream_selection
-            "conformance;decode;backend-gstreamer" "${AVB_TRACK_FIXTURE}")
+        # Backends that number each media type's tracks from zero.
+        foreach(be gstreamer avfoundation)
+            string(TOUPPER "${be}" _be_upper)
+            if(AVB_ENABLE_${_be_upper})
+                avb_add_ctest(stream_selection_${be} avb_stream_selection
+                    "conformance;decode;backend-${be}" "${AVB_TRACK_FIXTURE}" ${be})
+            endif()
+        endforeach()
     endif()
     set(AVB_MF_RUNTIME_CODEC_ARGS)
     if(WIN32 AND AVB_ENABLE_MEDIAFOUNDATION)
@@ -259,7 +267,8 @@ if(FFMPEG_EXECUTABLE)
     list(APPEND _avb_backends ${_avb_explicit_backends})
 
     foreach(be ${_avb_backends})
-        if(be STREQUAL "ffmpeg" OR be STREQUAL "mediafoundation")
+        if(be STREQUAL "ffmpeg" OR be STREQUAL "mediafoundation" OR
+           be STREQUAL "avfoundation")
             avb_add_ctest(
                 audio_resample_${be} avb_audio_resample
                 "conformance;decode;audio;backend-${be}"
@@ -285,7 +294,8 @@ if(FFMPEG_EXECUTABLE)
     endforeach()
 
     foreach(be ${_avb_explicit_backends})
-        if(be STREQUAL "ffmpeg" OR be STREQUAL "gstreamer")
+        if(be STREQUAL "ffmpeg" OR be STREQUAL "gstreamer" OR
+           be STREQUAL "avfoundation")
             avb_add_ctest(odd_dimensions_${be} avb_odd_dimensions
                 "conformance;decode;backend-${be}" "${AVB_ODD_FIXTURE}" ${be})
         endif()
@@ -309,7 +319,8 @@ if(FFMPEG_EXECUTABLE)
             "integration;plugin;encode;backend-${be}"
             "${AVB_OUT}/custom_encoder_${be}.${_custom_extension}"
             ${be})
-        if(FFPROBE_EXECUTABLE AND (be STREQUAL "ffmpeg" OR be STREQUAL "gstreamer" OR be STREQUAL "mediafoundation"))
+        if(FFPROBE_EXECUTABLE AND (be STREQUAL "ffmpeg" OR be STREQUAL "gstreamer" OR
+                                   be STREQUAL "mediafoundation" OR be STREQUAL "avfoundation"))
             avb_add_ctest(
                 custom_encoder_timestamps_${be} ${CMAKE_COMMAND}
                 "integration;plugin;encode;backend-${be}"
@@ -432,11 +443,23 @@ if(FFMPEG_EXECUTABLE)
     endif()
 
     if(AVB_ENABLE_AVFOUNDATION)
+        # Index first, so a copy cut short still opens and then fails mid-read.
+        set(AVB_AVF_FASTSTART_FIXTURE "${AVB_OUT}/avfoundation_faststart.mp4")
+        add_custom_command(OUTPUT "${AVB_AVF_FASTSTART_FIXTURE}"
+            DEPENDS "${AVB_FIXTURE}"
+            COMMAND ${FFMPEG_EXECUTABLE} -y -loglevel error -i "${AVB_FIXTURE}"
+                    -c copy -movflags +faststart "${AVB_AVF_FASTSTART_FIXTURE}"
+            VERBATIM)
+        add_custom_target(avb_avf_faststart_fixture
+            DEPENDS "${AVB_AVF_FASTSTART_FIXTURE}")
+        add_dependencies(avb_avf_faststart_fixture avb_conformance_fixture)
+        add_dependencies(avb_platform_avfoundation avb_avf_faststart_fixture)
         avb_add_ctest(
             platform_avfoundation
             avb_platform_avfoundation
             "platform;hardware;native;backend-avfoundation"
-            "${AVB_FIXTURE}")
+            "${AVB_FIXTURE}" "${AVB_AVF_FASTSTART_FIXTURE}"
+            "${AVB_OUT}/platform_avfoundation_scratch")
         avb_add_ctest(
             native_roundtrip_avfoundation
             avb_video_memory_roundtrip

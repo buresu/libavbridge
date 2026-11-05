@@ -1,16 +1,34 @@
 #include "avb_decoder_avfoundation.hh"
+#include "avb_plane_layout.hpp"
 #include "avb_video_plugins.hpp"
 
 #ifdef __APPLE__
 
 #import <AVFoundation/AVFoundation.h>
+#import <AudioToolbox/AudioToolbox.h>
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
 #import <Foundation/Foundation.h>
 #import <VideoToolbox/VideoToolbox.h>
 
+#include <algorithm>
 #include <cstring>
+#include <functional>
 #include <vector>
+
+// Run an AVFoundation call sequence, turning an Objective-C exception into an
+// error result instead of letting it unwind through the C API.
+template <class Fn>
+static avb_result avb_objc_guard(std::string &error, avb_result failure, Fn &&fn) {
+    @try {
+        return fn();
+    } @catch (NSException *e) {
+        const char *reason = e.reason.UTF8String;
+        error = std::string("AVFoundation raised an exception: ") +
+                (reason ? reason : e.name.UTF8String);
+        return failure;
+    }
+}
 
 // Synchronously load the tracks of a given media type. AVFoundation deprecated
 // the synchronous -tracksWithMediaType: accessor in macOS 15 in favour of the
@@ -143,6 +161,32 @@ static FourCharCode avb_track_codec(AVAssetTrack *track) {
     return CMFormatDescriptionGetMediaSubType(fmt);
 }
 
+// The codec configuration record a track's sample description carries (avcC,
+// hvcC, ...): what FFmpeg calls extradata. Empty when there is none.
+static std::vector<unsigned char> avb_track_extradata(AVAssetTrack *track) {
+    std::vector<unsigned char> out;
+    NSArray *formats = track.formatDescriptions;
+    if (formats.count == 0) return out;
+    CMFormatDescriptionRef fmt = (__bridge CMFormatDescriptionRef)formats[0];
+    NSDictionary *atoms = (__bridge NSDictionary *)CMFormatDescriptionGetExtension(
+        fmt, kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms);
+    if (![atoms isKindOfClass:[NSDictionary class]]) return out;
+
+    id record = nil;
+    for (NSString *name in @[ @"avcC", @"hvcC", @"av1C", @"vpcC", @"glbl" ]) {
+        record = atoms[name];
+        if (record) break;
+    }
+    // A codec this backend does not name: the record is the only atom there.
+    if (!record && atoms.count == 1) record = atoms.allValues.firstObject;
+    if ([record isKindOfClass:[NSArray class]]) record = [record firstObject];
+    if (![record isKindOfClass:[NSData class]]) return out;
+    NSData *data = record;
+    const auto *bytes = static_cast<const unsigned char *>(data.bytes);
+    out.assign(bytes, bytes + data.length);
+    return out;
+}
+
 // Whether VideoToolbox decodes this track on hardware. AVAssetReader builds the
 // decompression session itself and exposes neither the session nor a switch
 // for it (decoder specification keys handed in through
@@ -212,13 +256,30 @@ static uint32_t avb_bswap32(uint32_t v) {
            ((v & 0xff000000u) >> 24);
 }
 
+// Interleaved float32 PCM at `rate` with `channels` channels.
+static AudioStreamBasicDescription avb_float_asbd(double rate, int channels) {
+    AudioStreamBasicDescription asbd{};
+    asbd.mSampleRate       = rate;
+    asbd.mFormatID         = kAudioFormatLinearPCM;
+    asbd.mFormatFlags      = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
+    asbd.mChannelsPerFrame = (UInt32)channels;
+    asbd.mBitsPerChannel   = 32;
+    asbd.mBytesPerFrame    = (UInt32)channels * sizeof(float);
+    asbd.mFramesPerPacket  = 1;
+    asbd.mBytesPerPacket   = asbd.mBytesPerFrame;
+    return asbd;
+}
+
 struct AvbDecoderAVFoundation::Impl {
     AVAsset *asset = nil;
     AVAssetReader *reader = nil;
+    AVAssetTrack *audio_track = nil;
+    AVAssetTrack *video_track = nil;
     AVAssetReaderTrackOutput *audio_output = nil;
     AVAssetReaderTrackOutput *video_output = nil;
     const avb_video_decoder_plugin *custom_video_decoder = nullptr;
     void *custom_video_ctx = nullptr;
+    std::vector<unsigned char> video_extradata;
 
     int audio_stream_idx = -1;
     int video_stream_idx = -1;
@@ -236,6 +297,9 @@ struct AvbDecoderAVFoundation::Impl {
     OSType cv_pixel_format          = kCVPixelFormatType_32BGRA;
     avb_pixel_format video_avb_fmt  = AVB_PIXEL_FORMAT_BGRA8;
     bool swizzle_rgba               = false; // request BGRA, emit RGBA
+    // CPU I420 is read as NV12 and split here: CoreVideo's conversion to
+    // planar 4:2:0 leaves the last row of an odd-height picture unwritten.
+    bool split_nv12_to_i420         = false;
     avb_video_memory_type video_memory = AVB_VIDEO_MEMORY_CPU;
     // What decodes the video: VIDEOTOOLBOX for its hardware decoder, AUTO for
     // software. Asking costs about as much as the rest of an open, so the
@@ -268,9 +332,35 @@ struct AvbDecoderAVFoundation::Impl {
     std::vector<float> audio_buf;
     int audio_buf_pos = 0;
     double audio_buf_start_pts = -1.0;
+    bool audio_failed = false;
     bool end_of_stream = false;
 
+    // Rate conversion runs here rather than in AVAssetReader, whose resampler
+    // drops the tail it still holds at the end of the stream. The reader
+    // delivers the source rate; AudioConverter flushes everything it holds.
+    AudioConverterRef resampler = nullptr;
+    std::vector<float> resample_src;   // the reader block being consumed
+    size_t resample_src_pos = 0;       // in frames
+    double resample_start_pts = -1.0;  // source time of the first output frame
+    int64_t resampled_frames = 0;      // output frames since start_pts
+    bool resample_input_done = false;  // the reader has nothing more
+    bool resample_drained = false;     // the converter has flushed its tail
+
+    void reset_resampler() {
+        if (resampler) AudioConverterReset(resampler);
+        resample_src.clear();
+        resample_src_pos = 0;
+        resample_start_pts = -1.0;
+        resampled_frames = 0;
+        resample_input_done = false;
+        resample_drained = false;
+    }
+
     std::vector<unsigned char> video_frame_buf;
+
+    ~Impl() {
+        if (resampler) AudioConverterDispose(resampler);
+    }
 };
 
 AvbDecoderAVFoundation::AvbDecoderAVFoundation() {
@@ -296,6 +386,26 @@ const char *AvbDecoderAVFoundation::get_last_error() const {
     return m_last_error.empty() ? nullptr : m_last_error.c_str();
 }
 
+bool AvbDecoderAVFoundation::audio_read_failed() const {
+    return m_impl && m_impl->audio_failed;
+}
+
+bool AvbDecoderAVFoundation::reader_failed() {
+    AVAssetReader *reader = m_impl->reader;
+    if (!reader || reader.status != AVAssetReaderStatusFailed) return false;
+    NSError *error = reader.error;
+    m_last_error = std::string("AVAssetReader failed: ") +
+        (error ? error.localizedDescription.UTF8String : "unknown error");
+    return true;
+}
+
+// Attach a track output to the reader, refusing one it would raise on.
+static bool avb_add_output(AVAssetReader *reader, AVAssetReaderTrackOutput *output) {
+    if (![reader canAddOutput:output]) return false;
+    [reader addOutput:output];
+    return true;
+}
+
 avb_result AvbDecoderAVFoundation::open_custom_video_decoder(
     void *track_ptr,
     const avb_decode_options &options
@@ -313,12 +423,28 @@ avb_result AvbDecoderAVFoundation::open_custom_video_decoder(
     m_impl->video_codec_name = avb_fourcc_to_name(codec);
     stream.codec_name = m_impl->video_codec_name.empty()
         ? nullptr : m_impl->video_codec_name.c_str();
+    m_impl->video_extradata = avb_track_extradata(track);
+    if (!m_impl->video_extradata.empty()) {
+        stream.extradata = m_impl->video_extradata.data();
+        stream.extradata_size = (int)m_impl->video_extradata.size();
+    }
+    // Packets count in the track's media timescale.
+    const CMTimeScale timescale = track.naturalTimeScale;
     stream.time_base_num = 1;
-    stream.time_base_den = 600;
+    stream.time_base_den = timescale > 0 ? timescale : 600;
 
     const avb_video_decoder_plugin *plugin =
         avb_find_video_decoder_plugin(stream, options);
     if (!plugin) return AVB_ERROR_STREAM_NOT_FOUND;
+
+    AVAssetReaderTrackOutput *output = [AVAssetReaderTrackOutput
+        assetReaderTrackOutputWithTrack:track
+        outputSettings:nil];
+    output.alwaysCopiesSampleData = NO;
+    if (![m_impl->reader canAddOutput:output]) {
+        m_last_error = "AVAssetReader cannot read the video track's samples.";
+        return AVB_ERROR_OPEN_FAILED;
+    }
 
     void *ctx = nullptr;
     avb_result res = plugin->open(&ctx, &stream, &options);
@@ -327,17 +453,19 @@ avb_result AvbDecoderAVFoundation::open_custom_video_decoder(
         return res;
     }
 
-    m_impl->video_output = [AVAssetReaderTrackOutput
-        assetReaderTrackOutputWithTrack:track
-        outputSettings:nil];
-    m_impl->video_output.alwaysCopiesSampleData = YES;
-    [m_impl->reader addOutput:m_impl->video_output];
+    [m_impl->reader addOutput:output];
+    m_impl->video_output = output;
     m_impl->custom_video_decoder = plugin;
     m_impl->custom_video_ctx = ctx;
     return AVB_OK;
 }
 
 avb_result AvbDecoderAVFoundation::open_file(const char *path, const avb_decode_options &options) {
+    return avb_objc_guard(m_last_error, AVB_ERROR_OPEN_FAILED,
+                          [&] { return open_file_impl(path, options); });
+}
+
+avb_result AvbDecoderAVFoundation::open_file_impl(const char *path, const avb_decode_options &options) {
     @autoreleasepool {
         // CPU frames are copied out plane-by-plane; EXTERNAL hands back the
         // decoder's IOSurface-backed CVPixelBuffer (zero-copy, VideoToolbox).
@@ -361,7 +489,9 @@ avb_result AvbDecoderAVFoundation::open_file(const char *path, const avb_decode_
         NSError *error = nil;
         m_impl->reader = [AVAssetReader assetReaderWithAsset:m_impl->asset error:&error];
         if (!m_impl->reader || error) {
-            m_last_error = "AVAssetReader creation failed.";
+            m_last_error = std::string("AVAssetReader creation failed") +
+                (error ? std::string(": ") + error.localizedDescription.UTF8String
+                       : std::string("."));
             return AVB_ERROR_OPEN_FAILED;
         }
 
@@ -372,24 +502,21 @@ avb_result AvbDecoderAVFoundation::open_file(const char *path, const avb_decode_
         // Audio track. options.audio_stream_index selects the Nth audio track
         // (0-based); -1 picks the first. (Stream indices are necessarily
         // backend-specific; AVFoundation has no file-wide stream numbering.)
+        // A track asked for by index must exist.
         if (options.enable_audio) {
             NSArray<AVAssetTrack *> *audio_tracks =
                 avb_load_tracks(m_impl->asset, AVMediaTypeAudio);
             m_impl->audio_track_count = (int)audio_tracks.count;
             int idx = options.audio_stream_index >= 0 ? options.audio_stream_index : 0;
+            if (options.audio_stream_index >= 0 && idx >= (int)audio_tracks.count) {
+                m_last_error = "The requested audio track does not exist.";
+                return AVB_ERROR_STREAM_NOT_FOUND;
+            }
             if (idx < (int)audio_tracks.count) {
                 AVAssetTrack *track = audio_tracks[idx];
 
                 m_impl->req_sample_rate = options.audio_sample_rate;
                 m_impl->req_channels    = options.audio_channels;
-
-                m_impl->audio_output = [AVAssetReaderTrackOutput
-                    assetReaderTrackOutputWithTrack:track
-                    outputSettings:avb_audio_settings(m_impl->req_sample_rate,
-                                                      m_impl->req_channels)];
-                m_impl->audio_output.alwaysCopiesSampleData = NO;
-                [m_impl->reader addOutput:m_impl->audio_output];
-                m_impl->audio_stream_idx = idx;
 
                 // Effective output format: requested override, else source value.
                 int src_rate = 0, src_ch = 0;
@@ -406,6 +533,47 @@ avb_result AvbDecoderAVFoundation::open_file(const char *path, const avb_decode_
                 }
                 m_impl->sample_rate = m_impl->req_sample_rate > 0 ? m_impl->req_sample_rate : src_rate;
                 m_impl->channels    = m_impl->req_channels    > 0 ? m_impl->req_channels    : src_ch;
+
+                // A rate change is ours to make when the source rate is known
+                // (see Impl::resampler); the reader still remixes channels.
+                int reader_rate = m_impl->req_sample_rate;
+                if (m_impl->req_sample_rate > 0 && src_rate > 0 &&
+                    m_impl->channels > 0) {
+                    reader_rate = 0;
+                    if (m_impl->req_sample_rate != src_rate) {
+                        AudioStreamBasicDescription in =
+                            avb_float_asbd(src_rate, m_impl->channels);
+                        AudioStreamBasicDescription out =
+                            avb_float_asbd(m_impl->req_sample_rate, m_impl->channels);
+                        if (AudioConverterNew(&in, &out, &m_impl->resampler) != noErr) {
+                            m_last_error = "AudioConverter creation for resampling failed.";
+                            return AVB_ERROR_OPEN_FAILED;
+                        }
+                        UInt32 quality = kAudioConverterQuality_High;
+                        AudioConverterSetProperty(
+                            m_impl->resampler,
+                            kAudioConverterSampleRateConverterQuality,
+                            sizeof(quality), &quality);
+                        // Zero latency: output starts with the first input
+                        // sample, so its timestamps are the source's.
+                        UInt32 prime = kConverterPrimeMethod_Normal;
+                        AudioConverterSetProperty(
+                            m_impl->resampler, kAudioConverterPrimeMethod,
+                            sizeof(prime), &prime);
+                    }
+                }
+
+                m_impl->audio_output = [AVAssetReaderTrackOutput
+                    assetReaderTrackOutputWithTrack:track
+                    outputSettings:avb_audio_settings(reader_rate,
+                                                      m_impl->req_channels)];
+                m_impl->audio_output.alwaysCopiesSampleData = NO;
+                if (!avb_add_output(m_impl->reader, m_impl->audio_output)) {
+                    m_last_error = "AVAssetReader cannot decode the audio track.";
+                    return AVB_ERROR_OPEN_FAILED;
+                }
+                m_impl->audio_track = track;
+                m_impl->audio_stream_idx = idx;
                 m_impl->audio_codec_name = avb_fourcc_to_name(avb_track_codec(track));
             }
         }
@@ -415,9 +583,14 @@ avb_result AvbDecoderAVFoundation::open_file(const char *path, const avb_decode_
             NSArray<AVAssetTrack *> *video_tracks =
                 avb_load_tracks(m_impl->asset, AVMediaTypeVideo);
             int idx = options.video_stream_index >= 0 ? options.video_stream_index : 0;
+            if (options.video_stream_index >= 0 && idx >= (int)video_tracks.count) {
+                m_last_error = "The requested video track does not exist.";
+                return AVB_ERROR_STREAM_NOT_FOUND;
+            }
             if (idx < (int)video_tracks.count) {
                 AVAssetTrack *track = video_tracks[idx];
                 m_impl->video_stream_idx = idx;
+                m_impl->video_track = track;
 
                 CGSize size = track.naturalSize;
                 m_impl->width  = (int)size.width;
@@ -453,8 +626,11 @@ avb_result AvbDecoderAVFoundation::open_file(const char *path, const avb_decode_
                     avb_pixel_format want = options.video_format;
                     if (want == AVB_PIXEL_FORMAT_UNKNOWN)
                         want = external ? AVB_PIXEL_FORMAT_NV12 : AVB_PIXEL_FORMAT_BGRA8;
-                    m_impl->cv_pixel_format = avb_cvpixfmt(want);
                     m_impl->video_avb_fmt = want;
+                    m_impl->split_nv12_to_i420 =
+                        !external && want == AVB_PIXEL_FORMAT_I420;
+                    m_impl->cv_pixel_format = avb_cvpixfmt(
+                        m_impl->split_nv12_to_i420 ? AVB_PIXEL_FORMAT_NV12 : want);
                     // RGBA is emulated by swizzling a BGRA CPU copy, which is not
                     // possible for a zero-copy external buffer.
                     m_impl->swizzle_rgba = !external &&
@@ -465,7 +641,11 @@ avb_result AvbDecoderAVFoundation::open_file(const char *path, const avb_decode_
                         outputSettings:avb_video_settings(m_impl->cv_pixel_format,
                                                           external)];
                     m_impl->video_output.alwaysCopiesSampleData = NO;
-                    [m_impl->reader addOutput:m_impl->video_output];
+                    if (!avb_add_output(m_impl->reader, m_impl->video_output)) {
+                        m_impl->video_output = nil;
+                        m_last_error = "AVAssetReader cannot decode the video track.";
+                        return AVB_ERROR_OPEN_FAILED;
+                    }
                 }
             }
         }
@@ -476,7 +656,8 @@ avb_result AvbDecoderAVFoundation::open_file(const char *path, const avb_decode_
         }
 
         if (![m_impl->reader startReading]) {
-            m_last_error = "AVAssetReader startReading failed.";
+            if (!reader_failed())
+                m_last_error = "AVAssetReader startReading failed.";
             return AVB_ERROR_OPEN_FAILED;
         }
 
@@ -516,6 +697,11 @@ avb_result AvbDecoderAVFoundation::get_media_info(avb_media_info &out_info) {
 }
 
 avb_result AvbDecoderAVFoundation::seek(double seconds) {
+    return avb_objc_guard(m_last_error, AVB_ERROR_SEEK_FAILED,
+                          [&] { return seek_impl(seconds); });
+}
+
+avb_result AvbDecoderAVFoundation::seek_impl(double seconds) {
     if (!m_impl->reader) return AVB_ERROR_INVALID_ARGUMENT;
 
     // AVAssetReader does not support seeking directly — recreate it with a time range.
@@ -524,9 +710,12 @@ avb_result AvbDecoderAVFoundation::seek(double seconds) {
         m_impl->audio_buf.clear();
         m_impl->audio_buf_pos = 0;
         m_impl->audio_buf_start_pts = -1.0;
+        m_impl->reset_resampler();
 
         if (m_impl->duration_sec > 0.0 && seconds >= m_impl->duration_sec) {
             m_impl->end_of_stream = true;
+            m_impl->audio_failed = false;
+            m_last_error.clear();
             if (m_impl->custom_video_decoder && m_impl->custom_video_decoder->flush)
                 m_impl->custom_video_decoder->flush(m_impl->custom_video_ctx);
             return AVB_OK;
@@ -547,37 +736,42 @@ avb_result AvbDecoderAVFoundation::seek(double seconds) {
         m_impl->reader.timeRange = range;
 
         if (m_impl->audio_output) {
-            AVAssetTrack *track =
-                avb_load_tracks(m_impl->asset, AVMediaTypeAudio)[m_impl->audio_stream_idx];
             m_impl->audio_output = [AVAssetReaderTrackOutput
-                assetReaderTrackOutputWithTrack:track
-                outputSettings:avb_audio_settings(m_impl->req_sample_rate,
-                                                  m_impl->req_channels)];
+                assetReaderTrackOutputWithTrack:m_impl->audio_track
+                outputSettings:avb_audio_settings(
+                    m_impl->resampler ? 0 : m_impl->req_sample_rate,
+                    m_impl->req_channels)];
             m_impl->audio_output.alwaysCopiesSampleData = NO;
-            [m_impl->reader addOutput:m_impl->audio_output];
+            if (!avb_add_output(m_impl->reader, m_impl->audio_output)) {
+                m_last_error = "AVAssetReader cannot decode the audio track after seek.";
+                return AVB_ERROR_SEEK_FAILED;
+            }
         }
 
         if (m_impl->video_output) {
-            AVAssetTrack *track =
-                avb_load_tracks(m_impl->asset, AVMediaTypeVideo)[m_impl->video_stream_idx];
             NSDictionary *settings = nil;
             if (!m_impl->custom_video_decoder) {
                 bool external = m_impl->video_memory == AVB_VIDEO_MEMORY_EXTERNAL;
                 settings = avb_video_settings(m_impl->cv_pixel_format, external);
             }
             m_impl->video_output = [AVAssetReaderTrackOutput
-                assetReaderTrackOutputWithTrack:track
+                assetReaderTrackOutputWithTrack:m_impl->video_track
                 outputSettings:settings];
-            m_impl->video_output.alwaysCopiesSampleData =
-                m_impl->custom_video_decoder ? YES : NO;
-            [m_impl->reader addOutput:m_impl->video_output];
+            m_impl->video_output.alwaysCopiesSampleData = NO;
+            if (!avb_add_output(m_impl->reader, m_impl->video_output)) {
+                m_last_error = "AVAssetReader cannot decode the video track after seek.";
+                return AVB_ERROR_SEEK_FAILED;
+            }
         }
 
         if (![m_impl->reader startReading]) {
-            m_last_error = "AVAssetReader startReading failed after seek.";
+            if (!reader_failed())
+                m_last_error = "AVAssetReader startReading failed after seek.";
             return AVB_ERROR_SEEK_FAILED;
         }
 
+        m_impl->audio_failed = false;
+        m_last_error.clear();
         if (m_impl->custom_video_decoder && m_impl->custom_video_decoder->flush)
             m_impl->custom_video_decoder->flush(m_impl->custom_video_ctx);
     }
@@ -585,26 +779,138 @@ avb_result AvbDecoderAVFoundation::seek(double seconds) {
     return AVB_OK;
 }
 
-bool AvbDecoderAVFoundation::fill_audio_buffer() {
-    if (!m_impl->audio_output || !m_impl->audio_buf.empty()) return false;
+bool AvbDecoderAVFoundation::copy_reader_audio(std::vector<float> &out, double &pts) {
+    while (true) {
+        @autoreleasepool {
+            CMSampleBufferRef sample_buf = nullptr;
+            @try {
+                sample_buf = [m_impl->audio_output copyNextSampleBuffer];
+            } @catch (NSException *e) {
+                m_last_error = std::string("AVFoundation raised an exception: ") +
+                    (e.reason ? e.reason.UTF8String : e.name.UTF8String);
+                m_impl->audio_failed = true;
+                return false;
+            }
+            if (!sample_buf) {
+                if (reader_failed()) m_impl->audio_failed = true;
+                return false;
+            }
 
-    @autoreleasepool {
-        CMSampleBufferRef sample_buf =
-            [m_impl->audio_output copyNextSampleBuffer];
-        if (!sample_buf) return false;
-
-        CMTime pts = CMSampleBufferGetPresentationTimeStamp(sample_buf);
-        CMBlockBufferRef block = CMSampleBufferGetDataBuffer(sample_buf);
-        size_t len = CMBlockBufferGetDataLength(block);
-        size_t n_floats = len / sizeof(float);
-        m_impl->audio_buf.resize(n_floats);
-        m_impl->audio_buf_pos = 0;
-        m_impl->audio_buf_start_pts = CMTIME_IS_VALID(pts) ? CMTimeGetSeconds(pts) : -1.0;
-        CMBlockBufferCopyDataBytes(block, 0, len, m_impl->audio_buf.data());
-
-        CFRelease(sample_buf);
-        return true;
+            CMBlockBufferRef block = CMSampleBufferGetDataBuffer(sample_buf);
+            size_t len = block ? CMBlockBufferGetDataLength(block) : 0;
+            size_t n_floats = len / sizeof(float);
+            if (n_floats == 0) {
+                CFRelease(sample_buf);
+                continue;
+            }
+            CMTime t = CMSampleBufferGetPresentationTimeStamp(sample_buf);
+            pts = CMTIME_IS_VALID(t) ? CMTimeGetSeconds(t) : -1.0;
+            out.resize(n_floats);
+            CMBlockBufferCopyDataBytes(block, 0, n_floats * sizeof(float), out.data());
+            CFRelease(sample_buf);
+            return true;
+        }
     }
+}
+
+namespace {
+
+// AudioConverter input: hand over the rest of the current reader block, pulling
+// the next one when it is used up. Zero frames tells the converter the stream
+// ended, and it flushes the tail it holds.
+struct AvbResampleInput {
+    std::vector<float> *src;
+    size_t *pos;
+    double *start_pts;
+    bool *done;
+    int channels;
+    std::function<bool(std::vector<float> &, double &)> refill;
+};
+
+OSStatus avb_resample_input(AudioConverterRef, UInt32 *io_frames,
+                            AudioBufferList *io_data,
+                            AudioStreamPacketDescription **, void *user) {
+    auto *in = static_cast<AvbResampleInput *>(user);
+    const size_t ch = (size_t)in->channels;
+    if (*in->pos * ch >= in->src->size() && !*in->done) {
+        double pts = -1.0;
+        *in->pos = 0;
+        if (in->refill(*in->src, pts)) {
+            if (*in->start_pts < 0.0) *in->start_pts = pts;
+        } else {
+            in->src->clear();
+            *in->done = true;
+        }
+    }
+    const size_t available =
+        *in->done ? 0 : in->src->size() / ch - *in->pos;
+    const size_t frames = std::min<size_t>(*io_frames, available);
+    io_data->mNumberBuffers = 1;
+    io_data->mBuffers[0].mNumberChannels = (UInt32)ch;
+    io_data->mBuffers[0].mDataByteSize = (UInt32)(frames * ch * sizeof(float));
+    io_data->mBuffers[0].mData =
+        frames ? in->src->data() + *in->pos * ch : nullptr;
+    *in->pos += frames;
+    *io_frames = (UInt32)frames;
+    return noErr;
+}
+
+} // namespace
+
+bool AvbDecoderAVFoundation::fill_resampled_audio() {
+    if (m_impl->resample_drained) return false;
+    const int ch = m_impl->channels;
+    const UInt32 capacity = 4096;
+    m_impl->audio_buf.resize((size_t)capacity * ch);
+
+    AvbResampleInput input{
+        &m_impl->resample_src, &m_impl->resample_src_pos,
+        &m_impl->resample_start_pts, &m_impl->resample_input_done, ch,
+        [this](std::vector<float> &out, double &pts) {
+            return copy_reader_audio(out, pts);
+        }};
+    AudioBufferList list{};
+    list.mNumberBuffers = 1;
+    list.mBuffers[0].mNumberChannels = (UInt32)ch;
+    list.mBuffers[0].mDataByteSize = capacity * ch * sizeof(float);
+    list.mBuffers[0].mData = m_impl->audio_buf.data();
+    UInt32 frames = capacity;
+    OSStatus st = AudioConverterFillComplexBuffer(
+        m_impl->resampler, avb_resample_input, &input, &frames, &list, nullptr);
+    if (st != noErr) {
+        m_last_error = "AudioConverter resampling failed.";
+        m_impl->audio_failed = true;
+        frames = 0;
+    }
+    if (frames == 0) {
+        m_impl->audio_buf.clear();
+        m_impl->resample_drained = true;
+        return false;
+    }
+
+    m_impl->audio_buf.resize((size_t)frames * ch);
+    m_impl->audio_buf_pos = 0;
+    m_impl->audio_buf_start_pts = m_impl->resample_start_pts < 0.0 ? -1.0
+        : m_impl->resample_start_pts +
+              (double)m_impl->resampled_frames / m_impl->sample_rate;
+    m_impl->resampled_frames += frames;
+    return true;
+}
+
+bool AvbDecoderAVFoundation::fill_audio_buffer() {
+    if (!m_impl->audio_output || !m_impl->audio_buf.empty() ||
+        m_impl->audio_failed || m_impl->channels <= 0)
+        return false;
+    if (m_impl->resampler) return fill_resampled_audio();
+
+    double pts = -1.0;
+    if (!copy_reader_audio(m_impl->audio_buf, pts)) {
+        m_impl->audio_buf.clear();
+        return false;
+    }
+    m_impl->audio_buf_pos = 0;
+    m_impl->audio_buf_start_pts = pts;
+    return true;
 }
 
 double AvbDecoderAVFoundation::audio_next_pts() {
@@ -624,6 +930,7 @@ int AvbDecoderAVFoundation::read_audio_f32(float *dst_interleaved, int frames) {
     if (!m_impl->audio_output) return 0;
 
     int nb_channels    = m_impl->channels;
+    if (nb_channels <= 0) return 0;
     int samples_needed = frames * nb_channels;
     int samples_written = 0;
 
@@ -659,7 +966,8 @@ avb_result AvbDecoderAVFoundation::read_custom_video_frame(avb_video_frame &out_
         @autoreleasepool {
             CMSampleBufferRef sample_buf =
                 [m_impl->video_output copyNextSampleBuffer];
-            if (!sample_buf) return AVB_ERROR_EOF;
+            if (!sample_buf)
+                return reader_failed() ? AVB_ERROR_DECODE_FAILED : AVB_ERROR_EOF;
 
             CMSampleBufferMakeDataReady(sample_buf);
             CMBlockBufferRef block = CMSampleBufferGetDataBuffer(sample_buf);
@@ -676,21 +984,31 @@ avb_result AvbDecoderAVFoundation::read_custom_video_frame(avb_video_frame &out_
             m_impl->video_frame_buf.resize(len);
             CMBlockBufferCopyDataBytes(block, 0, len, m_impl->video_frame_buf.data());
 
+            // DTS and duration count in the PTS timescale the packet names.
             CMTime pts = CMSampleBufferGetPresentationTimeStamp(sample_buf);
             CMTime dts = CMSampleBufferGetDecodeTimeStamp(sample_buf);
             CMTime dur = CMSampleBufferGetDuration(sample_buf);
+            const bool has_pts = CMTIME_IS_NUMERIC(pts);
+            if (has_pts) {
+                if (CMTIME_IS_NUMERIC(dts))
+                    dts = CMTimeConvertScale(dts, pts.timescale,
+                                             kCMTimeRoundingMethod_RoundHalfAwayFromZero);
+                if (CMTIME_IS_NUMERIC(dur))
+                    dur = CMTimeConvertScale(dur, pts.timescale,
+                                             kCMTimeRoundingMethod_RoundHalfAwayFromZero);
+            }
 
             avb_encoded_packet packet{};
             packet.data = m_impl->video_frame_buf.data();
             packet.size = (int)len;
-            packet.pts_sec = CMTIME_IS_VALID(pts) ? CMTimeGetSeconds(pts) : -1.0;
-            packet.duration_sec = CMTIME_IS_VALID(dur) ? CMTimeGetSeconds(dur) : -1.0;
+            packet.pts_sec = has_pts ? CMTimeGetSeconds(pts) : -1.0;
+            packet.duration_sec = CMTIME_IS_NUMERIC(dur) ? CMTimeGetSeconds(dur) : -1.0;
             packet.stream_index = m_impl->video_stream_idx;
-            packet.pts = CMTIME_IS_VALID(pts) ? pts.value : -1;
-            packet.dts = CMTIME_IS_VALID(dts) ? dts.value : packet.pts;
-            packet.duration = CMTIME_IS_VALID(dur) ? dur.value : -1;
+            packet.pts = has_pts ? pts.value : -1;
+            packet.dts = has_pts && CMTIME_IS_NUMERIC(dts) ? dts.value : packet.pts;
+            packet.duration = has_pts && CMTIME_IS_NUMERIC(dur) ? dur.value : -1;
             packet.time_base_num = 1;
-            packet.time_base_den = CMTIME_IS_VALID(pts) ? (int)pts.timescale : 1;
+            packet.time_base_den = has_pts ? (int)pts.timescale : 1;
             packet.keyframe = 1;
 
             CFArrayRef attachments =
@@ -716,6 +1034,11 @@ avb_result AvbDecoderAVFoundation::read_custom_video_frame(avb_video_frame &out_
 }
 
 avb_result AvbDecoderAVFoundation::read_video_frame(avb_video_frame &out_frame) {
+    return avb_objc_guard(m_last_error, AVB_ERROR_DECODE_FAILED,
+                          [&] { return read_video_frame_impl(out_frame); });
+}
+
+avb_result AvbDecoderAVFoundation::read_video_frame_impl(avb_video_frame &out_frame) {
     if (m_impl->end_of_stream) return AVB_ERROR_EOF;
     if (m_impl->custom_video_decoder) return read_custom_video_frame(out_frame);
     if (!m_impl->video_output) return AVB_ERROR_STREAM_NOT_FOUND;
@@ -723,13 +1046,15 @@ avb_result AvbDecoderAVFoundation::read_video_frame(avb_video_frame &out_frame) 
     @autoreleasepool {
         CMSampleBufferRef sample_buf =
             [m_impl->video_output copyNextSampleBuffer];
-        if (!sample_buf) return AVB_ERROR_EOF;
+        if (!sample_buf)
+            return reader_failed() ? AVB_ERROR_DECODE_FAILED : AVB_ERROR_EOF;
 
         CMTime pts = CMSampleBufferGetPresentationTimeStamp(sample_buf);
 
         CVImageBufferRef image = CMSampleBufferGetImageBuffer(sample_buf);
         if (!image) {
             CFRelease(sample_buf);
+            m_last_error = "AVAssetReader returned a video sample without an image.";
             return AVB_ERROR_DECODE_FAILED;
         }
 
@@ -748,7 +1073,9 @@ avb_result AvbDecoderAVFoundation::read_video_frame(avb_video_frame &out_frame) 
             out_frame.memory_type = AVB_VIDEO_MEMORY_EXTERNAL;
             out_frame.external_type =
                 AVB_VIDEO_EXTERNAL_CVPIXEL_BUFFER;
-            out_frame.hardware_device = AVB_HW_DEVICE_VIDEOTOOLBOX;
+            // A CVPixelBuffer from the software decoder is still one; the
+            // frame says which decoder made it, as CPU frames do.
+            out_frame.hardware_device = m_impl->hardware_device();
             avb_fill_color(pb, out_frame);
             out_frame.plane_count = 0;
             out_frame.native_handle = pb;
@@ -762,6 +1089,62 @@ avb_result AvbDecoderAVFoundation::read_video_frame(avb_video_frame &out_frame) 
 
         size_t width  = CVPixelBufferGetWidth(image);
         size_t height = CVPixelBufferGetHeight(image);
+
+        out_frame = {};
+        out_frame.width       = (int)width;
+        out_frame.height      = (int)height;
+        out_frame.format      = m_impl->video_avb_fmt;
+        out_frame.pts_sec     = CMTimeGetSeconds(pts);
+        out_frame.memory_type = AVB_VIDEO_MEMORY_CPU;
+        // A frame copied out of the GPU's decoder still says what decoded it.
+        out_frame.hardware_device = m_impl->hardware_device();
+        avb_fill_color(image, out_frame);
+        for (int p = 0; p < AVB_MAX_PLANES; ++p) out_frame.dmabuf_fd[p] = -1;
+
+        if (m_impl->split_nv12_to_i420) {
+            // NV12 from the reader, split into tightly packed I420 planes.
+            const AvbPlaneLayout layout = avb_plane_layout(
+                AVB_PIXEL_FORMAT_I420, (int)width, (int)height, 1);
+            m_impl->video_frame_buf.resize(layout.total);
+            unsigned char *dst = m_impl->video_frame_buf.data();
+
+            const auto *src_y = static_cast<const unsigned char *>(
+                CVPixelBufferGetBaseAddressOfPlane(image, 0));
+            const size_t src_y_stride = CVPixelBufferGetBytesPerRowOfPlane(image, 0);
+            const auto *src_uv = static_cast<const unsigned char *>(
+                CVPixelBufferGetBaseAddressOfPlane(image, 1));
+            const size_t src_uv_stride = CVPixelBufferGetBytesPerRowOfPlane(image, 1);
+
+            unsigned char *y = dst + layout.offset[0];
+            for (int r = 0; r < layout.rows[0]; ++r)
+                memcpy(y + (size_t)r * layout.stride[0],
+                       src_y + (size_t)r * src_y_stride, (size_t)layout.stride[0]);
+            unsigned char *u = dst + layout.offset[1];
+            unsigned char *v = dst + layout.offset[2];
+            for (int r = 0; r < layout.rows[1]; ++r) {
+                const unsigned char *row = src_uv + (size_t)r * src_uv_stride;
+                unsigned char *ur = u + (size_t)r * layout.stride[1];
+                unsigned char *vr = v + (size_t)r * layout.stride[2];
+                for (int x = 0; x < layout.stride[1]; ++x) {
+                    ur[x] = row[2 * x];
+                    vr[x] = row[2 * x + 1];
+                }
+            }
+
+            out_frame.plane_count = 3;
+            out_frame.data_size   = (int)layout.total;
+            for (int p = 0; p < 3; ++p) {
+                out_frame.plane_data[p]   = dst + layout.offset[p];
+                out_frame.plane_stride[p] = layout.stride[p];
+                out_frame.plane_offset[p] = (int)layout.offset[p];
+            }
+            out_frame.data   = out_frame.plane_data[0];
+            out_frame.stride = out_frame.plane_stride[0];
+
+            CVPixelBufferUnlockBaseAddress(image, kCVPixelBufferLock_ReadOnly);
+            CFRelease(sample_buf);
+            return AVB_OK;
+        }
 
         // CVPixelBuffer may be packed (plane count 0) or planar (e.g. NV12 has
         // two planes). Gather each plane's source pointer/stride/rows, then copy
@@ -796,18 +1179,8 @@ avb_result AvbDecoderAVFoundation::read_video_frame(avb_video_frame &out_frame) 
         m_impl->video_frame_buf.resize(total);
         unsigned char *dst = m_impl->video_frame_buf.data();
 
-        out_frame = {};
-        out_frame.width       = (int)width;
-        out_frame.height      = (int)height;
-        out_frame.format      = m_impl->video_avb_fmt;
-        out_frame.pts_sec     = CMTimeGetSeconds(pts);
-        out_frame.memory_type = AVB_VIDEO_MEMORY_CPU;
-        // A frame copied out of the GPU's decoder still says what decoded it.
-        out_frame.hardware_device = m_impl->hardware_device();
-        avb_fill_color(image, out_frame);
         out_frame.plane_count = (int)plane_count;
         out_frame.data_size   = (int)total;
-        for (int p = 0; p < AVB_MAX_PLANES; ++p) out_frame.dmabuf_fd[p] = -1;
 
         size_t offset = 0;
         for (size_t p = 0; p < plane_count; ++p) {
@@ -874,6 +1247,7 @@ avb_result AvbDecoderAVFoundation::get_media_info(avb_media_info &) {
 avb_result AvbDecoderAVFoundation::seek(double) { return AVB_ERROR_BACKEND_NOT_AVAILABLE; }
 int AvbDecoderAVFoundation::read_audio_f32(float *, int) { return 0; }
 double AvbDecoderAVFoundation::audio_next_pts() { return -1.0; }
+bool AvbDecoderAVFoundation::audio_read_failed() const { return false; }
 avb_result AvbDecoderAVFoundation::read_video_frame(avb_video_frame &) {
     return AVB_ERROR_BACKEND_NOT_AVAILABLE;
 }
