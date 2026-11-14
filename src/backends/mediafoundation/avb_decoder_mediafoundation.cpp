@@ -5,6 +5,7 @@
 #include "avb_mediafoundation_decode_types.hpp"
 #include "avb_mediafoundation_edits.hpp"
 #include "avb_mediafoundation_ivf.hpp"
+#include "avb_mediafoundation_network.hpp"
 
 #ifdef _WIN32
 
@@ -176,6 +177,11 @@ struct AvbDecoderMediaFoundation::Impl {
     LONGLONG seek_shift  = 0;
 
     bool mf_initialized = false;
+    // Media Foundation started again with its sockets, for a network URL:
+    // the decoder's own start leaves them out, which a file never needs and
+    // the network source cannot do without (MF_E_PLATFORM_NOT_INITIALIZED).
+    // Held until the decoder goes.
+    std::unique_ptr<MfStartupScope> network_startup;
 
     void *retain_native_frame(IMFSample *sample, ID3D11Texture2D *texture) {
         auto lease = std::make_unique<NativeFrameLease>();
@@ -579,12 +585,45 @@ avb_result AvbDecoderMediaFoundation::open_file(const char *path, const avb_deco
         m_impl->source_native_output = true;
     }
 
-    HRESULT hr = MFCreateSourceReaderFromURL(wpath.c_str(), attrs.Get(), &m_impl->reader);
-    if (FAILED(hr)) {
-        char buf[128];
-        snprintf(buf, sizeof(buf), "MFCreateSourceReaderFromURL failed: 0x%08lx", hr);
-        m_last_error = buf;
-        return AVB_ERROR_OPEN_FAILED;
+    // A URL naming a user (an IP camera's rtsp://user:password@...): the
+    // network source does not read them from the URL, so they go to its
+    // credential manager and the URL goes without them.
+    const MfUrlCredentials credentials = mf_split_url_credentials(wpath);
+    const bool network = wpath.find(L"://") != std::wstring::npos &&
+                         _wcsnicmp(wpath.c_str(), L"file:", 5) != 0;
+    if (network && !m_impl->network_startup)
+        m_impl->network_startup =
+            std::make_unique<MfStartupScope>(MFSTARTUP_FULL);
+    HRESULT hr = S_OK;
+    if (credentials.present) {
+        ComPtr<IMFMediaSource> source;
+        hr = mf_create_network_source(credentials.url, credentials.user,
+                                      credentials.password, &source);
+        // The reader shuts the source down when it goes.
+        if (SUCCEEDED(hr))
+            hr = MFCreateSourceReaderFromMediaSource(source.Get(), attrs.Get(),
+                                                     &m_impl->reader);
+        if (FAILED(hr)) {
+            if (source) source->Shutdown();
+            char buf[160];
+            snprintf(buf, sizeof(buf),
+                     hr == E_ACCESSDENIED
+                         ? "The server refused the user and password: 0x%08lx"
+                         : "Opening the network source failed: 0x%08lx",
+                     hr);
+            m_last_error = buf;
+            return AVB_ERROR_OPEN_FAILED;
+        }
+    } else {
+        hr = MFCreateSourceReaderFromURL(wpath.c_str(), attrs.Get(),
+                                         &m_impl->reader);
+        if (FAILED(hr)) {
+            char buf[128];
+            snprintf(buf, sizeof(buf),
+                     "MFCreateSourceReaderFromURL failed: 0x%08lx", hr);
+            m_last_error = buf;
+            return AVB_ERROR_OPEN_FAILED;
+        }
     }
 
     int found_audio = -1, found_video = -1, audio_count = 0;

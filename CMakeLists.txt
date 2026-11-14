@@ -51,6 +51,7 @@ if(AVB_ENABLE_MEDIAFOUNDATION)
         src/backends/mediafoundation/avb_mediafoundation_edits.cpp
         src/backends/mediafoundation/avb_mediafoundation_encode_types.cpp
         src/backends/mediafoundation/avb_mediafoundation_ivf.cpp
+        src/backends/mediafoundation/avb_mediafoundation_network.cpp
         src/backends/mediafoundation/avb_decoder_mediafoundation.cpp
         src/backends/mediafoundation/avb_encoder_mediafoundation.cpp
     )
@@ -111,7 +112,7 @@ target_include_directories(avbridge
 
 if(AVB_ENABLE_MEDIAFOUNDATION)
     target_compile_definitions(avbridge PRIVATE AVB_ENABLE_MEDIAFOUNDATION)
-    target_link_libraries(avbridge PRIVATE mfplat mf mfreadwrite mfuuid wmcodecdspuuid ole32 d3d11 dxgi)
+    target_link_libraries(avbridge PRIVATE mfplat mf mfreadwrite mfuuid wmcodecdspuuid ole32 propsys d3d11 dxgi)
 endif()
 
 if(AVB_ENABLE_AVFOUNDATION)

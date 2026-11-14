@@ -79,6 +79,13 @@ if(AVB_ENABLE_MEDIAFOUNDATION)
     target_link_libraries(avb_mediafoundation_frames PRIVATE mfplat mfuuid)
     avb_add_ctest(frame_layout_mediafoundation avb_mediafoundation_frames
         "platform;decode;backend-mediafoundation")
+    avb_add_test_binary(avb_mediafoundation_network platform/mediafoundation_network.cpp)
+    target_sources(avb_mediafoundation_network PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/backends/mediafoundation/avb_mediafoundation_network.cpp)
+    target_include_directories(avb_mediafoundation_network PRIVATE ${PROJECT_SOURCE_DIR}/src)
+    target_link_libraries(avb_mediafoundation_network PRIVATE mfplat mf mfuuid propsys ole32)
+    avb_add_ctest(network_mediafoundation avb_mediafoundation_network
+        "platform;network;backend-mediafoundation")
     avb_add_test_binary(
         avb_mediafoundation_runtime_codecs
         platform/mediafoundation.cpp)
