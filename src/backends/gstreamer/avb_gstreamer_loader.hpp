@@ -75,6 +75,7 @@ struct AvbGstFuncs {
     GstCaps *(*gst_pad_get_current_caps)(GstPad *);
     const GValue *(*gst_structure_get_value)(const GstStructure *, const gchar *);
     GType (*gst_buffer_get_type)(void);
+    gboolean (*gst_pad_send_event)(GstPad *, GstEvent *);
 
     // libgstapp-1.0
     GstSample *(*gst_app_sink_pull_sample)(GstAppSink *);
@@ -102,6 +103,7 @@ struct AvbGstFuncs {
                                                     GstVideoFormat, gint, gint, guint,
                                                     gsize *, gint *);
     GType (*gst_video_meta_api_get_type)(void);
+    GstEvent *(*gst_video_event_new_upstream_force_key_unit)(GstClockTime, gboolean, guint);
 
     // libgstallocators-1.0
     GstAllocator *(*gst_dmabuf_allocator_new)(void);

@@ -91,6 +91,43 @@ The caller must release decoded frames with
 `avb_decoder_release_video_frame`. For encoder input, the caller retains
 ownership until `avb_encoder_write_video` returns.
 
+## Elementary Streams
+
+`avb_stream_encoder` and `avb_stream_decoder` encode frames into codec
+packets and decode packets into frames without a container, for transports
+that packetize or mux themselves (RTP/WebRTC, HLS, RTSP, RTMP). Each object
+carries one track and follows a send/receive model:
+
+```c
+avb_video_stream_encode_params p = avb_video_stream_encode_params_default();
+p.video.width = 1280; p.video.height = 720; p.video.frame_rate = 30;
+p.profile = AVB_VIDEO_PROFILE_H264_CONSTRAINED_BASELINE;
+p.low_latency = 1;                       /* no B-frames, no lookahead */
+avb_stream_encoder *enc;
+avb_stream_encoder_open_video(&enc, &p);
+avb_stream_encoder_send_video(enc, &frame, pts_sec);
+while (avb_stream_encoder_receive_packet(enc, &pkt) == AVB_OK) { /* send pkt */ }
+avb_stream_encoder_request_keyframe(enc); /* e.g. on RTCP PLI */
+avb_stream_encoder_set_bitrate(enc, 800000);
+```
+
+- H.264/HEVC come out as Annex-B (or 4-byte length prefixes), with the
+  parameter sets repeated on every IDR; `avb_stream_encoder_get_info` gives
+  avcC/hvcC once the first keyframe is out. AAC is raw with an
+  AudioSpecificConfig, Opus raw with an OpusHead.
+- The decoder takes either framing plus optional avcC/hvcC/Annex-B
+  parameter sets, drops packets until a keyframe with known parameter sets
+  arrives (after open and after `avb_stream_decoder_reset`), and follows
+  mid-stream size changes.
+- Timestamps: 1/90000 for video, 1/sample_rate for audio.
+
+| Backend | Video | Audio | Hardware |
+| --- | --- | --- | --- |
+| Media Foundation | H.264, HEVC (+VP8/VP9/AV1 where MFTs exist) | AAC | hardware encoder MFTs, D3D11 decode; D3D11 NV12 texture in/out |
+| FFmpeg | H.264, HEVC, VP8, VP9, AV1 | AAC, Opus | NVENC/AMF/QSV/VideoToolbox/V4L2 M2M encoders; software decode |
+| GStreamer | H.264, HEVC, VP8, VP9, AV1 | AAC, Opus | nvv4l2 (Jetson), v4l2 (Raspberry Pi), VA, NVENC encoders; decodebin |
+| AVFoundation | H.264, HEVC (VideoToolbox) | AAC (+Opus where AudioToolbox has it) | VideoToolbox; CVPixelBuffer in/out |
+
 ## Custom Video Codecs
 
 Applications can register process-wide codecs with:

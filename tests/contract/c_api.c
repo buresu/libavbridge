@@ -38,8 +38,19 @@ int main(void) {
   check(strcmp(avb_result_string(AVB_ERROR_EOF), "AVB_ERROR_EOF") == 0,
         "C result string");
 
+  {
+    avb_video_stream_encode_params video = avb_video_stream_encode_params_default();
+    avb_audio_stream_encode_params audio = avb_audio_stream_encode_params_default();
+    avb_stream_decode_params stream_decode = avb_stream_decode_params_default();
+    check(video.bitstream == AVB_BITSTREAM_AUTO, "C stream video default bitstream");
+    check(audio.audio.codec == AVB_AUDIO_CODEC_AUTO, "C stream audio default codec");
+    check(stream_decode.video_memory == AVB_VIDEO_MEMORY_CPU, "C stream decode default memory");
+  }
+
   avb_decoder_close(NULL);
   avb_encoder_close(NULL);
+  avb_stream_encoder_close(NULL);
+  avb_stream_decoder_close(NULL);
 
   if (failures != 0) {
     fprintf(stderr, "c_api_contract: %d failure(s)\n", failures);

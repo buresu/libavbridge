@@ -62,6 +62,10 @@ if(AVB_ENABLE_GSTREAMER)
     target_link_directories(avb_gstreamer_errors PRIVATE ${GST_LIBRARY_DIRS})
     target_link_libraries(avb_gstreamer_errors PRIVATE ${GST_LIBRARIES})
 endif()
+avb_add_test_binary(avb_bitstream_contract contract/bitstream.cpp)
+target_sources(avb_bitstream_contract PRIVATE ${PROJECT_SOURCE_DIR}/src/avb_bitstream.cpp)
+target_include_directories(avb_bitstream_contract PRIVATE ${PROJECT_SOURCE_DIR}/src)
+avb_add_test_binary(avb_stream_roundtrip integration/stream.cpp)
 avb_add_test_binary(avb_roundtrip integration/roundtrip.cpp)
 avb_add_test_binary(avb_codecs integration/codecs.cpp)
 avb_add_test_binary(avb_custom_decoder integration/custom_decoder.cpp)
@@ -125,6 +129,17 @@ avb_add_ctest(
     api_contract avb_api_contract "contract;api")
 avb_add_ctest(
     c_api_contract avb_c_api_contract "contract;api;c-abi")
+avb_add_ctest(
+    bitstream_contract avb_bitstream_contract "contract;stream")
+
+# Elementary-stream round trips need no fixture: the frames are synthetic.
+foreach(be gstreamer ffmpeg mediafoundation avfoundation)
+    string(TOUPPER "${be}" _be_upper)
+    if(AVB_ENABLE_${_be_upper})
+        avb_add_ctest(stream_roundtrip_${be} avb_stream_roundtrip
+            "integration;stream;backend-${be}" ${be})
+    endif()
+endforeach()
 
 find_program(FFMPEG_EXECUTABLE ffmpeg)
 find_program(FFPROBE_EXECUTABLE ffprobe)

@@ -105,6 +105,7 @@ bool avb_gst_load(AvbGstFuncs &out_funcs, char *err_buf, int err_buf_size) {
     LOAD_SYM(g_handle_gst, out_funcs, gst_pad_get_current_caps);
     LOAD_SYM(g_handle_gst, out_funcs, gst_structure_get_value);
     LOAD_SYM(g_handle_gst, out_funcs, gst_buffer_get_type);
+    LOAD_SYM(g_handle_gst, out_funcs, gst_pad_send_event);
 
     LOAD_SYM(g_handle_gstapp, out_funcs, gst_app_sink_pull_sample);
     LOAD_SYM(g_handle_gstapp, out_funcs, gst_app_sink_try_pull_sample);
@@ -126,6 +127,7 @@ bool avb_gst_load(AvbGstFuncs &out_funcs, char *err_buf, int err_buf_size) {
     LOAD_SYM(g_handle_gstvideo, out_funcs, gst_buffer_get_video_meta);
     LOAD_SYM(g_handle_gstvideo, out_funcs, gst_buffer_add_video_meta_full);
     LOAD_SYM(g_handle_gstvideo, out_funcs, gst_video_meta_api_get_type);
+    LOAD_SYM(g_handle_gstvideo, out_funcs, gst_video_event_new_upstream_force_key_unit);
 
     LOAD_SYM(g_handle_gstallocators, out_funcs, gst_dmabuf_allocator_new);
     LOAD_SYM(g_handle_gstallocators, out_funcs, gst_dmabuf_allocator_alloc);

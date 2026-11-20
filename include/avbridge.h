@@ -26,7 +26,7 @@ extern "C" {
 #endif
 
 #define AVB_VERSION_MAJOR 0
-#define AVB_VERSION_MINOR 6
+#define AVB_VERSION_MINOR 7
 #define AVB_VERSION_PATCH 0
 
 #define AVB_MAX_NAME 64
@@ -906,6 +906,270 @@ AVB_API const char *avb_encoder_get_last_error(
 
 AVB_API void avb_encoder_close(
     avb_encoder *enc
+);
+
+/* ------------------------------------------------------------------------- *
+ * Elementary streams
+ *
+ * Encode frames into codec packets, or decode codec packets into frames,
+ * without a container. This is what network transports (RTP/WebRTC, HLS
+ * segmenters, RTSP, RTMP) need: they packetize or mux the packets themselves.
+ *
+ * Each object carries exactly one track (video or audio). The model is
+ * send/receive: send input, then call receive until it returns
+ * AVB_ERROR_AGAIN. Output can lag input (hardware encoders are asynchronous,
+ * B-frames reorder), so a send does not imply a packet is ready.
+ *
+ * Video timestamps use a 1/90000 time base, audio a 1/sample_rate one, in
+ * the packets' pts/dts/duration ticks; pts_sec/duration_sec carry the same
+ * values in seconds. Encoded audio follows the input timeline, so where the
+ * backend reports its priming (encoder_delay) the first packets start before
+ * the first input sample, at negative or earlier timestamps.
+ * ------------------------------------------------------------------------- */
+
+/* How H.264/HEVC NAL units are framed inside a packet. VP8/VP9/AV1/AAC/Opus
+ * packets are always passed as the codec's raw frame. */
+typedef enum avb_bitstream_format {
+    /* Encoder output: Annex-B. Decoder input: detected per packet (a leading
+     * start code means Annex-B, anything else 4-byte length prefixes, or the
+     * NAL length size declared by avcC/hvcC extradata). */
+    AVB_BITSTREAM_AUTO = 0,
+    AVB_BITSTREAM_ANNEXB,          /* 00 00 00 01 start codes */
+    AVB_BITSTREAM_LENGTH_PREFIXED, /* 4-byte big-endian NAL lengths (avcC/hvcC style) */
+} avb_bitstream_format;
+
+typedef enum avb_rate_control {
+    AVB_RATE_CONTROL_AUTO = 0,
+    AVB_RATE_CONTROL_CBR,
+    AVB_RATE_CONTROL_VBR, /* peak limited by max_bitrate when it is set */
+} avb_rate_control;
+
+typedef enum avb_video_profile {
+    AVB_VIDEO_PROFILE_AUTO = 0,
+    AVB_VIDEO_PROFILE_H264_CONSTRAINED_BASELINE, /* WebRTC's mandatory profile */
+    AVB_VIDEO_PROFILE_H264_BASELINE,
+    AVB_VIDEO_PROFILE_H264_MAIN,
+    AVB_VIDEO_PROFILE_H264_HIGH,
+    AVB_VIDEO_PROFILE_HEVC_MAIN,
+} avb_video_profile;
+
+typedef struct avb_video_stream_encode_params {
+    avb_backend backend;
+    /* Size, codec, input memory and hardware selection, as for file encoding.
+     * `enable` is ignored. bitrate 0 selects 2 Mbps. */
+    avb_video_encode_params video;
+    avb_video_profile profile;
+    int gop_size;              /* frames between IDR frames, 0 = backend default */
+    int max_b_frames;          /* 0 = none, -1 = backend default */
+    /* 1 = no lookahead and no reordering: each frame is emitted as soon as it
+     * is encoded (implies max_b_frames = 0). */
+    int low_latency;
+    avb_rate_control rate_control;
+    int max_bitrate;           /* bits/sec peak for VBR, 0 = unset */
+    /* 1 = every IDR carries the parameter sets (VPS/SPS/PPS) in-band, added
+     * by avbridge when the encoder leaves them out, so that a receiver that
+     * joins mid-stream can start at any keyframe. */
+    int repeat_parameter_sets;
+    avb_bitstream_format bitstream;
+} avb_video_stream_encode_params;
+
+typedef struct avb_audio_stream_encode_params {
+    avb_backend backend;
+    /* Rate, channels and codec (AUTO = AAC). `enable` is ignored. */
+    avb_audio_encode_params audio;
+} avb_audio_stream_encode_params;
+
+/* What a stream encoder produces or a stream decoder currently outputs. */
+typedef struct avb_stream_info {
+    int is_video;
+    avb_backend backend;
+    const char *backend_name;     /* static string */
+    const char *codec_name;       /* static string, e.g. "h264", "aac" */
+    avb_video_codec video_codec;
+    avb_audio_codec audio_codec;
+    int width;                    /* decoder: size of the last frame, 0 before */
+    int height;
+    double frame_rate;
+    int sample_rate;              /* decoder: of the decoded audio, 0 before */
+    int channels;
+    /* Audio samples the encoder adds before the first input sample (AAC
+     * priming, Opus pre-skip), 0 when the backend does not report it. A muxer
+     * writes it as an edit list or pre-skip. */
+    int encoder_delay;
+    avb_bitstream_format bitstream; /* resolved packet framing (video H.264/HEVC) */
+    /* Codec configuration: avcC/hvcC for H.264/HEVC (available once the
+     * first keyframe has been received), AudioSpecificConfig for AAC,
+     * OpusHead for Opus. NULL/0 when not known yet. Valid until the next
+     * call on the same object. */
+    const unsigned char *extradata;
+    int extradata_size;
+    int time_base_num;
+    int time_base_den;
+    /* Hardware the codec runs on, AUTO for software or unknown. */
+    avb_hardware_device hardware_device;
+} avb_stream_info;
+
+typedef struct avb_stream_encoder avb_stream_encoder;
+
+AVB_API avb_video_stream_encode_params avb_video_stream_encode_params_default(void);
+AVB_API avb_audio_stream_encode_params avb_audio_stream_encode_params_default(void);
+
+/* On failure a non-NULL *out is still returned so the caller can read
+ * avb_stream_encoder_get_last_error(); release it with avb_stream_encoder_close. */
+AVB_API avb_result avb_stream_encoder_open_video(
+    avb_stream_encoder **out,
+    const avb_video_stream_encode_params *params
+);
+
+AVB_API avb_result avb_stream_encoder_open_audio(
+    avb_stream_encoder **out,
+    const avb_audio_stream_encode_params *params
+);
+
+AVB_API avb_result avb_stream_encoder_get_info(
+    avb_stream_encoder *enc,
+    avb_stream_info *out
+);
+
+/* Timestamp order as avb_encoder_write_video: the argument, then
+ * frame->pts_sec, then the frame count over frame_rate. Timestamps must
+ * increase. */
+AVB_API avb_result avb_stream_encoder_send_video(
+    avb_stream_encoder *enc,
+    const avb_video_frame *frame,
+    double pts_sec
+);
+
+/* Interleaved float samples. The first call's pts_sec (0 when negative) is
+ * the stream's start; later timestamps follow from the running sample count
+ * and their pts_sec is ignored. */
+AVB_API avb_result avb_stream_encoder_send_audio_f32(
+    avb_stream_encoder *enc,
+    const float *src_interleaved,
+    int frames,
+    double pts_sec
+);
+
+/* AVB_OK fills *out; its data stays valid until the next receive, flush or
+ * close. AVB_ERROR_AGAIN: nothing ready yet. AVB_ERROR_EOF: flushed and
+ * fully drained. */
+AVB_API avb_result avb_stream_encoder_receive_packet(
+    avb_stream_encoder *enc,
+    avb_encoded_packet *out
+);
+
+/* The next video frame sent is encoded as an IDR frame (e.g. on an RTCP PLI). */
+AVB_API avb_result avb_stream_encoder_request_keyframe(
+    avb_stream_encoder *enc
+);
+
+/* Change the target bitrate while encoding (congestion control). Fails when
+ * the backend's encoder cannot be reconfigured live. */
+AVB_API avb_result avb_stream_encoder_set_bitrate(
+    avb_stream_encoder *enc,
+    int bitrate
+);
+
+/* End of input: buffered frames are encoded. Keep receiving until
+ * AVB_ERROR_EOF. Sends are rejected afterwards. */
+AVB_API avb_result avb_stream_encoder_flush(
+    avb_stream_encoder *enc
+);
+
+AVB_API const char *avb_stream_encoder_get_last_error(
+    avb_stream_encoder *enc
+);
+
+AVB_API void avb_stream_encoder_close(
+    avb_stream_encoder *enc
+);
+
+typedef struct avb_stream_decode_params {
+    avb_backend backend;
+    int is_video;
+    avb_video_codec video_codec;  /* is_video: AUTO = H.264 */
+    avb_audio_codec audio_codec;  /* audio: AUTO = AAC */
+    /* Optional codec configuration, copied at open: avcC/hvcC or Annex-B
+     * parameter sets (e.g. from SDP sprop-parameter-sets) for H.264/HEVC,
+     * AudioSpecificConfig for AAC (required), OpusHead for Opus (optional).
+     * In-band parameter sets are picked up as they arrive. */
+    const unsigned char *extradata;
+    int extradata_size;
+    avb_bitstream_format bitstream;
+    int sample_rate;              /* audio: required for Opus without OpusHead */
+    int channels;
+    /* 1 = output each frame as soon as it is decoded (no reorder buffering);
+     * for streams without B-frames such as WebRTC's. */
+    int low_latency;
+    avb_pixel_format video_format;          /* UNKNOWN = BGRA8 */
+    avb_video_memory_type video_memory;
+    avb_video_external_type video_external_type;
+    avb_hardware_policy hardware_policy;
+    avb_hardware_device hardware_device;
+    void *hardware_context;       /* as avb_decode_options::hardware_context */
+} avb_stream_decode_params;
+
+typedef struct avb_stream_decoder avb_stream_decoder;
+
+AVB_API avb_stream_decode_params avb_stream_decode_params_default(void);
+
+/* On failure a non-NULL *out is still returned for avb_stream_decoder_get_last_error(). */
+AVB_API avb_result avb_stream_decoder_open(
+    avb_stream_decoder **out,
+    const avb_stream_decode_params *params
+);
+
+/* Feed one access unit (one video frame, or one audio frame). Timestamps
+ * come from pts + time_base when both are set, else pts_sec. NULL flushes:
+ * receive the remaining output until AVB_ERROR_EOF.
+ *
+ * H.264/HEVC packets are dropped (AVB_OK, nothing decoded) until a keyframe
+ * with known parameter sets arrives, after open and after reset. */
+AVB_API avb_result avb_stream_decoder_send_packet(
+    avb_stream_decoder *dec,
+    const avb_encoded_packet *packet
+);
+
+/* The frame size can change mid-stream (a new SPS): read width/height from
+ * every frame. Release each frame with avb_stream_decoder_release_video_frame. */
+AVB_API avb_result avb_stream_decoder_receive_video_frame(
+    avb_stream_decoder *dec,
+    avb_video_frame *out
+);
+
+AVB_API void avb_stream_decoder_release_video_frame(
+    avb_stream_decoder *dec,
+    avb_video_frame *frame
+);
+
+/* Up to max_frames interleaved float frames at the decoded rate/channels
+ * (see avb_stream_decoder_get_info). AVB_OK with *out_frames > 0, or
+ * AVB_ERROR_AGAIN / AVB_ERROR_EOF. */
+AVB_API avb_result avb_stream_decoder_receive_audio_f32(
+    avb_stream_decoder *dec,
+    float *dst_interleaved,
+    int max_frames,
+    int *out_frames,
+    double *out_pts_sec
+);
+
+AVB_API avb_result avb_stream_decoder_get_info(
+    avb_stream_decoder *dec,
+    avb_stream_info *out
+);
+
+/* Drop buffered input and output, e.g. after packet loss, and wait for the
+ * next keyframe. Parameter sets already seen are kept. */
+AVB_API avb_result avb_stream_decoder_reset(
+    avb_stream_decoder *dec
+);
+
+AVB_API const char *avb_stream_decoder_get_last_error(
+    avb_stream_decoder *dec
+);
+
+AVB_API void avb_stream_decoder_close(
+    avb_stream_decoder *dec
 );
 
 #ifdef __cplusplus

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(avbridge VERSION 0.6.0 LANGUAGES C CXX)
+project(avbridge VERSION 0.7.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -28,6 +28,7 @@ endif()
 
 set(AVB_SOURCES
     src/avb_backend_factory.cpp
+    src/avb_bitstream.cpp
     src/avb_decoder.cpp
     src/avb_decoder_base.cpp
     src/avb_decoder_validation.cpp
@@ -38,6 +39,7 @@ set(AVB_SOURCES
     src/avb_capabilities.cpp
     src/avb_probe.cpp
     src/avb_runtime_capabilities.cpp
+    src/avb_stream.cpp
     src/avb_video_plugins.cpp
 )
 
@@ -54,6 +56,7 @@ if(AVB_ENABLE_MEDIAFOUNDATION)
         src/backends/mediafoundation/avb_mediafoundation_network.cpp
         src/backends/mediafoundation/avb_decoder_mediafoundation.cpp
         src/backends/mediafoundation/avb_encoder_mediafoundation.cpp
+        src/backends/mediafoundation/avb_stream_mediafoundation.cpp
     )
 endif()
 
@@ -63,10 +66,12 @@ if(AVB_ENABLE_AVFOUNDATION)
         src/backends/avfoundation/avb_runtime_avfoundation.cpp
         src/backends/avfoundation/avb_decoder_avfoundation.mm
         src/backends/avfoundation/avb_encoder_avfoundation.mm
+        src/backends/avfoundation/avb_stream_avfoundation.mm
     )
     set_source_files_properties(
         src/backends/avfoundation/avb_decoder_avfoundation.mm
         src/backends/avfoundation/avb_encoder_avfoundation.mm
+        src/backends/avfoundation/avb_stream_avfoundation.mm
         PROPERTIES COMPILE_OPTIONS "-fobjc-arc"
     )
 endif()
@@ -78,6 +83,7 @@ if(AVB_ENABLE_FFMPEG)
         src/backends/ffmpeg/avb_decoder_ffmpeg.cpp
         src/backends/ffmpeg/avb_encoder_ffmpeg.cpp
         src/backends/ffmpeg/avb_ffmpeg_loader.cpp
+        src/backends/ffmpeg/avb_stream_ffmpeg.cpp
     )
 endif()
 
@@ -88,6 +94,7 @@ if(AVB_ENABLE_GSTREAMER)
         src/backends/gstreamer/avb_decoder_gstreamer.cpp
         src/backends/gstreamer/avb_encoder_gstreamer.cpp
         src/backends/gstreamer/avb_gstreamer_loader.cpp
+        src/backends/gstreamer/avb_stream_gstreamer.cpp
     )
 endif()
 
