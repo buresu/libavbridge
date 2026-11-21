@@ -233,14 +233,14 @@ void check_video_packets(const VideoRun &run, bool length_prefixed, avb::test::C
 
 void decode_video(avb_backend backend, const VideoRun &run, const std::vector<uint8_t> *extradata,
                   size_t first_packet, avb::test::Context &test, const char *label,
-                  avb_hardware_policy hardware = AVB_HARDWARE_DISABLED) {
+                  avb_hardware_policy hardware = AVB_HARDWARE_DISABLED, int low_latency = 1) {
   avb_stream_decode_params params = avb_stream_decode_params_default();
   params.backend = backend;
   params.hardware_policy = hardware;
   params.is_video = 1;
   params.video_codec = AVB_VIDEO_CODEC_H264;
   params.video_format = AVB_PIXEL_FORMAT_BGRA8;
-  params.low_latency = 1;
+  params.low_latency = low_latency;
   if (extradata) {
     params.extradata = extradata->data();
     params.extradata_size = (int)extradata->size();
@@ -446,6 +446,12 @@ int main(int argc, char **argv) {
     check_video_packets(hardware, false, test);
     decode_video(backend, hardware, nullptr, 0, test, "hardware", AVB_HARDWARE_PREFER);
   }
+
+  // Without low latency a decoder may hold pictures back to reorder them;
+  // they must still all come out, at the latest on drain.
+  test.section("H.264 decode with reordering");
+  decode_video(backend, annexb, nullptr, 0, test, "reorder", AVB_HARDWARE_DISABLED, 0);
+  decode_video(backend, annexb, nullptr, 0, test, "reorder-hardware", AVB_HARDWARE_PREFER, 0);
 
   test.section("AAC round trip");
   audio_round_trip(backend, AVB_AUDIO_CODEC_AAC, test);

@@ -104,8 +104,16 @@ HRESULT for_each_mft(const GUID &category, const MFT_REGISTER_TYPE_INFO *input,
 }
 
 // Feeds an MFT and collects its output samples, for synchronous MFTs
-// (ProcessInput / ProcessOutput until NEED_MORE_INPUT) and asynchronous
-// ones (METransformNeedInput / METransformHaveOutput events) alike.
+// (ProcessInput / ProcessOutput) and asynchronous ones (METransformNeedInput /
+// METransformHaveOutput events) alike.
+//
+// A synchronous MFT's output is pulled one sample at a time as it is asked
+// for (poll), and on input only when the MFT will not take more without it.
+// An MFT that provides its own samples -- a DXVA decoder handing out D3D11
+// surfaces -- has a fixed pool of them, and while they wait unreleased here
+// ProcessOutput blocks until one comes back: pulling everything it has ready
+// (a reordering decoder releases a burst, a drain all of its pictures)
+// would never return.
 class MfPump {
 public:
     ComPtr<IMFTransform> mft;
@@ -188,12 +196,15 @@ public:
         return MF_E_TRANSFORM_STREAM_CHANGE;
     }
 
-    HRESULT drain_sync() {
-        for (;;) {
-            const HRESULT hr = process_output();
-            if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) return S_OK;
-            if (FAILED(hr)) return hr;
+    // Synchronous: one sample into `outputs` if the MFT has one. Draining,
+    // NEED_MORE_INPUT means it has none left.
+    HRESULT pull_sync() {
+        const HRESULT hr = process_output();
+        if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
+            if (draining) drained = true;
+            return S_OK;
         }
+        return hr;
     }
 
     HRESULT handle_event(IMFMediaEvent *event) {
@@ -241,28 +252,30 @@ public:
             --need_input;
             return S_OK;
         }
-        HRESULT hr = mft->ProcessInput(0, sample, 0);
-        if (hr == MF_E_NOTACCEPTING) {
-            hr = drain_sync();
+        // Refused input means output is waiting: take as much of it as that
+        // takes, and leave the rest in the MFT for poll().
+        for (int attempt = 0; attempt < 64; ++attempt) {
+            HRESULT hr = mft->ProcessInput(0, sample, 0);
+            if (hr != MF_E_NOTACCEPTING) return hr;
+            hr = process_output();
+            if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) continue; // it changed its mind
             if (FAILED(hr)) return hr;
-            hr = mft->ProcessInput(0, sample, 0);
         }
-        if (FAILED(hr)) return hr;
-        return drain_sync();
+        return MF_E_NOTACCEPTING;
     }
 
-    HRESULT poll() { return async ? pump(false, 0, nullptr) : S_OK; }
+    // Before reading `outputs`: an asynchronous MFT's queued events, or the
+    // next sample of a synchronous one when none is waiting here.
+    HRESULT poll() {
+        if (async) return pump(false, 0, nullptr);
+        if (!outputs.empty() || drained) return S_OK;
+        return pull_sync();
+    }
 
     HRESULT begin_drain() {
         draining = true;
         mft->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
-        HRESULT hr = mft->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
-        if (FAILED(hr)) return hr;
-        if (!async) {
-            hr = drain_sync();
-            drained = true;
-        }
-        return hr;
+        return mft->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
     }
 
     // While draining: wait until an output is queued or the drain completes.
